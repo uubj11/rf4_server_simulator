@@ -1462,14 +1462,26 @@ func hWorkshopOrder(ctx *Ctx) ([]byte, bool) {
 		}
 	}
 	costSilver, costGold := silver, gold
-	if useGold {
-		if costGold <= 0 {
-			ctx.Log.Warn("工坊换件：金币价格为 0，拒绝零金额交易", "item", shortGUID(itemGUID))
+	if (useGold && costGold <= 0) || (!useGold && costSilver <= 0) {
+		// 官方客户端会把一次改造拆成两包 21/3 连发（换件 + 收尾确认），
+		// 第二包落在“同型号 = 修理、但耐久已是满值”，算出来必然是 0 元。
+		// 这里不能拒绝：拒绝会让客户端把坏包解析成 InvalidCastException，弹
+		// “发生内部错误”，而第一包其实已经扣费成功，玩家会以为改造没生效。
+		// 零金额改动直接回当前物品树（幂等成功），不扣费、不改库。
+		ctx.Log.Info("工坊换件：本次无需付费（重复提交或已完好），回当前物品树",
+			"item", shortGUID(itemGUID), "gold", useGold, "parts", len(orders))
+		out0, terr0 := srv.ItemToTree(cctx, row)
+		if terr0 != nil {
 			return nil, false
 		}
-	} else if costSilver <= 0 {
-		ctx.Log.Warn("工坊换件：银币价格为 0，拒绝零金额交易", "item", shortGUID(itemGUID))
-		return nil, false
+		body0, berr0 := proto.EncodeValue(out0, ctx.Sess.Table())
+		if berr0 != nil {
+			return nil, false
+		}
+		ctx.AfterResponse(func() {
+			ctx.Sess.Push(4, 22, proto.Args(proto.S("61"), out0))
+		})
+		return body0, true
 	}
 	if clientCost > 0 {
 		quotedCost := costSilver

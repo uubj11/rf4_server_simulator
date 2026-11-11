@@ -26,13 +26,13 @@ func TestSkillGroupAndLinkShareLevels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(2), proto.U32(718))); got != 8 {
+	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(2), proto.U32(718))); got != 89 {
 		t.Fatalf("first learn available=%d", got)
 	}
-	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(2), proto.U32(721))); got != 7 {
+	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(2), proto.U32(721))); got != 88 {
 		t.Fatalf("same-group learn available=%d", got)
 	}
-	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(11), proto.U32(1008))); got != 6 {
+	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(11), proto.U32(1008))); got != 87 {
 		t.Fatalf("cross-category learn available=%d", got)
 	}
 	for _, node := range []int64{718, 721, 1008, 1020} {
@@ -62,7 +62,7 @@ func TestSkillResetByCategoryAndNode(t *testing.T) {
 	srv := sharedSkillTestServer(t, 10)
 	sess := &Session{ID: 1, Userid: sharedSkillUID, Srv: srv}
 
-	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(1), proto.U32(514))); got != 8 {
+	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(1), proto.U32(514))); got != 89 {
 		t.Fatalf("learn available=%d", got)
 	}
 	for _, node := range []int64{514, 701, 313, 1002} {
@@ -70,7 +70,7 @@ func TestSkillResetByCategoryAndNode(t *testing.T) {
 			t.Fatalf("linked node %d rank=%d", node, rank)
 		}
 	}
-	if got := callSkillCommand(t, srv, sess, 3, proto.Args524(proto.U32(1), proto.U32(514))); got != 9 {
+	if got := callSkillCommand(t, srv, sess, 3, proto.Args524(proto.U32(1), proto.U32(514))); got != 90 {
 		t.Fatalf("node reset available=%d", got)
 	}
 	for _, node := range []int64{514, 701, 313, 1002} {
@@ -79,10 +79,10 @@ func TestSkillResetByCategoryAndNode(t *testing.T) {
 		}
 	}
 
-	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(1), proto.U32(514))); got != 8 {
+	if got := callSkillCommand(t, srv, sess, 2, proto.Args524(proto.U32(1), proto.U32(514))); got != 89 {
 		t.Fatalf("second learn available=%d", got)
 	}
-	if got := callSkillCommand(t, srv, sess, 3, proto.Args524(proto.U32(1))); got != 9 {
+	if got := callSkillCommand(t, srv, sess, 3, proto.Args524(proto.U32(1))); got != 90 {
 		t.Fatalf("category reset available=%d", got)
 	}
 	for _, node := range []int64{514, 701, 313, 1002} {

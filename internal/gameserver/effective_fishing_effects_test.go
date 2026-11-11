@@ -158,7 +158,7 @@ func TestGearUnlocks110WithoutCreatingPermanentProficiencyOrPoints(t *testing.T)
 	if pts, _ := srv.DB.GetSkillPoints(ctx, uid, 5); pts != 100 {
 		t.Fatal("gear raised permanent mastery above 100")
 	}
-	if level, _ := srv.DB.GetSkillNode(ctx, uid, 814); level != 1 || srv.skillAvailablePoints(ctx, uid) != 8 {
+	if level, _ := srv.DB.GetSkillNode(ctx, uid, 814); level != 1 || srv.skillAvailablePoints(ctx, uid) != 89 {
 		t.Fatal("unequipping lost learned rank or refunded allocated points")
 	}
 	cat = srv.buildSingleSkill312(ctx, uid, 5)
@@ -189,14 +189,14 @@ func TestGearSkillResetPreservesTemporaryRanksAndAdminPoints(t *testing.T) {
 	st.GearGuid = gear
 	st.mu.Unlock()
 	tree, err := srv.BuildSkillTree311(ctx, uid, ^uint64(0))
-	if err != nil || u32Of(tree.Field(0).Num) != 10 {
+	if err != nil || u32Of(tree.Field(0).Num) != 91 {
 		t.Fatalf("tree points include equipment ranks or exclude administered points: %v %v", tree, err)
 	}
 	sess := &Session{ID: 1, Userid: uid, Srv: srv, log: logging.Discard()}
 	if _, ok := (&handlerBox{srv: srv, sess: sess, main: 5, sub: 3, tree: proto.Args524(proto.U32(11), proto.U32(1004))}).invoke(t); !ok {
 		t.Fatal("node reset was not handled")
 	}
-	if srv.skillAvailablePoints(ctx, uid) != 12 {
+	if srv.skillAvailablePoints(ctx, uid) != 93 {
 		t.Fatal("reset refunded equipment ranks or lost administrative points")
 	}
 	effects, err := srv.effectiveFishingSkills(ctx, uid, gear)

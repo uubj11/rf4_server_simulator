@@ -1,4 +1,4 @@
-package gameserver
+﻿package gameserver
 
 import (
 	"context"
@@ -50,6 +50,10 @@ type fishHuntState struct {
 	ValidBites    int64
 	Pity          int64
 	BigMiss       int64
+	// TrophyPity / SuperPity：本地服新增的双轨保底计数，与 Pity 独立。
+	// TrophyPity 只推奖杯（3 星），SuperPity 只推超稀有（4 星），互不覆盖。
+	TrophyPity    int64
+	SuperPity     int64
 	CompFish      int64
 	CompGrade     int64
 	CompUntil     float64
@@ -72,6 +76,15 @@ func (s *Server) fishHuntEnabled() bool {
 	return s != nil && s.DB != nil && s.tunableF("fish_hunt_enabled", 1) != 0
 }
 
+// pityKey 是双轨保底计数的聚合键：同一张地图内的不同湖区共用一份进度。
+// 取玩家当前所在地图 key；取不到时退回湖区 key，保证计数不写丢。
+func (s *Server) pityKey(uid int64, loc string) string {
+	if key := s.currentLevel(uid); key != "" {
+		return key
+	}
+	return loc
+}
+
 func (s *Server) loadFishHuntState(ctx context.Context, uid int64, loc string, spot uint64) *fishHuntState {
 	h := &fishHuntState{UID: uid, Loc: loc, Spot: spot}
 	if !s.fishHuntEnabled() || uid == 0 || loc == "" {
@@ -80,18 +93,30 @@ func (s *Server) loadFishHuntState(ctx context.Context, uid int64, loc string, s
 	var anchorKnown, zoneKnown, compGrade int64
 	err := s.DB.SQL.QueryRowContext(ctx, `
 		SELECT anchor_x,anchor_z,anchor_known,active_seconds,valid_bites,pity,
-		       big_miss,comp_fish,comp_grade,comp_until,last_catch_guid,
+		       big_miss,trophy_pity,super_pity,comp_fish,comp_grade,comp_until,last_catch_guid,
 		       last_active_ts,updated_ts,hunt_mode,sea_zone,sea_zone_known
 		FROM fish_hunt_state WHERE uid=? AND loc=? AND spot=?`,
 		uid, loc, int64(spot)).Scan(
 		&h.AnchorX, &h.AnchorZ, &anchorKnown, &h.ActiveSeconds, &h.ValidBites, &h.Pity,
-		&h.BigMiss, &h.CompFish, &compGrade, &h.CompUntil, &h.LastCatchGUID,
+		&h.BigMiss, &h.TrophyPity, &h.SuperPity, &h.CompFish, &compGrade, &h.CompUntil, &h.LastCatchGUID,
 		&h.LastActiveTS, &h.UpdatedTS, &h.Mode, &h.Zone, &zoneKnown)
 	h.AnchorKnown = anchorKnown != 0
 	h.ZoneKnown = zoneKnown != 0
 	h.CompGrade = compGrade
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.log.Warn("鱼猎状态读取失败", "uid", uid, "loc", loc, "spot", spot, "err", err)
+	}
+	// 本地服双轨保底：计数按 (uid, 地图) 聚合，既不随抛竿落点(spot)重置，
+	// 也不随同一张图内换湖区(loc)重置——否则一张图钓上百条，进度会被拆成几份，
+	// 每份都走不满周期，玩家永远等不到保底。
+	pityKey := s.pityKey(uid, loc)
+	var aggTrophy, aggSuper int64
+	if aggErr := s.DB.SQL.QueryRowContext(ctx, `
+		SELECT trophy_pity, super_pity FROM fish_hunt_pity WHERE uid=? AND loc=?`,
+		uid, pityKey).Scan(&aggTrophy, &aggSuper); aggErr == nil {
+		h.TrophyPity, h.SuperPity = aggTrophy, aggSuper
+	} else if !errors.Is(aggErr, sql.ErrNoRows) {
+		s.log.Warn("保底聚合读取失败", "uid", uid, "loc", loc, "err", aggErr)
 	}
 	return h
 }
@@ -104,25 +129,38 @@ func (s *Server) saveFishHuntState(ctx context.Context, h *fishHuntState) {
 	_, err := s.DB.SQL.ExecContext(ctx, `
 		INSERT INTO fish_hunt_state(
 			uid,loc,spot,anchor_x,anchor_z,anchor_known,active_seconds,valid_bites,
-			pity,big_miss,comp_fish,comp_grade,comp_until,last_catch_guid,
+			pity,big_miss,trophy_pity,super_pity,comp_fish,comp_grade,comp_until,last_catch_guid,
 			last_active_ts,updated_ts,hunt_mode,sea_zone,sea_zone_known)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(uid,loc,spot) DO UPDATE SET
 			anchor_x=excluded.anchor_x,anchor_z=excluded.anchor_z,
 			anchor_known=excluded.anchor_known,active_seconds=excluded.active_seconds,
 			valid_bites=excluded.valid_bites,pity=excluded.pity,
-			big_miss=excluded.big_miss,comp_fish=excluded.comp_fish,
+			big_miss=excluded.big_miss,trophy_pity=excluded.trophy_pity,
+			super_pity=excluded.super_pity,comp_fish=excluded.comp_fish,
 			comp_grade=excluded.comp_grade,comp_until=excluded.comp_until,
 			last_catch_guid=excluded.last_catch_guid,
 			last_active_ts=excluded.last_active_ts,updated_ts=excluded.updated_ts,
 			hunt_mode=excluded.hunt_mode,sea_zone=excluded.sea_zone,
 			sea_zone_known=excluded.sea_zone_known`,
 		h.UID, h.Loc, int64(h.Spot), h.AnchorX, h.AnchorZ, boolInt(h.AnchorKnown),
-		h.ActiveSeconds, h.ValidBites, h.Pity, h.BigMiss, h.CompFish, h.CompGrade,
-		h.CompUntil, h.LastCatchGUID, h.LastActiveTS, h.UpdatedTS,
+		h.ActiveSeconds, h.ValidBites, h.Pity, h.BigMiss, h.TrophyPity, h.SuperPity,
+		h.CompFish, h.CompGrade, h.CompUntil, h.LastCatchGUID, h.LastActiveTS, h.UpdatedTS,
 		h.Mode, h.Zone, boolInt(h.ZoneKnown))
 	if err != nil {
 		s.log.Warn("鱼猎状态保存失败", "uid", h.UID, "loc", h.Loc, "spot", h.Spot, "err", err)
+	}
+	// 双轨保底计数同时写进 (uid, 地图) 聚合表，保证换落点、换湖区都不清零。
+	pityKey := s.pityKey(h.UID, h.Loc)
+	if _, aggErr := s.DB.SQL.ExecContext(ctx, `
+		INSERT INTO fish_hunt_pity(uid,loc,trophy_pity,super_pity,updated_ts)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(uid,loc) DO UPDATE SET
+			trophy_pity=excluded.trophy_pity,
+			super_pity=excluded.super_pity,
+			updated_ts=excluded.updated_ts`,
+		h.UID, pityKey, h.TrophyPity, h.SuperPity, h.UpdatedTS); aggErr != nil {
+		s.log.Warn("保底聚合写入失败", "uid", h.UID, "loc", h.Loc, "key", pityKey, "err", aggErr)
 	}
 }
 
@@ -581,6 +619,59 @@ func (s *Server) fishFreshwaterHuntReadiness(ctx context.Context, key string, c 
 	return out
 }
 
+// pityDue 判断某条轨是否已经走满整个周期：走满后下一竿直接锁定星级档，
+// 不再只靠权重放大。换落点、换钓法都不重置（计数按 uid+loc 聚合）。
+func (s *Server) pityDue(h *fishHuntState, lane string) bool {
+	if s == nil || h == nil || s.tunableF("fish_pity_"+lane, 1) == 0 {
+		return false
+	}
+	var n int64
+	var nKey string
+	var nBase float64
+	if lane == "super" {
+		n, nKey, nBase = h.SuperPity, "fish_pity_super_n", 50
+	} else {
+		n, nKey, nBase = h.TrophyPity, "fish_pity_trophy_n", 20
+	}
+	if v := s.tunableF(nKey, nBase); v > 0 {
+		nBase = v
+	}
+	return float64(n) >= nBase
+}
+
+// pityLaneFactor 把双轨计数换算成权重放大倍数。
+// 与 fishHuntWeights 分开：后者是包级函数且有既有测试签名，这里单独持有人依赖。
+// lane="trophy" 放大 3 星档，lane="super" 放大 4 星档。
+func (s *Server) pityLaneFactor(h *fishHuntState, lane string) float64 {
+	if s == nil || h == nil {
+		return 1
+	}
+	var n int64
+	var nKey, ceilKey string
+	var nDef, ceilDef float64
+	if lane == "super" {
+		n, nKey, nDef, ceilKey, ceilDef = h.SuperPity, "fish_pity_super_n", 50, "fish_pity_ceil_super", 6
+	} else {
+		n, nKey, nDef, ceilKey, ceilDef = h.TrophyPity, "fish_pity_trophy_n", 20, "fish_pity_ceil_trophy", 4
+	}
+	if n <= 0 || s.tunableF("fish_pity_"+lane, 1) == 0 {
+		return 1
+	}
+	nBase := s.tunableF(nKey, nDef)
+	if nBase <= 0 {
+		nBase = nDef
+	}
+	ceil := s.tunableF(ceilKey, ceilDef)
+	if ceil <= 1 {
+		ceil = ceilDef
+	}
+	prog := math.Min(1, float64(n)/nBase)
+	if g := s.tunableF("fish_pity_gamma", .75); g > 0 {
+		prog = math.Pow(prog, g)
+	}
+	return 1 + (ceil-1)*prog
+}
+
 func fishHuntWeights(stage int, h *fishHuntState, trophyLuck float64,
 	comp bool) (w1, w2, w3, w4 float64, forceTrophy bool) {
 	switch stage {
@@ -724,6 +815,36 @@ func (s *Server) sampleHuntWeight(ctx context.Context, key string, modeMult, sca
 	h *fishHuntState) (int64, int64, fishHuntReadiness) {
 	readiness := s.fishHuntReadiness(ctx, key, c, h)
 	w1, w2, w3, w4, force := fishHuntWeights(readiness.Stage, h, c.skill.TrophyLuck, readiness.Comp)
+	// 本地服双轨保底：两条轨独立爬坡，全阶段生效（含日常）。
+	// trophy 轨只推 3 星，super 轨只推 4 星，互不覆盖。
+	w3 *= s.pityLaneFactor(h, "trophy")
+	w4 *= s.pityLaneFactor(h, "super")
+	// 本地服硬保底：轨走满周期后，下一竿直接锁定星级，不再只靠权重放大。
+	// 超稀有优先（4 星 > 3 星），并且这竿不吃装备承重上限——否则小钩子会把
+	// 星级档位权重直接清零（capG < 奖杯线时 w3/w4 归零），保底永远不触发。
+	forcedGrade := int64(0)
+	if s.pityDue(h, "super") {
+		forcedGrade = 4
+	} else if s.pityDue(h, "trophy") {
+		forcedGrade = 3
+	}
+	if forcedGrade > 0 {
+		capG = 0
+	}
+	// 原版「日常」阶段的奖杯权重只有 1%、蓝冠 0.3%，没打窝时几乎不可能见到星级鱼。
+	// 这里按 tunable 等比放大这两个档位（默认 5 倍 → 奖杯约 4.8%、蓝冠约 1.4%），
+	// 设为 1 即完全恢复原版行为。
+	if readiness.Stage == fishHuntDaily {
+		if b := s.tunableF("fish_hunt_daily_trophy_boost", 3); b > 0 && b != 1 {
+			w3 *= b
+			w4 *= b
+		}
+		// 原版只有打窝后的三档才吃奖杯幸运，日常阶段点了技能等于白点；
+		// 这里补上，让 TrophyLuck 在所有阶段都生效（打窝档在 fishHuntWeights 内部已加过，不重复）。
+		if luck := groundbaitClamp(c.skill.TrophyLuck, 0, .5); luck > 0 {
+			w3 *= 1 + luck
+		}
+	}
 	if strength := s.tunableF(tunableHookSpawnMatchStrength, 1); strength > 0 && !force {
 		compat := s.hookSpawnCompatibilityByGrade(ctx, c, key, scale, modeMult)
 		applyHookSpawnMatch(&w1, &w2, &w3, &w4, compat, strength)
@@ -738,6 +859,9 @@ func (s *Server) sampleHuntWeight(ctx context.Context, key string, modeMult, sca
 		}
 	}
 	grade := chooseHuntGrade(w1, w2, w3, w4, force)
+	if forcedGrade > 0 {
+		grade = forcedGrade
+	}
 	weight := int64(0)
 	selectedGrade := grade
 	for _, candidate := range []int64{grade, 3, 2, 1} {
@@ -789,6 +913,18 @@ func (s *Server) recordHuntCatch(ctx context.Context, uid int64, loc string, spo
 	}
 	h.LastCatchGUID = f.FishGUID
 	consumeFishHuntCompensation(h, time.Now().Unix())
+	// 本地服双轨保底：两条轨独立计数，与旧 Pity 并存但不互相覆盖。
+	// trophy：普通鱼 +step；3 星或 4 星归零。
+	// super ：普通鱼 +step；3 星 +superFromTrophy；4 星归零。
+	if f.Grade >= 4 {
+		h.TrophyPity, h.SuperPity = 0, 0
+	} else if f.Grade == 3 {
+		h.TrophyPity = 0
+		h.SuperPity += int64(s.tunableF("fish_pity_super_from_trophy", 2))
+	} else {
+		h.TrophyPity += int64(s.tunableF("fish_pity_trophy_step", 1))
+		h.SuperPity += int64(s.tunableF("fish_pity_super_step", 1))
+	}
 	if f.Grade >= 3 {
 		h.Pity = 0
 		h.BigMiss = 0

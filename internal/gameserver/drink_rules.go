@@ -121,16 +121,21 @@ func consumableRestoreForItem(itemID string) (string, bool) {
 	// 茶：罐装/保温瓶。
 	case "ab_tea_can", "ab_tea_can_g", "ab_tea_can2", "thermos_tea":
 		return "tea", true
+	// 热红酒：既是热饮（提升舒适度）也走酒类经验加成，两套规则并行。
+	case "thermos_gwein":
+		return "hot_wine", true
 	// 可可：冲饮/保温瓶。
 	case "food_cacao", "thermos_cacao":
 		return "cocoa", true
+	// 热汤/粥：饱食为主，同时暖身（社区实测把"鱼汤"与热可可、茶并列为高舒适项）。
+	case "buckwheat_porridge", "borshch", "fish_soup_nal", "fish_soup_red", "fish_soup_tr":
+		return "soup", true
 	// 可直接食用的食品：蔬果/蛋奶/主食/菜肴/肉鱼/罐头/甜品/软饮。
 	case "apples", "carrot", "cucumbers", "cucumbers_mc", "melon", "plum", "tangerin",
 		"wmelon_ast", "onion", "potatoes", "grilled_apple", "vinegret",
 		"boiled_egg", "food_egg", "farm_milk", "ff_pack_milk", "ff_pack_kefir",
 		"food_sweetmilk", "farm_cheese", "ff_proc_cheese",
 		"baked_potato", "bowl_potato", "fried_potato", "fish_potato",
-		"buckwheat_porridge", "borshch", "fish_soup_nal", "fish_soup_red", "fish_soup_tr",
 		"rye_bread_r", "loaf_01", "kalach", "bublik", "r_pie", "pancakes",
 		"christmas_pancakes", "pelmeni", "sandwich_cafe", "salmon_steak", "pot_roast",
 		"beef", "pork", "lard", "hm_lard", "cutlet_p", "pike_cutlets", "shashlyk_p",

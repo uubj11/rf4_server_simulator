@@ -668,6 +668,9 @@ func (s *Server) rosterSonarSchools(ctx context.Context, systemID string, grid s
 		w1, w2, w3, w4, forceTrophy := fishHuntWeights(
 			readiness.Stage, hunt, c.skill.TrophyLuck, readiness.Comp,
 		)
+		// 本地服双轨保底：海图同样吃两条独立轨道的爬坡。
+		w3 *= s.pityLaneFactor(hunt, "trophy")
+		w4 *= s.pityLaneFactor(hunt, "super")
 		if strength := s.tunableF(tunableHookSpawnMatchStrength, 1); strength > 0 && !forceTrophy {
 			scale := s.tunableF("fish_weight_scale", 1)
 			if scale <= 0 {
@@ -680,6 +683,12 @@ func (s *Server) rosterSonarSchools(ctx context.Context, systemID string, grid s
 			w1, w2 = 0, 0
 		}
 		gradeWeights := [4]float64{w1, w2, w3, w4}
+		// 本地服硬保底：海图同样在两轨走满周期后直接锁定星级鱼群。
+		if s.pityDue(hunt, "super") {
+			gradeWeights = [4]float64{0, 0, 0, 1}
+		} else if s.pityDue(hunt, "trophy") {
+			gradeWeights = [4]float64{0, 0, 1, 0}
+		}
 
 		traits := s.marineTraits(ctx, key, c)
 		radiusX := 1 + rng.Intn(3) + int(math.Round(traits.schooling*2))

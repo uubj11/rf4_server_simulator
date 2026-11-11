@@ -136,7 +136,8 @@ func TestMedicineUseRestoresHealth(t *testing.T) {
 	if math.Abs(row.LuckPenalty-0.10) > 1e-9 {
 		t.Fatalf("药品应回健康 0.60-0.50: %v", row.LuckPenalty)
 	}
-	if row.Primary != 0.85 || row.Secondary != 0.50 || row.Comfort != 1.0 {
+	// 舒适条受健康钳制（官方论坛口径）：健康回到 90% 后，舒适上限也是 90%。
+	if row.Primary != 0.85 || row.Secondary != 0.50 || math.Abs(row.Comfort-0.90) > 1e-9 {
 		t.Fatalf("药品不应改动其它状态条: %+v", row)
 	}
 	if len(ctx.afterResponse) == 0 {

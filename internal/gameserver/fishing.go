@@ -291,13 +291,24 @@ func (s *Server) stateFor(uid int64) *FishState {
 }
 
 // ---- 钓组动画就位位族 ----
-// 0x200 水层静止（浮标）、0x800 底部静止（沉底/Feeder）、0x1000 水面静止。
-const rigAnimSettledMask = 0x200 | 0x800 | 0x1000
+// 0x200 水层静止（浮标）、0x800 底部静止（沉底/Feeder）、0x1000 水面静止；
+// 0x2000 是实机看到的水面/底层静止位、0x40 是顺流移动（见下方 rigAnimInWaterMask 注释）。
+const rigAnimSettledMask = 0x200 | 0x800 | 0x1000 | 0x2000 | 0x40
 
 // rigAnimInWaterMask 是“钓组在水中”的位族。协议字段表确认
 // 0x200=MotionlessInWaterColumn；0x400/0x800/0x1000 分别是不同水层/姿态的
 // 静止状态。朝岸上抛竿不会出现这些位，因此仍能挡住“饵落在陆地”。
-const rigAnimInWaterMask = 0x200 | 0x400 | 0x800 | 0x1000
+//
+// 0x2000 是实机补进来的：浮钓/水面钓组静止时客户端只报 0x2000（有时叠加 0x40
+// 顺流，即 0x2040），一个 0x200/0x400/0x800/0x1000 都不带。旧位族漏了它，
+// 结果服务端永远认为“还没落水”，NeedBite 挂起、咬钩定时器一直顺延，抛多少竿都
+// 不派鱼（2026-11-09 用户实测：同竿同点，底钓 0x240 能中鱼，水面 0x2040 全空竿）。
+// 该位只会在 Splash(0x20) 之后出现，岸上不报，因此并入位族是安全的。
+//
+// 0x40=StreamMoving 顺流移动同样补进来：钩组被水冲走时客户端只报 0x40（连 0x2000
+// 都不带），实测 19:24~19:26 连续三杆只有 0x40，服务端判定没入水，一竿都没派鱼。
+// 岸上不可能出现顺流移动，并入后不会把落在陆地的饵误判成入水。
+const rigAnimInWaterMask = 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x40
 
 // ---- 咬钩延迟 ----
 
@@ -1842,7 +1853,12 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	delay := s.biteDelayInWeather(st, sess.weatherAt(st.Loc, now), now, bonus)
 	delay *= s.hookBiteDelayFactorForRig(sess.pushCtx(), sess.Userid, st.GearGuid)
 	s.armBiteTimerLocked(sess.Userid, st, now.Add(time.Duration(delay*float64(time.Second))))
+	intelLoc, intelGear := st.Loc, st.GearGuid
 	st.mu.Unlock()
+	// 真正的新一竿：推一条钓点情报（同一竿+同一点 15 分钟内只推一次）。
+	if resetCast {
+		s.notifySpotIntel(sess, intelLoc, intelGear)
+	}
 	if hasPendingWear {
 		s.applyFightReelWear(s.dbCtx(), sess.Userid, pendingWear, "14/7")
 	}

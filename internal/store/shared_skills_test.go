@@ -47,7 +47,7 @@ func TestSharedSkillPointsKeepExistingSaveBalance(t *testing.T) {
 		}
 	}
 	total, spent, bonus, available := db.SkillPointsAvailable(ctx, uid)
-	if total != 113 || spent != 78 || bonus != 0 || available != 35 {
+	if total != 1130 || spent != 78 || bonus != 0 || available != 1052 {
 		t.Fatalf("existing points changed: total=%d spent=%d bonus=%d available=%d", total, spent, bonus, available)
 	}
 	projected, err := db.ListSkillNodes(ctx, uid)
@@ -69,7 +69,7 @@ func TestSharedSkillPointsKeepExistingSaveBalance(t *testing.T) {
 		}
 	}
 	total, spent, bonus, available = db.SkillPointsAvailable(ctx, uid)
-	if total != 113 || spent != 78 || bonus != 37 || available != 72 {
+	if total != 1130 || spent != 78 || bonus != 37 || available != 1089 {
 		t.Fatalf("extra points changed: total=%d spent=%d bonus=%d available=%d", total, spent, bonus, available)
 	}
 	p, err := db.GetProfile(ctx, uid)

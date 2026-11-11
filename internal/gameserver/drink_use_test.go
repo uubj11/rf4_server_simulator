@@ -515,8 +515,8 @@ func TestDrinkRestoreCategories(t *testing.T) {
 	if math.Abs(row.Primary-0.65) > 1e-9 {
 		t.Fatalf("咖啡应恢复精力 0.50+0.15: %v", row.Primary)
 	}
-	if row.Secondary != 0.30 || row.Comfort != 0.10 {
-		t.Fatalf("咖啡不应动饱食/舒适度: %+v", row)
+	if row.Secondary != 0.30 || math.Abs(row.Comfort-0.30) > 1e-9 {
+		t.Fatalf("咖啡应恢复精力 0.15 并暖身 0.20: %+v", row)
 	}
 	// 可可→饱食 + 少量精力。
 	reset()
@@ -531,8 +531,8 @@ func TestDrinkRestoreCategories(t *testing.T) {
 	if math.Abs(row.Secondary-0.65) > 1e-9 || math.Abs(row.Primary-0.55) > 1e-9 {
 		t.Fatalf("可可应恢复饱食 0.30+0.35 / 精力 0.50+0.05: %+v", row)
 	}
-	if row.Comfort != 0.10 {
-		t.Fatalf("可可不应动舒适度: %+v", row)
+	if math.Abs(row.Comfort-0.50) > 1e-9 {
+		t.Fatalf("可可应暖身 0.10+0.40: %+v", row)
 	}
 }
 

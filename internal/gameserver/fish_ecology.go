@@ -257,6 +257,11 @@ func (s *Server) rigWaterLayer(c fishRollContext) float64 {
 func (s *Server) fishLayerWeight(ctx context.Context, key string, c fishRollContext) float64 {
 	p := s.cachedFishEcology(ctx, c, key)
 	if !p.Enabled {
+		// 本地服：fish_all_species_open=1 时不再硬剔除，只给偏低软权重，
+		// 保证该图名册里的鱼种都有机会出现。
+		if s.tunableF("fish_all_species_open", 1) == 1 {
+			return .5
+		}
 		return 0
 	}
 	return s.fishLayerWeightProfile(p, c)
@@ -289,6 +294,11 @@ func (s *Server) fishBiteEnvironmentWeight(ctx context.Context, key string, c fi
 	}
 	p := s.cachedFishEcology(ctx, c, key)
 	if !p.Enabled {
+		// 本地服：fish_all_species_open=1 时不再硬剔除，只给偏低软权重，
+		// 保证该图名册里的鱼种都有机会出现。
+		if s.tunableF("fish_all_species_open", 1) == 1 {
+			return .5
+		}
 		return 0
 	}
 	type weightedFactor struct {
@@ -299,7 +309,7 @@ func (s *Server) fishBiteEnvironmentWeight(ctx context.Context, key string, c fi
 		value: s.fishLayerWeightProfile(p, c), tolerance: c.skill.LayerAccuracy,
 	}}
 	_, hour := worldDayAndHour(c.now.Unix())
-	factors = append(factors, weightedFactor{fishDielWeight(p, hour), c.skill.EcologyInterest})
+	factors = append(factors, weightedFactor{s.fishDielWeight(p, hour), c.skill.EcologyInterest})
 	water := fishWaterConditionsFor(p, c)
 	factors = append(factors,
 		weightedFactor{fishSeasonWeight(p, water.Season), c.skill.WeatherAdaptation},
@@ -362,12 +372,22 @@ func fishActivityForHour(hour int64) float64 {
 	}
 }
 
-func fishDielWeight(profile fishEcologyProfile, hour int64) float64 {
+// fishDielWeight 昼夜权重。命中时段的鱼满权，非命中时段按 fish_diel_bias 打折。
+// 本地服：折扣由硬编码 0.35 改为 tunable（默认 0.35，调到 1 等于昼夜无差别），
+// 保证「任何时间都能钓到本图任意鱼种」，昼夜只改概率高低、不做禁止。
+func (s *Server) fishDielWeight(profile fishEcologyProfile, hour int64) float64 {
 	bit := uint(fishActivityForHour(hour))
 	if profile.DielMask&(1<<bit) != 0 {
 		return 1
 	}
-	return .35
+	bias := s.tunableF("fish_diel_bias", .35)
+	if bias <= 0 {
+		bias = .01
+	}
+	if bias > 1 {
+		bias = 1
+	}
+	return bias
 }
 
 func fishEcologyJSONMap(raw string) map[string]float64 {

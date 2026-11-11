@@ -62,15 +62,18 @@ func TestGroundbaitAndPvaConsumeOnWaterEntryOnly(t *testing.T) {
 				t.Fatal("未入水时不得消耗窝料/PVA")
 			}
 
-			// 首次入水位出现：消耗钓组上这 1 个。
+			// 首次入水位出现：笼里这份不再被掏空，改从背包顶一份（自动补料）。
 			tick(0x400)
-			if row, _ := db.GetItemByGUID(ctx, mounted); row != nil {
-				t.Fatalf("入水后挂载实例应被消耗，仍存在 %+v", row)
+			if row, err := db.GetItemByGUID(ctx, mounted); err != nil || row == nil {
+				t.Fatalf("自动补料后笼里应保留 1 份，实得 %+v err=%v", row, err)
 			}
-			// 同一杆持续在水中不会重复扣。
+			if row, err := db.GetItemByGUID(ctx, stack.GUID); err != nil || row == nil || row.Qty != 58 {
+				t.Fatalf("自动补料应从背包扣 1 份，来源堆实得 %+v err=%v", row, err)
+			}
+			// 同一杆持续在水中不会重复补。
 			tick(0x400)
-			if row, err := db.GetItemByGUID(ctx, stack.GUID); err != nil || row == nil || row.Qty != 59 {
-				t.Fatalf("同一杆只应消耗 1 个，来源堆实得 %+v err=%v", row, err)
+			if row, err := db.GetItemByGUID(ctx, stack.GUID); err != nil || row == nil || row.Qty != 58 {
+				t.Fatalf("同一杆只应补 1 份，来源堆实得 %+v err=%v", row, err)
 			}
 		})
 	}

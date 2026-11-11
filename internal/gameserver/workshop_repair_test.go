@@ -289,8 +289,12 @@ func TestWorkshopReelRepairRejectsZeroCost(t *testing.T) {
 		Tree: snapshotWorkshopRequestPart(reel.GUID, uint32(reelPartCatGear), gearID, 0),
 		Log:  logging.Discard(),
 	}
-	if _, ok := hWorkshopOrder(c); ok {
-		t.Fatal("没有实际磨损时不应提交零金额修理")
+	// 官方客户端会把一次改造拆成两包 21/3 连发（换件 + 收尾确认）。第一包已把
+	// 耐久修满并扣费，第二包必然落在“同型号修理、零磨损、0 元”上。若这里拒绝，
+	// 客户端会把坏包解析成 InvalidCastException 并弹“发生内部错误”，而改造其实
+	// 已经生效。所以零金额改动必须回成功（幂等），但绝不能写流水、不能扣费。
+	if body, ok := hWorkshopOrder(c); !ok || len(body) == 0 {
+		t.Fatal("零金额改动应幂等回当前物品树，而不是报错")
 	}
 	var txnCount int
 	if err := db.SQL.QueryRowContext(ctx,

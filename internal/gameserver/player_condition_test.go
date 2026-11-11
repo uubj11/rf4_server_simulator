@@ -42,6 +42,18 @@ func testConditionParams() conditionParams {
 
 		// 既有手算用例不启用“回精力吃食”折算，单独用例覆盖。
 		EnergyRegenFoodCost: 0,
+		// 既有手算用例也不启用舒适/健康因子：Floor=1 表示舒适度不影响恢复速度，
+		// Base=1 表示均衡点取满值。新因子的行为由下方单独用例覆盖。
+		ComfortBase:         1.0,
+		ComfortRegenFloor:   1.0,
+		HealthEnergyPenalty: 0,
+		HealthMaxPenalty:    0,
+		// 热饮/饮酒的舒适与健康代价走真实服务器参数，由 drink_use_test 覆盖。
+		HotDrinkComfortRestore: 0,
+		CocoaComfortRestore:    0,
+		SoupComfortRestore:     0,
+		HotWineComfortRestore:  0,
+		AlcoholHealthCost:      0,
 
 		HealthDecayPerHour:     0.10,
 		HealthRegenPerHour:     0.05,

@@ -102,13 +102,12 @@ func (s *Server) useAlcoholDrink(ctx *Ctx) ([]byte, bool) {
 		return failed(err)
 	}
 	rule, isDrink := drinkRuleForItem(def.ItemID)
-	restoreKind, isConsumable := "", false
-	if !isDrink {
-		restoreKind, isConsumable = consumableRestoreForItem(def.ItemID)
-		// 状态机总开关关闭时食品/热饮维持旧行为（落回通用 handler，不扣不恢复）。
-		if isConsumable && !cond.Enabled {
-			isConsumable = false
-		}
+	// 热红酒这类"既是酒又是热饮"的物品两套规则并行：经验加成走 drink 规则，
+	// 暖身/饱食走消耗品恢复规则。普通酒不在恢复表里，行为不变。
+	restoreKind, isConsumable := consumableRestoreForItem(def.ItemID)
+	// 状态机总开关关闭时食品/热饮维持旧行为（落回通用 handler，不扣不恢复）。
+	if isConsumable && !cond.Enabled {
+		isConsumable = false
 	}
 	if !isDrink && !isConsumable {
 		return nil, false
@@ -135,7 +134,8 @@ func (s *Server) useAlcoholDrink(ctx *Ctx) ([]byte, bool) {
 		return fail("饮品数量无效，请刷新背包")
 	}
 
-	if isConsumable {
+	// 只有吃进肚子的主食/可可/热汤才受"吃饱"闸门约束；热饮、热红酒不算吃饱。
+	if isConsumable && (restoreKind == "food" || restoreKind == "cocoa" || restoreKind == "soup") {
 		var satiety float64
 		switch qerr := tx.QueryRowContext(cctx,
 			`SELECT COALESCE(secondary_value,0) FROM player_condition WHERE uid=?`, uid).Scan(&satiety); {
@@ -162,6 +162,10 @@ func (s *Server) useAlcoholDrink(ctx *Ctx) ([]byte, bool) {
 	}
 	if isDrink {
 		if err := store.RefreshDrinkBonusTxWithPeak(cctx, tx, uid, rule.Category, rule.Peak, rule.Duration, row.GUID); err != nil {
+			return failed(err)
+		}
+		// 中文 WIKI：“大量饮酒会降低生命值”。与饮酒同事务写入，失败整体回滚。
+		if err := applyDrinkHealthCostTx(cctx, tx, uid, rule.Category, cond, time.Now()); err != nil {
 			return failed(err)
 		}
 	}

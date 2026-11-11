@@ -97,8 +97,8 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/1 未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 9 {
-		t.Fatalf("初始可用点应 9，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 90 {
+		t.Fatalf("初始可用点应 90，实得 %d", got)
 	}
 
 	// 5/2 学 1/502：可用点 9→8，节点等级 0→1，树反映
@@ -106,15 +106,15 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/2 未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 8 {
-		t.Fatalf("学 1 次后可用点应 8，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 89 {
+		t.Fatalf("学 1 次后可用点应 89，实得 %d", got)
 	}
 	if lv, _ := db.GetSkillNode(ctx, 1000001, 502); lv != 1 {
 		t.Fatalf("节点 502 等级应 1，实得 %d", lv)
 	}
 
 	// 再学两次到满级（max=3）：8→7→6；第 4 次 max-level 拒绝，点数不动
-	for i, want := range []uint64{7, 6} {
+	for i, want := range []uint64{88, 87} {
 		body, ok = call(5, 2, proto.Args524(proto.U32(1), proto.U32(502)))
 		if !ok {
 			t.Fatalf("5/2 第 %d 次未处理", i+2)
@@ -127,7 +127,7 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/2 满级请求未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 6 {
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 87 {
 		t.Fatalf("满级后再学可用点应保持 6，实得 %d", got)
 	}
 	if lv, _ := db.GetSkillNode(ctx, 1000001, 502); lv != 3 {
@@ -139,7 +139,7 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/2 锁定请求未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 6 {
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 87 {
 		t.Fatalf("锁定后可用点应保持 6，实得 %d", got)
 	}
 	if lv, _ := db.GetSkillNode(ctx, 1000001, 504); lv != 0 {
@@ -172,8 +172,8 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/1 未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 6 {
-		t.Fatalf("恢复等级后可用点应 6，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 87 {
+		t.Fatalf("恢复等级后可用点应 87，实得 %d", got)
 	}
 
 	// 未知节点：仍回树（handled），点数不动
@@ -181,7 +181,7 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/2 未知节点未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 6 {
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 87 {
 		t.Fatalf("未知节点后可用点应保持 6，实得 %d", got)
 	}
 
@@ -195,8 +195,8 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/3 未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 9 {
-		t.Fatalf("重置后可用点应 9，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 90 {
+		t.Fatalf("重置后可用点应 90，实得 %d", got)
 	}
 	if lv, _ := db.GetSkillNode(ctx, 1000001, 502); lv != 0 {
 		t.Fatalf("重置后节点 502 等级应 0，实得 %d", lv)
@@ -212,8 +212,8 @@ func TestSkillLearnFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("5/4 未处理")
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 9 {
-		t.Fatalf("全部重置后可用点应 9，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, body)); got != 90 {
+		t.Fatalf("全部重置后可用点应 90，实得 %d", got)
 	}
 	var n int64
 	_ = db.SQL.QueryRow(`SELECT COUNT(*) FROM skill_node WHERE uid=1000001`).Scan(&n)
@@ -254,11 +254,11 @@ func TestSkillLearnAtLevel5SharedPoints(t *testing.T) {
 		return body
 	}
 
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(1))); got != 4 {
-		t.Fatalf("5 级初始可用点应 4，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(1))); got != 40 {
+		t.Fatalf("5 级初始可用点应 40，实得 %d", got)
 	}
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(2, proto.U32(1), proto.U32(514)))); got != 3 {
-		t.Fatalf("学习 514 后可用点应 3，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(2, proto.U32(1), proto.U32(514)))); got != 39 {
+		t.Fatalf("学习 514 后可用点应 39，实得 %d", got)
 	}
 	for _, node := range []int64{514, 313, 701, 1002} {
 		if lv, err := db.GetSkillNode(ctx, 1000001, node); err != nil || lv != 1 {
@@ -270,8 +270,8 @@ func TestSkillLearnAtLevel5SharedPoints(t *testing.T) {
 	}
 
 	// 从另一个类目的同组节点继续加点，整组同步且仍只扣 1 点。
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(2, proto.U32(2), proto.U32(701)))); got != 2 {
-		t.Fatalf("跨类目学习 701 后可用点应 2，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(2, proto.U32(2), proto.U32(701)))); got != 38 {
+		t.Fatalf("跨类目学习 701 后可用点应 38，实得 %d", got)
 	}
 	for _, node := range []int64{514, 313, 701, 1002} {
 		if lv, _ := db.GetSkillNode(ctx, 1000001, node); lv != 2 {
@@ -280,8 +280,8 @@ func TestSkillLearnAtLevel5SharedPoints(t *testing.T) {
 	}
 
 	// 重置任一同组节点返还整组点数并归零。
-	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(3, proto.U32(1), proto.U32(514)))); got != 4 {
-		t.Fatalf("重置后可用点应 4，实得 %d", got)
+	if got := treeAvailPoints(t, decodeTreeValue(t, srv, call(3, proto.U32(1), proto.U32(514)))); got != 40 {
+		t.Fatalf("重置后可用点应 40，实得 %d", got)
 	}
 	for _, node := range []int64{514, 313, 701, 1002} {
 		if lv, _ := db.GetSkillNode(ctx, 1000001, node); lv != 0 {

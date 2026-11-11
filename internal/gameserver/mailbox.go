@@ -735,6 +735,12 @@ type AdminCommand struct {
 	KVShape      int64               `json:"kv_shape,omitempty"`    // fish_tv_test：401.f4 模板 KV 形状或外层参数探测编号
 	AchID        int64               `json:"ach_id,omitempty"`      // achievement_push_test：成就 id
 	NotifyType   int64               `json:"notify_type,omitempty"` // achievement_push_test：2/9 的 306.f0 取值
+	// 装备槽读写与代购（见 admin_gear.go）：
+	RodGUID  string `json:"rod,omitempty"`   // set_component / buy_mount：竿 guid
+	Slot     int64  `json:"slot,omitempty"`  // 槽位品类号（6 轮 11 线 12 钩 13 前导 17 拟饵 27 饵 28 浮漂）
+	ItemGUID string `json:"guid,omitempty"`  // set_component：要装的物品 guid；空=卸下该槽
+	Extra    int64  `json:"extra,omitempty"` // 槽内序号/挂饵位等附加参数
+	StoreID  string `json:"store,omitempty"` // buy_item / buy_mount：店铺 id；空=自动选最低价在架店
 }
 
 // StartAdminSubscriber 轮询共享 SQLite 队列，每 2 秒处理一批管理指令。
@@ -773,6 +779,12 @@ func (s *Server) execAdminCmd(cmd *AdminCommand) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	switch cmd.Op {
+	case "set_component":
+		s.adminSetComponent(cmd)
+	case "buy_item":
+		s.adminBuyItem(cmd)
+	case "buy_mount":
+		s.adminBuyAndMount(cmd)
 	case "kick":
 		for _, sess := range s.sessionsForUID(cmd.UID) {
 			sess.Close("admin_kick")

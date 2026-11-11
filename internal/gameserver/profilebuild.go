@@ -172,7 +172,14 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 			membershipExp = uint64(proto.UnixToFiletime(membership.ExpiresAt))
 		}
 	}
-	totalPts := skillPointsTotal(p.Level)
+	// 本地服修正：资料页 f6 下发"可用技能点"（总获得 + 管理员偏移 - 已投入），
+	// 与技能树 311.f0、服务端 skillLearn 的点数校验保持同一口径。
+	// 原版此处只发累计总获得，玩家把点数用掉后资料页数字不减少，
+	// 在每级点数放大后会被误认为奖励发多。
+	totalPts := skillPointsTotal(p.Level) + s.skillBonusPoints(ctx, uid) - s.skillSpentPoints(ctx, uid)
+	if totalPts < 0 {
+		totalPts = 0
+	}
 
 	// 322 里的等级经验拆分
 	base := baseXp(p.Level)

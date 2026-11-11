@@ -216,20 +216,21 @@ func (d *DB) SetPlayerSkillPointsAdmin(ctx context.Context, uid, skillID int64, 
 func skillBonusKey(uid int64) string { return fmt.Sprintf("skill_bonus:%d", uid) }
 
 // skillPointsTotalForAdmin 复刻游戏服的等级累计技能点公式，供后台展示与换算。
+// 本地服改动：与原版同步放大 10 倍（10/20/30/40/50），保证后台与游戏内数字一致。
 func skillPointsTotalForAdmin(level int64) int64 {
 	var sum int64
 	for l := int64(2); l <= level; l++ {
 		switch {
 		case l < 20:
-			sum++
+			sum += 10
 		case l < 30:
-			sum += 2
+			sum += 20
 		case l < 40:
-			sum += 3
+			sum += 30
 		case l < 50:
-			sum += 4
+			sum += 40
 		default:
-			sum += 5
+			sum += 50
 		}
 	}
 	return sum

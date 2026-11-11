@@ -48,6 +48,23 @@ const (
 	tunableGearEnergyMaxCap     = "condition_gear_energy_max_cap"
 	tunableEnergyRegenFoodCost  = "condition_energy_regen_food_cost"
 
+	// 舒适度基准均衡点：官方与实测"多数天气维持 50~55%"，不是 100%。
+	tunableComfortBase = "condition_comfort_base"
+
+	// 官方：舒适度影响体力恢复速度；身体状态影响最大储备与恢复速度。
+	tunableComfortRegenFloor   = "condition_comfort_regen_floor"
+	tunableHealthEnergyPenalty = "condition_health_energy_penalty"
+	tunableHealthMaxPenalty    = "condition_health_max_penalty"
+	// 热饮暖身与饮酒的健康代价。
+	tunableHotDrinkComfortRestore = "condition_hotdrink_comfort_restore"
+	tunableCocoaComfortRestore    = "condition_cocoa_comfort_restore"
+	tunableSoupComfortRestore     = "condition_soup_comfort_restore"
+	tunableHotWineComfortRestore  = "condition_hotwine_comfort_restore"
+	tunableAlcoholHealthCost      = "condition_alcohol_health_cost"
+
+	// 搏鱼持续耗精力（按 14/8 负载上报的真实秒数结算）。
+	tunableFightEnergyPerSec = "condition_fight_energy_per_sec"
+
 	// 健康（f4）动态：饥寒压力掉血、压力消失后自愈。
 	tunableHealthDecayPerHour     = "condition_health_decay_per_hour"
 	tunableHealthRegenPerHour     = "condition_health_regen_per_hour"
@@ -87,11 +104,38 @@ const (
 	defComfortDriftPerHour  = 0.5
 	defSunEnergyRegenMult   = 1.25
 
+	// 舒适度基准：中文 WIKI 实测总结"其余天气情况都会保持在 50-55% 左右"。
+	defComfortBaseEquilibrium = 0.55
+
 	// 装备被动加成封顶。
 	defGearEnergyRegenCap = 0.5
 	defGearEnergyMaxCap   = 0.15
 	// 恢复精力要消耗饱食度：每恢复 1 点精力扣这么多饱食度（0 关闭）。
 	defEnergyRegenFoodCost = 0.5
+
+	// 官方手册两条明文：
+	//   "能量水平和恢复速度取决于玩家的饱腹感和舒适度"
+	//   "身体状态劣化时，能量储备及能量恢复的速度会减少"
+	// 分别落到"舒适度 → 恢复速度"与"健康 → 上限/恢复"两个因子。
+	// 舒适度基准 0.55 时恢复降到约 0.775 倍；健康满（f4=0）不惩罚。
+	defComfortRegenFloor   = 0.5
+	defHealthEnergyPenalty = 0.5
+	defHealthMaxPenalty    = 0.3
+
+	// 热饮暖身：中文 WIKI"饮用热茶、咖啡等饮料酒水…提供体温的增涨"，
+	// 官方论坛 Content Creator 实测"咖啡确实加舒适，但幅度比热可可/鱼汤/茶低"。
+	// 梯度取 咖啡 0.20 < 茶 0.30 ≈ 鱼汤 0.30 < 热可可 0.40 < 热红酒 0.35（恶劣天气首选）。
+	defHotDrinkComfortRestore = 0.20
+	defCocoaComfortRestore    = 0.40
+	defSoupComfortRestore     = 0.30
+	defHotWineComfortRestore  = 0.35
+
+	// 大量饮酒降低生命值（中文 WIKI："大量饮酒会降低生命值"）。
+	// 基准按葡萄酒一次计，烈酒翻倍、啤酒略低；健康自愈 0.05/h 会慢慢拉回。
+	defAlcoholHealthCost = 0.03
+
+	// 搏鱼每秒精力消耗（按拉力占额定制动力的比例加权，见 reel_fight_wear.go）。
+	defFightEnergyPerSec = 0.01
 
 	// 健康（f4）动态。全部为自设计标定值：官服没有任何"健康下降/恢复"
 	// 样本，取值只保证"饿到快见底、冻到很不舒服才开始掉，且掉得比恢复慢"。
@@ -136,6 +180,20 @@ type conditionParams struct {
 	GearEnergyRegenCap   float64
 	GearEnergyMaxCap     float64
 	EnergyRegenFoodCost  float64
+	// ComfortBase 舒适度基准均衡点（好天气 0.5~0.55）。
+	ComfortBase float64
+
+	// 官方明文：舒适度影响体力恢复速度；身体状态影响最大储备与恢复速度。
+	ComfortRegenFloor   float64
+	HealthEnergyPenalty float64
+	HealthMaxPenalty    float64
+	// 热饮暖身与饮酒健康代价。
+	HotDrinkComfortRestore float64
+	CocoaComfortRestore    float64
+	SoupComfortRestore     float64
+	HotWineComfortRestore  float64
+	AlcoholHealthCost      float64
+	FightEnergyPerSec      float64
 
 	// 健康（f4）动态。
 	HealthDecayPerHour     float64
@@ -147,30 +205,40 @@ type conditionParams struct {
 
 func (s *Server) conditionParams() conditionParams {
 	return conditionParams{
-		Enabled:              s.tunableF(tunableConditionEnabled, 1) >= 0.5,
-		HungerDecayPerHour:   s.tunableF(tunableHungerDecayPerHour, defHungerDecayPerHour),
-		EnergyRegenPerHour:   s.tunableF(tunableEnergyRegenPerHour, defEnergyRegenPerHour),
-		EnergyMax:            s.tunableF(tunableEnergyMax, defEnergyMax),
-		HungerRegenFloor:     s.tunableF(tunableHungerRegenFloor, defHungerRegenFloor),
-		CastEnergyCost:       s.tunableF(tunableCastEnergyCost, defCastEnergyCost),
-		PullEnergyCost:       s.tunableF(tunablePullEnergyCost, defPullEnergyCost),
-		LowEnergyThreshold:   s.tunableF(tunableLowEnergyThreshold, defLowEnergyThreshold),
-		MaxBackfillHours:     s.tunableF(tunableMaxBackfillHours, defMaxBackfillHours),
-		FoodHungerRestore:    s.tunableF(tunableFoodHungerRestore, defFoodHungerRestore),
-		CoffeeEnergyRestore:  s.tunableF(tunableCoffeeEnergyRestore, defCoffeeEnergyRestore),
-		CocoaHungerRestore:   s.tunableF(tunableCocoaHungerRestore, defCocoaHungerRestore),
-		CocoaEnergyRestore:   s.tunableF(tunableCocoaEnergyRestore, defCocoaEnergyRestore),
-		TeaComfortRestore:    s.tunableF(tunableTeaComfortRestore, defTeaComfortRestore),
-		ComfortRainPenalty:   s.tunableF(tunableComfortRainPenalty, defComfortRainPenalty),
-		ComfortColdPenalty:   s.tunableF(tunableComfortColdPenalty, defComfortColdPenalty),
-		ComfortColdTempC:     s.tunableF(tunableComfortColdTempC, defComfortColdTempC),
-		ComfortCampfireBoost: s.tunableF(tunableComfortCampfireBoost, defComfortCampfireBoost),
-		ComfortSunBoost:      s.tunableF(tunableComfortSunBoost, defComfortSunBoost),
-		ComfortDriftPerHour:  s.tunableF(tunableComfortDriftPerHour, defComfortDriftPerHour),
-		SunEnergyRegenMult:   s.tunableF(tunableSunEnergyRegenMult, defSunEnergyRegenMult),
-		GearEnergyRegenCap:   s.tunableF(tunableGearEnergyRegenCap, defGearEnergyRegenCap),
-		GearEnergyMaxCap:     s.tunableF(tunableGearEnergyMaxCap, defGearEnergyMaxCap),
-		EnergyRegenFoodCost:  s.tunableF(tunableEnergyRegenFoodCost, defEnergyRegenFoodCost),
+		Enabled:                s.tunableF(tunableConditionEnabled, 1) >= 0.5,
+		HungerDecayPerHour:     s.tunableF(tunableHungerDecayPerHour, defHungerDecayPerHour),
+		EnergyRegenPerHour:     s.tunableF(tunableEnergyRegenPerHour, defEnergyRegenPerHour),
+		EnergyMax:              s.tunableF(tunableEnergyMax, defEnergyMax),
+		HungerRegenFloor:       s.tunableF(tunableHungerRegenFloor, defHungerRegenFloor),
+		CastEnergyCost:         s.tunableF(tunableCastEnergyCost, defCastEnergyCost),
+		PullEnergyCost:         s.tunableF(tunablePullEnergyCost, defPullEnergyCost),
+		LowEnergyThreshold:     s.tunableF(tunableLowEnergyThreshold, defLowEnergyThreshold),
+		MaxBackfillHours:       s.tunableF(tunableMaxBackfillHours, defMaxBackfillHours),
+		FoodHungerRestore:      s.tunableF(tunableFoodHungerRestore, defFoodHungerRestore),
+		CoffeeEnergyRestore:    s.tunableF(tunableCoffeeEnergyRestore, defCoffeeEnergyRestore),
+		CocoaHungerRestore:     s.tunableF(tunableCocoaHungerRestore, defCocoaHungerRestore),
+		CocoaEnergyRestore:     s.tunableF(tunableCocoaEnergyRestore, defCocoaEnergyRestore),
+		TeaComfortRestore:      s.tunableF(tunableTeaComfortRestore, defTeaComfortRestore),
+		ComfortRainPenalty:     s.tunableF(tunableComfortRainPenalty, defComfortRainPenalty),
+		ComfortColdPenalty:     s.tunableF(tunableComfortColdPenalty, defComfortColdPenalty),
+		ComfortColdTempC:       s.tunableF(tunableComfortColdTempC, defComfortColdTempC),
+		ComfortCampfireBoost:   s.tunableF(tunableComfortCampfireBoost, defComfortCampfireBoost),
+		ComfortSunBoost:        s.tunableF(tunableComfortSunBoost, defComfortSunBoost),
+		ComfortDriftPerHour:    s.tunableF(tunableComfortDriftPerHour, defComfortDriftPerHour),
+		SunEnergyRegenMult:     s.tunableF(tunableSunEnergyRegenMult, defSunEnergyRegenMult),
+		GearEnergyRegenCap:     s.tunableF(tunableGearEnergyRegenCap, defGearEnergyRegenCap),
+		GearEnergyMaxCap:       s.tunableF(tunableGearEnergyMaxCap, defGearEnergyMaxCap),
+		EnergyRegenFoodCost:    s.tunableF(tunableEnergyRegenFoodCost, defEnergyRegenFoodCost),
+		ComfortBase:            s.tunableF(tunableComfortBase, defComfortBaseEquilibrium),
+		ComfortRegenFloor:      s.tunableF(tunableComfortRegenFloor, defComfortRegenFloor),
+		HealthEnergyPenalty:    s.tunableF(tunableHealthEnergyPenalty, defHealthEnergyPenalty),
+		HealthMaxPenalty:       s.tunableF(tunableHealthMaxPenalty, defHealthMaxPenalty),
+		HotDrinkComfortRestore: s.tunableF(tunableHotDrinkComfortRestore, defHotDrinkComfortRestore),
+		CocoaComfortRestore:    s.tunableF(tunableCocoaComfortRestore, defCocoaComfortRestore),
+		SoupComfortRestore:     s.tunableF(tunableSoupComfortRestore, defSoupComfortRestore),
+		HotWineComfortRestore:  s.tunableF(tunableHotWineComfortRestore, defHotWineComfortRestore),
+		AlcoholHealthCost:      s.tunableF(tunableAlcoholHealthCost, defAlcoholHealthCost),
+		FightEnergyPerSec:      s.tunableF(tunableFightEnergyPerSec, defFightEnergyPerSec),
 
 		HealthDecayPerHour:     s.tunableF(tunableHealthDecayPerHour, defHealthDecayPerHour),
 		HealthRegenPerHour:     s.tunableF(tunableHealthRegenPerHour, defHealthRegenPerHour),
@@ -237,15 +305,25 @@ func advancePlayerCondition(cur store.PlayerCondition, now float64, p conditionP
 	if env.Sun {
 		regen *= p.SunEnergyRegenMult
 	}
+	// 官方手册："能量水平和恢复速度取决于玩家的饱腹感和舒适度"，
+	// "身体状态劣化时，能量储备及能量恢复的速度会减少"。
+	// 舒适度基准 0.55 时恢复约 0.78 倍；健康满（f4=0）不惩罚，健康越差上限越低。
+	energyCap := clampFloat(p.EnergyMax*(1-out.LuckPenalty*p.HealthMaxPenalty), 0.05, 1)
 	factor := p.HungerRegenFloor + (1-p.HungerRegenFloor)*out.Secondary
+	factor *= p.ComfortRegenFloor + (1-p.ComfortRegenFloor)*out.Comfort
+	factor *= 1 - out.LuckPenalty*p.HealthEnergyPenalty
 	prevEnergy := out.Primary
-	out.Primary = clampFloat(cur.Primary+regen*factor*elapsedH, 0, p.EnergyMax)
+	out.Primary = clampFloat(cur.Primary+regen*factor*elapsedH, 0, energyCap)
 	// 恢复精力要吃掉饱食度：按实际回复量折算，系数为 tunable（0 关闭）。
 	// 放在饱食度衰减之后、健康判定之前，保证同一拍里 f1 与健康压力源自洽。
 	if gained := out.Primary - prevEnergy; gained > 0 && p.EnergyRegenFoodCost > 0 {
 		out.Secondary = clampFloat(out.Secondary-gained*p.EnergyRegenFoodCost, 0, 1)
 	}
-	equilibrium := 1.0
+	// 舒适度基准：官方与实测"多数天气维持 50~55%"，不是满值。
+	equilibrium := p.ComfortBase
+	if equilibrium <= 0 {
+		equilibrium = 1.0
+	}
 	if env.Rain {
 		equilibrium -= p.ComfortRainPenalty
 	}
@@ -276,6 +354,10 @@ func advancePlayerCondition(cur store.PlayerCondition, now float64, p conditionP
 		delta = p.HealthDecayPerHour * float64(stress) * elapsedH
 	}
 	out.LuckPenalty = clampFloat(cur.LuckPenalty+delta, 0, 1)
+	// 官方论坛（Bug Reports · COFFEE/Confort 帖）口径：
+	// "the comfort bar will not rise above the level of the health bar"
+	// —— 舒适条受健康条钳制，健康不满时舒适也涨不上去。
+	out.Comfort = clampFloat(out.Comfort, 0, clampFloat(1-out.LuckPenalty, 0, 1))
 	return out
 }
 
@@ -517,20 +599,61 @@ func applyConsumableRestoreTx(ctx context.Context, tx *sql.Tx, uid int64, kind s
 	next := *cur
 	switch kind {
 	case "coffee":
+		// 咖啡提神（体力）+ 热饮暖身（舒适度）。
 		next.Primary = clampFloat(next.Primary+p.CoffeeEnergyRestore, 0, p.EnergyMax)
+		next.Comfort = clampFloat(next.Comfort+p.HotDrinkComfortRestore, 0, 1)
 	case "tea":
 		next.Comfort = clampFloat(next.Comfort+p.TeaComfortRestore, 0, 1)
 	case "cocoa":
 		next.Secondary = clampFloat(next.Secondary+p.CocoaHungerRestore, 0, 1)
 		next.Primary = clampFloat(next.Primary+p.CocoaEnergyRestore, 0, p.EnergyMax)
+		// 热可可是社区公认“暖身最强”的一种（高于茶，见官方论坛实测排序）。
+		next.Comfort = clampFloat(next.Comfort+p.CocoaComfortRestore, 0, 1)
+	case "soup":
+		// 热汤：饱食为主，同时暖身（论坛实测把“鱼汤”与热可可、茶并列为高舒适项）。
+		next.Secondary = clampFloat(next.Secondary+p.FoodHungerRestore, 0, 1)
+		next.Comfort = clampFloat(next.Comfort+p.SoupComfortRestore, 0, 1)
+	case "hot_wine":
+		// 热红酒：既是热饮（暖身）也是酒（经验加成由 drink 规则并行生效）。
+		next.Comfort = clampFloat(next.Comfort+p.HotWineComfortRestore, 0, 1)
 	case "medicine":
 		// 健康是 f4 的反向刻度：治疗后 f4 下降（HUD 的 1-f4 回升）。
 		next.LuckPenalty = clampFloat(next.LuckPenalty-p.MedicineHealthRestore, 0, 1)
 	default: // "food"
 		next.Secondary = clampFloat(next.Secondary+p.FoodHungerRestore, 0, 1)
 	}
+	// 舒适条不会超过健康条（官方论坛口径），吃完药抬健康后再判定一次。
+	next.Comfort = clampFloat(next.Comfort, 0, clampFloat(1-next.LuckPenalty, 0, 1))
 	next.UpdatedTS = float64(now.Unix())
 	return store.UpsertPlayerConditionTx(ctx, tx, next)
+}
+
+// applyDrinkHealthCostTx 记录一次饮酒的健康代价（中文 WIKI：“大量饮酒会降低生命值”）。
+// 健康在 HUD 上显示 1-f4，所以惩罚表现为 luck_penalty 上升，健康自愈 0.05/h 会慢慢拉回。
+func applyDrinkHealthCostTx(ctx context.Context, tx *sql.Tx, uid int64, category string, p conditionParams, now time.Time) error {
+	cost := p.AlcoholHealthCost * alcoholHealthCostFactor(category)
+	if cost <= 0 {
+		return nil
+	}
+	cur, err := store.EnsurePlayerConditionTx(ctx, tx, uid)
+	if err != nil {
+		return err
+	}
+	next := *cur
+	next.LuckPenalty = clampFloat(next.LuckPenalty+cost, 0, 1)
+	next.UpdatedTS = float64(now.Unix())
+	return store.UpsertPlayerConditionTx(ctx, tx, next)
+}
+
+// alcoholHealthCostFactor 按酒类强度给健康代价倍率：烈酒 2 倍、啤酒 0.6 倍。
+func alcoholHealthCostFactor(category string) float64 {
+	switch category {
+	case "beer":
+		return 0.6
+	case "spirit":
+		return 2.0
+	}
+	return 1.0
 }
 
 // conditionFreeMealKV 免费餐冷却戳（kv 表，值为世界钟游戏日号）。

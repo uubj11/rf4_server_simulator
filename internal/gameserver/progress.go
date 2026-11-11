@@ -54,18 +54,20 @@ func nextLevelReq(level int64) int64 {
 }
 
 // skillPointsForLevel 从 L-1 升到 L 新增技能点。
+// 本地服改动：每级技能点按原版公式放大 10 倍（10/20/30/40/50），
+// 原版为 1/2/3/4/5。仅影响本地模拟器，不涉及游戏客户端文件。
 func skillPointsForLevel(level int64) int64 {
 	switch {
 	case level < 20:
-		return 1
+		return 10
 	case level < 30:
-		return 2
+		return 20
 	case level < 40:
-		return 3
+		return 30
 	case level < 50:
-		return 4
+		return 40
 	default:
-		return 5
+		return 50
 	}
 }
 

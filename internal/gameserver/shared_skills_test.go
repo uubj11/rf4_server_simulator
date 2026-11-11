@@ -24,7 +24,7 @@ func TestSharedSkillPartialWriteAndResetRollBackTogether(t *testing.T) {
 		t.Fatal("partial shared write succeeded")
 	}
 	var rows int
-	if err := srv.DB.SQL.QueryRow(`SELECT COUNT(*) FROM skill_node WHERE uid=? AND node_id IN(501,503)`, sharedSkillUID).Scan(&rows); err != nil || rows != 0 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 9 {
+	if err := srv.DB.SQL.QueryRow(`SELECT COUNT(*) FROM skill_node WHERE uid=? AND node_id IN(501,503)`, sharedSkillUID).Scan(&rows); err != nil || rows != 0 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 90 {
 		t.Fatalf("failed learning left half a group or consumed points: rows=%d err=%v", rows, err)
 	}
 	if _, err := srv.DB.SQL.Exec(`DROP TRIGGER fail_shared_insert`); err != nil {
@@ -42,7 +42,7 @@ func TestSharedSkillPartialWriteAndResetRollBackTogether(t *testing.T) {
 		t.Fatal("partial shared reset succeeded")
 	}
 	var sum int64
-	if err := srv.DB.SQL.QueryRow(`SELECT COUNT(*),SUM(level) FROM skill_node WHERE uid=? AND node_id IN(501,503)`, sharedSkillUID).Scan(&rows, &sum); err != nil || rows != 2 || sum != 2 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 8 {
+	if err := srv.DB.SQL.QueryRow(`SELECT COUNT(*),SUM(level) FROM skill_node WHERE uid=? AND node_id IN(501,503)`, sharedSkillUID).Scan(&rows, &sum); err != nil || rows != 2 || sum != 2 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 89 {
 		t.Fatalf("failed reset changed ranks or refunded points: rows=%d sum=%d err=%v", rows, sum, err)
 	}
 }
@@ -80,7 +80,7 @@ func TestSharedSkillLearningChargesOnceAndKeepsEachUnlockThreshold(t *testing.T)
 			if ok, reason := srv.skillLearn(ctx, sharedSkillUID, pair.cat, pair.first); !ok {
 				t.Fatalf("first shared rank rejected: %s", reason)
 			}
-			if sharedSkillRank(t, srv, pair.first) != 1 || sharedSkillRank(t, srv, pair.second) != 1 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 8 {
+			if sharedSkillRank(t, srv, pair.first) != 1 || sharedSkillRank(t, srv, pair.second) != 1 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 89 {
 				t.Fatal("shared rank did not synchronize or charged twice")
 			}
 			tree, err := srv.BuildSkillTree311(ctx, sharedSkillUID, ^uint64(0))
@@ -89,13 +89,13 @@ func TestSharedSkillLearningChargesOnceAndKeepsEachUnlockThreshold(t *testing.T)
 			}
 			cat := sharedSkillCategoryForTest(t, tree, pair.cat)
 			locked := sharedSkillNodeForTest(t, cat, pair.second)
-			if u32Of(locked.Field(3).Num) != 1 || u32Of(locked.Field(6).Num) != 0 || u32Of(tree.Field(0).Num) != 8 {
+			if u32Of(locked.Field(3).Num) != 1 || u32Of(locked.Field(6).Num) != 0 || u32Of(tree.Field(0).Num) != 89 {
 				t.Fatal("protocol lost shared rank or unlocked the 30% node too early")
 			}
 			if ok, reason := srv.skillLearn(ctx, sharedSkillUID, pair.cat, pair.second); ok || reason != "locked" {
 				t.Fatalf("shared peer bypassed its own threshold: %v %s", ok, reason)
 			}
-			if srv.skillAvailablePoints(ctx, sharedSkillUID) != 8 {
+			if srv.skillAvailablePoints(ctx, sharedSkillUID) != 89 {
 				t.Fatal("denied learning consumed points")
 			}
 			if err := srv.DB.AddSkillPoints(ctx, sharedSkillUID, pair.cat, 30); err != nil {
@@ -104,7 +104,7 @@ func TestSharedSkillLearningChargesOnceAndKeepsEachUnlockThreshold(t *testing.T)
 			if ok, reason := srv.skillLearn(ctx, sharedSkillUID, pair.cat, pair.second); !ok {
 				t.Fatalf("unlocked peer was treated as mutually exclusive: %s", reason)
 			}
-			if sharedSkillRank(t, srv, pair.first) != 2 || sharedSkillRank(t, srv, pair.second) != 2 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 7 {
+			if sharedSkillRank(t, srv, pair.first) != 2 || sharedSkillRank(t, srv, pair.second) != 2 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 88 {
 				t.Fatal("learning the peer did not advance the same shared rank")
 			}
 			cat = srv.buildSingleSkill312(ctx, sharedSkillUID, pair.cat)
@@ -133,29 +133,29 @@ func TestSharedSkillResetRefundsOneAllocationAndPreservesExtraPoints(t *testing.
 			t.Fatal(reason)
 		}
 	}
-	if srv.skillAvailablePoints(ctx, sharedSkillUID) != 23 || sharedSkillRank(t, srv, 503) != 4 || sharedSkillRank(t, srv, 708) != 2 {
+	if srv.skillAvailablePoints(ctx, sharedSkillUID) != 104 || sharedSkillRank(t, srv, 503) != 4 || sharedSkillRank(t, srv, 708) != 2 {
 		t.Fatal("same group number merged across fishing categories or extra points changed")
 	}
 	peer := int64(503)
 	if err := srv.resetSkillNodes(ctx, sharedSkillUID, 1, &peer); err != nil {
 		t.Fatal(err)
 	}
-	if sharedSkillRank(t, srv, 501) != 0 || sharedSkillRank(t, srv, 503) != 0 || sharedSkillRank(t, srv, 702) != 2 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 27 {
+	if sharedSkillRank(t, srv, 501) != 0 || sharedSkillRank(t, srv, 503) != 0 || sharedSkillRank(t, srv, 702) != 2 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 108 {
 		t.Fatal("reset did not clear the selected shared pair and refund exactly four points")
 	}
 	if err := srv.resetSkillNodes(ctx, sharedSkillUID, 1, &peer); err != nil {
 		t.Fatal(err)
 	}
-	if srv.skillAvailablePoints(ctx, sharedSkillUID) != 27 {
+	if srv.skillAvailablePoints(ctx, sharedSkillUID) != 108 {
 		t.Fatal("repeated shared reset refunded points again")
 	}
 	if err := srv.resetSkillNodes(ctx, sharedSkillUID, 0, nil); err != nil {
 		t.Fatal(err)
 	}
-	if srv.skillAvailablePoints(ctx, sharedSkillUID) != 29 || srv.skillBonusPoints(ctx, sharedSkillUID) != 20 {
+	if srv.skillAvailablePoints(ctx, sharedSkillUID) != 110 || srv.skillBonusPoints(ctx, sharedSkillUID) != 20 {
 		t.Fatal("reset lost extra points or returned duplicate shared allocations")
 	}
-	if skillPointsTotal(58) != 153 {
+	if skillPointsTotal(58) != 1530 {
 		t.Fatal("shared rules changed the original level-point schedule")
 	}
 }
@@ -164,7 +164,7 @@ func TestSharedSkillConcurrentLearningHonorsBudgetAndMaximumRank(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		level, want int64
-	}{{2, 1}, {10, 7}} {
+	}{{2, 7}, {10, 7}} {
 		t.Run(fmt.Sprintf("level%d", tc.level), func(t *testing.T) {
 			srv := sharedSkillTestServer(t, tc.level)
 			ctx := t.Context()
@@ -258,11 +258,11 @@ func TestSharedSkillLegacyReadPreservesCurrentPointBalanceAndRawRecords(t *testi
 	}
 	for range 2 {
 		total, spent, bonus, available := srv.DB.SkillPointsAvailable(ctx, sharedSkillUID)
-		if total != 113 || spent != 78 || bonus != 0 || available != 35 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 35 {
+		if total != 1130 || spent != 78 || bonus != 0 || available != 1052 || srv.skillAvailablePoints(ctx, sharedSkillUID) != 1052 {
 			t.Fatalf("legacy balance changed: %d/%d/%d/%d", total, spent, bonus, available)
 		}
 		tree, err := srv.BuildSkillTree311(ctx, sharedSkillUID, ^uint64(0))
-		if err != nil || u32Of(tree.Field(0).Num) != 35 {
+		if err != nil || u32Of(tree.Field(0).Num) != 1052 {
 			t.Fatalf("tree balance changed: %v %v", tree, err)
 		}
 		for _, pair := range []struct{ cat, first, second int64 }{{1, 501, 503}, {2, 702, 708}} {
@@ -272,7 +272,7 @@ func TestSharedSkillLegacyReadPreservesCurrentPointBalanceAndRawRecords(t *testi
 			}
 		}
 		profile, err := srv.BuildProfile307(ctx, sharedSkillUID)
-		if err != nil || u32Of(profile.Field(6).Num) != 113 {
+		if err != nil || u32Of(profile.Field(6).Num) != 1052 {
 			t.Fatalf("profile total changed: %v %v", profile, err)
 		}
 	}

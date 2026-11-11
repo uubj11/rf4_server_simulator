@@ -744,6 +744,8 @@ func hSocialPublic(ctx *Ctx) ([]byte, bool) {
 	if msg == "" {
 		return nil, true // 空消息不返回响应也不广播
 	}
+	// 钓点情报已下线（双轨保底接管后不再需要点位提示），输入 1 / /spot / /钓点
+	// 恢复成普通聊天，不再拦截。
 	if strings.HasPrefix(msg, "/") {
 		ctx.Log.Info("24/10 GM 指令（Go 未实现，不回显）", "text", msg)
 		return nil, true

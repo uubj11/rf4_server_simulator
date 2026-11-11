@@ -442,6 +442,23 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 			out.Updated = append(out.Updated, guid)
 			continue
 		}
+		// 食笼/PVA 装的窝料：这次抛投会把笼里最后一份掏空时，若背包有同款就顶上一份，
+		// 笼里这份保持不动。喂食器因此不用每抛一次就手动重装。
+		if cast && (def.Category == 46 || def.Category == 30) && baitQuantity(row) <= 1 {
+			backpackGUID, refillErr := s.refillCageFromBackpackTx(ctx, tx, uid, def)
+			if refillErr != nil {
+				return out, refillErr
+			}
+			if backpackGUID != "" {
+				out.Groundbait = append(out.Groundbait, groundbaitUse{ItemID: def.ItemID, Units: 1,
+					Category: def.Category, GUID: row.GUID})
+				if !containsGUID(out.Removed, backpackGUID) {
+					out.Removed = append(out.Removed, backpackGUID)
+				}
+				out.Updated = append(out.Updated, guid, backpackGUID)
+				continue
+			}
+		}
 		// 只消耗已挂载的一份，下一次抛竿前再补饵。
 		if _, err := consumeItemQtyTx(ctx, tx, row, 1); err != nil {
 			return out, err
@@ -507,6 +524,46 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 		return baitChange{}, err
 	}
 	return out, nil
+}
+
+// refillCageFromBackpackTx 从背包扣掉一份与笼里同款的窝料，返回被扣那份的 GUID。
+// 背包里没有同款时返回空串，由调用方回到原来的"掏空即摘组件"路径。
+func (s *Server) refillCageFromBackpackTx(ctx context.Context, tx *sql.Tx, uid int64, def *store.ItemDef) (string, error) {
+	if def == nil || def.ItemID == "" {
+		return "", nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT guid FROM item WHERE uid=? AND item_id=? AND container='backpack' AND qty>0 ORDER BY created_ts,guid`, uid, def.ItemID)
+	if err != nil {
+		return "", err
+	}
+	var candidates []string
+	for rows.Next() {
+		var guid string
+		if scanErr := rows.Scan(&guid); scanErr != nil {
+			rows.Close()
+			return "", scanErr
+		}
+		candidates = append(candidates, guid)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return "", err
+	}
+	for _, guid := range candidates {
+		back, err := getOwnedItemTx(ctx, tx, uid, guid)
+		if err != nil {
+			return "", err
+		}
+		if back == nil || back.GUID == "" {
+			continue
+		}
+		if _, err := consumeItemQtyTx(ctx, tx, back, 1); err != nil {
+			return "", err
+		}
+		return guid, nil
+	}
+	return "", nil
 }
 
 func removeConsumedRigReferenceTx(ctx context.Context, db *store.DB, tx *sql.Tx, parent *store.Item, guid string) error {

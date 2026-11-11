@@ -291,6 +291,7 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			}
 			return nil, true
 		}
+		keepLoc, keepSpot := st.Loc, st.Spot
 		st.Pending = nil
 		st.CastActive = false
 		st.Hooked = false
@@ -302,6 +303,10 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			st.Keepnet = append(st.Keepnet, &kept)
 		}
 		st.mu.Unlock()
+		// 双轨保底计数在“鱼真正入护”这一刻推进。
+		// 14/4 收竿时 Pending 已被这里清空（hooked=false），原先挂在 14/4 的
+		// recordHuntCatch 永远不会触发，计数会永久卡死在上一次的值。
+		s.recordHuntCatch(cctx, uid, keepLoc, keepSpot, &kept)
 		s.notifyFishKept(ctx.Sess, &kept)
 		// 钓获礼包：入护成功后按概率当场开箱（异步，避免拖慢入护回包）。
 		s.scheduleLootBox(ctx.Sess, &kept)
@@ -419,12 +424,17 @@ func (s *Server) fishingRelease(ctx *Ctx) ([]byte, bool) {
 			return nil, true
 		}
 		st.mu.Lock()
+		keepLoc, keepSpot := st.Loc, st.Spot
 		st.Pending = nil
 		st.CastActive = false
 		st.Hooked = false
 		st.Resolved = true
 		st.persist.recoverCompleted, st.persist.recoverPending = false, false
 		st.mu.Unlock()
+		// 放生同样是“鱼已经钓上来”，保底计数在此推进；跑鱼/脱钩不走到这里。
+		if !replayed {
+			s.recordHuntCatch(cctx, uid, keepLoc, keepSpot, pending)
+		}
 		if !replayed && pending.NamedID != "" {
 			s.DB.NamedFishNoteRecatch(cctx, pending.NamedID)
 		}

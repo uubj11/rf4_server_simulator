@@ -1250,6 +1250,7 @@ func hFishingPull(ctx *Ctx) ([]byte, bool) {
 	st.mu.Unlock()
 	if needsConfirmation && nibble {
 		finishNibbleHook(ctx, st, pending, gear, castActive, resolved)
+		srv.notifyGearAdvice(ctx.Sess, gear, pending)
 		ctx.Log.Info("14/9 海钓嘬饵未中钩，重新排鱼", "rod", shortGUID(gear),
 			"fish", shortGUID(pending.FishGUID), "species", pending.Species)
 		return nil, true
@@ -1326,6 +1327,7 @@ func hFishingHooked(ctx *Ctx) ([]byte, bool) {
 	ctx.Log.Info("14/11 中鱼", "rod", shortGUID(gear), "fish", shortGUID(fishGUID), "species", species, "was_hooked", wasHooked)
 	if nibble {
 		finishNibbleHook(ctx, st, pending, gear, castActive, resolved)
+		srv.notifyGearAdvice(ctx.Sess, gear, pending)
 		ctx.Log.Info("14/11 嘬饵未中钩，重新排鱼", "fish", shortGUID(fishGUID), "species", species)
 		return nil, true
 	}
@@ -1503,13 +1505,16 @@ func hFishingLeft(ctx *Ctx) ([]byte, bool) {
 		castActive := st.CastActive
 		inWater := st.InWater
 		loc, spot := st.Loc, st.Spot
+		gearGuid := st.GearGuid
 		st.mu.Unlock()
 		if hooked && !alreadyResolved {
 			srv.bumpFishingCounter(ctx.Sess.Userid, "escapes")
 			srv.recordHuntEscape(ctx.Sess.pushCtx(), ctx.Sess.Userid, loc, spot, pending)
 			srv.notifyFishEscape(ctx.Sess, pending, "脱钩离开")
+			srv.notifyGearAdvice(ctx.Sess, gearGuid, pending)
 			ctx.Log.Info("14/12 已中鱼跑鱼，按真脱钩播报", "f0", f0)
 		} else {
+			srv.notifyGearAdvice(ctx.Sess, gearGuid, pending)
 			ctx.Log.Info("14/12 鱼未上钩离场，官方静默", "f0", f0, "hooked", hooked)
 		}
 		// 这一尾鱼的渔轮账到此为止，先落库再排下一尾。

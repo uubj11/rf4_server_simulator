@@ -243,6 +243,8 @@ func (s *Server) openSession(c *tunnel.Conn, sid uint64, payload []byte) {
 	// 世界时钟保活必须对新连接和重连都启动：否则重连会话在约 10 秒
 	// 无下行数据后会被客户端判定断线，形成"重连-断开"循环。
 	if !op.Reconnect {
+		// 客户端上线就把钓鱼宝典带起来；关闭由工具自己盯着 rf4_x64 完成。
+		launchFishCodex()
 		// 新玩家初始化（档案/starter 物品/快捷栏）
 		if err := s.EnsurePlayer(context.Background(), userid); err != nil {
 			sess.log.Warn("玩家初始化失败", "err", err)

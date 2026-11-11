@@ -648,12 +648,16 @@ func (s *Server) groundbaitRangeWeight(distance float64) float64 {
 func (s *Server) groundbaitGates(ctx context.Context, c fishRollContext, fishKey string, hold float64) (float64, float64) {
 	p := s.cachedFishEcology(ctx, c, fishKey)
 	if !p.Enabled {
+		// 本地服：全鱼种开放时也不做硬门，只压到偏低软权重。
+		if s.tunableF("fish_all_species_open", 1) == 1 {
+			return 0.5, 0.5
+		}
 		return 0.05, 0.05
 	}
 	water := fishWaterConditionsFor(p, c)
 	_, hour := worldDayAndHour(c.now.Unix())
 	layer := groundbaitClamp(s.fishLayerWeightProfile(p, c), 0.05, 1)
-	diel := groundbaitClamp(fishDielWeight(p, hour), 0.05, 1)
+	diel := groundbaitClamp(s.fishDielWeight(p, hour), 0.05, 1)
 	season := groundbaitClamp(fishSeasonWeight(p, water.Season), 0.05, 1)
 	rarity := groundbaitClamp(1-0.12*float64(p.RarityTier), 0.4, 1)
 	substrate := 1.0

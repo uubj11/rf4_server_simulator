@@ -433,6 +433,16 @@ func (s *Server) recordFightReelLoad(ctx *Ctx) {
 		// incurred damage remain; keep sampling time so protected time is not billed.
 		burnWear, burnSecs, segSecs = 0, 0, 0
 	}
+	// 搏鱼持续耗精力：14/8 是唯一能证明"正在拉鱼"的遥测，按它结算的真实时长记账，
+	// 拉力占额定制动力的比例越高消耗越快（硬拉大鱼更累）。与消耗品恢复同一条链路，
+	// 走 condition_fight_energy_per_sec 标定，不改任何装备数值。
+	if perSec := s.conditionParams().FightEnergyPerSec; perSec > 0 && tick > 0 {
+		ratio := 0.0
+		if cached.ratedKg > 0 {
+			ratio = clampUnit(cached.pullKg / cached.ratedKg)
+		}
+		s.spendEnergy(s.dbCtx(), uid, perSec*tick*(0.3+1.7*ratio))
+	}
 
 	st.mu.Lock()
 	if st.Pending != fish || st.GearGuid != gear {
