@@ -442,35 +442,21 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 			out.Updated = append(out.Updated, guid)
 			continue
 		}
-		// 食笼/PVA 装的窝料：笼里这堆快掏空时，从背包整叠顶上来把笼里堆回一叠，
-		// 之后每抛一次消耗笼里 1 份，用完再补——先消耗本堆叠，再动背包。
-		// 装配时窝料只拆 1 份，所以不这样补的话，笼里永远只有 1 份、每抛一次都得从背包搬。
+		// 食笼/PVA 装的窝料：这次抛投会把笼里最后一份掏空时，若背包有同款就顶上一份，
+		// 笼里这份保持不动。喂食器因此不用每抛一次就手动重装。
 		if cast && (def.Category == 46 || def.Category == 30) && baitQuantity(row) <= 1 {
-			target := s.cageRefillTarget()
-			cur := baitQuantity(row)
-			if cur < 1 {
-				cur = 1
+			backpackGUID, refillErr := s.refillCageFromBackpackTx(ctx, tx, uid, def)
+			if refillErr != nil {
+				return out, refillErr
 			}
-			if need := target - cur; need > 0 {
-				touched, taken, refillErr := s.refillCageFromBackpackTx(ctx, tx, uid, def, need)
-				if refillErr != nil {
-					return out, refillErr
+			if backpackGUID != "" {
+				out.Groundbait = append(out.Groundbait, groundbaitUse{ItemID: def.ItemID, Units: 1,
+					Category: def.Category, GUID: row.GUID})
+				if !containsGUID(out.Removed, backpackGUID) {
+					out.Removed = append(out.Removed, backpackGUID)
 				}
-				if taken > 0 {
-					if err := s.bumpMountedBaitQtyTx(ctx, tx, row, cur+taken); err != nil {
-						return out, err
-					}
-					out.Groundbait = append(out.Groundbait, groundbaitUse{ItemID: def.ItemID, Units: 1,
-						Category: def.Category, GUID: row.GUID})
-					for _, g := range touched {
-						if !containsGUID(out.Removed, g) {
-							out.Removed = append(out.Removed, g)
-						}
-					}
-					out.Updated = append(out.Updated, guid)
-					out.Updated = append(out.Updated, touched...)
-					continue
-				}
+				out.Updated = append(out.Updated, guid, backpackGUID)
+				continue
 			}
 		}
 		// 只消耗已挂载的一份，下一次抛竿前再补饵。
@@ -540,91 +526,44 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 	return out, nil
 }
 
-// refillCageFromBackpackTx 从背包取最多 need 份与笼里同款的窝料，返回被触动堆的 GUID
-// 和实际取到的份数。背包里没有同款时返回 nil/0，由调用方回到原来的"掏空即摘组件"路径。
-func (s *Server) refillCageFromBackpackTx(ctx context.Context, tx *sql.Tx, uid int64, def *store.ItemDef, need int64) ([]string, int64, error) {
-	if def == nil || def.ItemID == "" || need <= 0 {
-		return nil, 0, nil
+// refillCageFromBackpackTx 从背包扣掉一份与笼里同款的窝料，返回被扣那份的 GUID。
+// 背包里没有同款时返回空串，由调用方回到原来的"掏空即摘组件"路径。
+func (s *Server) refillCageFromBackpackTx(ctx context.Context, tx *sql.Tx, uid int64, def *store.ItemDef) (string, error) {
+	if def == nil || def.ItemID == "" {
+		return "", nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT guid FROM item WHERE uid=? AND item_id=? AND container='backpack' AND qty>0 ORDER BY created_ts,guid`, uid, def.ItemID)
 	if err != nil {
-		return nil, 0, err
+		return "", err
 	}
 	var candidates []string
 	for rows.Next() {
 		var guid string
 		if scanErr := rows.Scan(&guid); scanErr != nil {
 			rows.Close()
-			return nil, 0, scanErr
+			return "", scanErr
 		}
 		candidates = append(candidates, guid)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return nil, 0, err
+		return "", err
 	}
-	var touched []string
-	var taken int64
 	for _, guid := range candidates {
-		if taken >= need {
-			break
-		}
 		back, err := getOwnedItemTx(ctx, tx, uid, guid)
 		if err != nil {
-			return touched, taken, err
+			return "", err
 		}
-		if back == nil || back.GUID == "" || back.Qty <= 0 {
+		if back == nil || back.GUID == "" {
 			continue
 		}
-		take := need - taken
-		if back.Qty < take {
-			take = back.Qty
+		if _, err := consumeItemQtyTx(ctx, tx, back, 1); err != nil {
+			return "", err
 		}
-		if _, err := consumeItemQtyTx(ctx, tx, back, take); err != nil {
-			return touched, taken, err
-		}
-		touched = append(touched, guid)
-		taken += take
+		return guid, nil
 	}
-	return touched, taken, nil
-}
-
-// cageRefillTarget 一次补料把笼里堆到几份：滑条 cage_refill_qty，缺省 20。
-func (s *Server) cageRefillTarget() int64 {
-	n := int64(s.tunableF("cage_refill_qty", 20))
-	if n < 2 {
-		n = 2
-	}
-	if n > 500 {
-		n = 500
-	}
-	return n
-}
-
-// bumpMountedBaitQtyTx 把已挂载饵料实例的数量改成 newQty（数量槽与镜像槽一起写）。
-func (s *Server) bumpMountedBaitQtyTx(ctx context.Context, tx *sql.Tx, row *store.Item, newQty int64) error {
-	if row == nil || newQty < 1 {
-		return fmt.Errorf("无效饵料数量 %d", newQty)
-	}
-	fields, err := FieldsFromJSON(row.FieldsJSON)
-	if err != nil {
-		return err
-	}
-	if !setItemQty(row.WireClass, fields, uint64(newQty)) {
-		return fmt.Errorf("饵料实例缺少数量字段")
-	}
-	bumpCreatedTicks(fields, row.WireClass)
-	fj, err := FieldsToJSON(fields)
-	if err != nil {
-		return err
-	}
-	if err := s.DB.UpdateItemFieldsTx(ctx, tx, row.GUID, fj, newQty, row.Durability, row.Workmanship, row.RigGUID); err != nil {
-		return err
-	}
-	row.FieldsJSON = fj
-	row.Qty = newQty
-	return nil
+	return "", nil
 }
 
 func removeConsumedRigReferenceTx(ctx context.Context, db *store.DB, tx *sql.Tx, parent *store.Item, guid string) error {
