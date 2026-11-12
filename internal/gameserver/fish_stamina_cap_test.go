@@ -1,47 +1,69 @@
 package gameserver
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
-// 大鱼体力池封顶：
-// 体力池随体重线性膨胀，而渔轮泄力有硬上限，导致 >38kg 的鱼必然把张力
-// 压在泄力上限上，时效 ∝ 体力池 ∝ 体重。封顶后大鱼的等效体重不超过 capG，
-// 小鱼完全不受影响，capG<=0 回到原版行为。
+// 大鱼体力池幂律曲线：拐点以下完全等于原版线性（小鱼手感不动），
+// 拐点以上按 (体重/拐点)^(指数-1) 折减，指数 1.0 可完整回退。
 
-func TestBigFishStaminaCap(t *testing.T) {
-	const capG = defaultBigFishStaminaCapG
+func TestBigFishStaminaCurve(t *testing.T) {
+	knee := defaultFishStaminaKneeG
+	exp := defaultFishStaminaExponent
 
-	// A1：远超封顶的鱼，等效体重被压到 capG。
-	if got := bigFishStaminaCapG(246739, capG); got != capG {
-		t.Fatalf("246.7kg 应封顶到 %.0f，得到 %.0f", capG, got)
-	}
-	if got := bigFishStaminaCapG(3125000, capG); got != capG {
-		t.Fatalf("3125kg 应封顶到 %.0f，得到 %.0f", capG, got)
-	}
-
-	// A2：封顶线以内的鱼完全不变（原版手感保留）。
-	for _, w := range []float64{1, 230, 1417, 11000, 32000, 38000} {
-		if got := bigFishStaminaCapG(w, capG); got != w {
-			t.Fatalf("%.0fg 不该被封顶，得到 %.0f", w, got)
+	// ① 拐点及以下一律返回 1（与原版逐字节一致）。
+	for _, w := range []float64{1, 230, 1000, 5000, 9999, knee} {
+		if got := bigFishStaminaScale(w, knee, exp); got != 1 {
+			t.Fatalf("%.0fg 在拐点以下不该被折减，得到 %.6f", w, got)
 		}
 	}
 
-	// A3：capG<=0 关闭封顶，回到原版线性体力池。
-	if got := bigFishStaminaCapG(246739, 0); got != 246739 {
-		t.Fatalf("cap=0 应关闭封顶，得到 %.0f", got)
-	}
-	if got := bigFishStaminaCapG(246739, -1); got != 246739 {
-		t.Fatalf("cap<0 应关闭封顶，得到 %.0f", got)
+	// ② 拐点以上单调递减：体重越大，折减越狠。
+	prev := 1.0
+	for _, w := range []float64{11000, 30000, 51948, 246739, 3125000} {
+		got := bigFishStaminaScale(w, knee, exp)
+		if got <= 0 || got > prev {
+			t.Fatalf("%.0fg 折减倍率应单调变小：prev=%.6f got=%.6f", w, prev, got)
+		}
+		prev = got
 	}
 
-	// 体力池比值：封顶后 246.7kg 与 38kg 的体力池完全相等。
-	rawHeavy := verifiedStaminaPerGram * bigFishStaminaCapG(246739, capG)
-	rawCap := verifiedStaminaPerGram * bigFishStaminaCapG(capG, capG)
-	if rawHeavy != rawCap {
-		t.Fatalf("封顶后体力池应相等：%.1f vs %.1f", rawHeavy, rawCap)
+	// ③ 数值锚点（指数 0.40、拐点 10 kg）。
+	checks := []struct {
+		w    float64
+		want float64
+	}{
+		{11000, 0.9444},
+		{51948, 0.3722},
+		{246739, 0.1461},
+		{3125000, 0.0319},
 	}
-	// 未封顶时 246.7kg 的体力池应是 38kg 的 6.5 倍左右。
-	uncapped := verifiedStaminaPerGram * 246739
-	if ratio := uncapped / (verifiedStaminaPerGram * capG); ratio < 6.4 || ratio > 6.6 {
-		t.Fatalf("未封顶比值应约 6.49，得到 %.2f", ratio)
+	for _, c := range checks {
+		if got := bigFishStaminaScale(c.w, knee, exp); math.Abs(got-c.want) > 0.001 {
+			t.Fatalf("%.0fg 折减倍率应为 %.4f，得到 %.4f", c.w, c.want, got)
+		}
+	}
+
+	// ④ 三,125 kg 抽样上限鱼：体力池压到原版的 4% 以内，
+	//    这是「最好钓具半小时内拉完」的定量依据。
+	origPool := verifiedStaminaPerGram * 3125000
+	newPool := origPool * bigFishStaminaScale(3125000, knee, exp)
+	if ratio := newPool / origPool; ratio > 0.035 {
+		t.Fatalf("3125kg 体力池应压到 3.5%% 以内，实际 %.4f", ratio)
+	}
+
+	// ⑤ 回退：指数 1.0 或拐点 <=0 都回到原版线性。
+	for _, tc := range []struct{ knee, exp float64 }{{knee, 1.0}, {0, exp}, {-1, exp}, {knee, 0}} {
+		if got := bigFishStaminaScale(3125000, tc.knee, tc.exp); got != 1 {
+			t.Fatalf("回退参数 knee=%.0f exp=%.2f 应返回 1，得到 %.6f", tc.knee, tc.exp, got)
+		}
+	}
+
+	// ⑥ 拐点以上连续，不能出现断崖：20kg 与 20.2kg 的倍率差 < 1%。
+	a := bigFishStaminaScale(20000, knee, exp)
+	b := bigFishStaminaScale(20200, knee, exp)
+	if a-b > 0.01 {
+		t.Fatalf("拐点以上应连续，20kg=%.4f 20.2kg=%.4f", a, b)
 	}
 }
