@@ -35,7 +35,7 @@ func TestFishGradeRulerBoundariesAndWire(t *testing.T) {
 					t.Fatalf("%s %dg: grade=%d want=%d", tc.species, weight, grade, want)
 				}
 				f := &RolledFish{FishGUID: newFishGUID(), Species: tc.species, WeightG: weight, Grade: grade}
-				if got := u32Of(s.buildFish27(f, "", "").Field(2).Num); got != uint32(want) {
+				if got := u32Of(s.buildFish27(f, "", "", 24).Field(2).Num); got != uint32(want) {
 					t.Fatalf("27 grade=%d want=%d", got, want)
 				}
 				for _, obj := range []*proto.Value{
@@ -128,7 +128,7 @@ func TestAdminFishUsesRealWeightAndSurvivesRestart(t *testing.T) {
 	}
 	for _, e := range entries {
 		want := s.rollGradeDB(context.Background(), e.Species, e.WeightG)
-		if e.Cat != want || u32Of(buildKeepnet25(e, "", 0).Field(3).Num) != uint32(want) {
+		if e.Cat != want || u32Of(buildKeepnet25(e, "", 0, "").Field(3).Num) != uint32(want) {
 			t.Fatalf("keepnet fish=%+v want grade=%d", e, want)
 		}
 	}
@@ -140,6 +140,10 @@ func TestAdminFishUsesRealWeightAndSurvivesRestart(t *testing.T) {
 
 func TestLuckyRollGradeUsesCappedWeight(t *testing.T) {
 	s, db := newProgressSrv(t)
+	if err := db.TunableSet(t.Context(), "grade_ratio_enabled", "0", "test"); err != nil {
+		t.Fatal(err)
+	}
+	s.execAdminCmd(&AdminCommand{Op: "reload_tunables"})
 	for i := 0; i < 100; i++ {
 		f := s.rollFishPoolsWithRules("loc1_02", 0.45, fishingSkillBonus{BiteSpeed: 1, TrophyLuck: 2})
 		if f == nil || f.WeightG > 450 || f.Grade != s.rollGradeDB(t.Context(), f.Species, f.WeightG) {

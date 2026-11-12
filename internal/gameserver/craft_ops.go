@@ -28,6 +28,7 @@ func init() {
 		d.Register(9, 3, hCraftMine2)
 		d.Register(9, 4, hCraftCost)
 		d.Register(9, 6, hCraftAddTemplate)
+		d.Register(9, 7, hCraftDeleteTemplate)
 	})
 }
 
@@ -80,6 +81,95 @@ func craftBatchSpecFor(def *store.ItemDef) craftBatchSpec {
 		return craftBatchSpec{Limit: 1, Yield: 1}
 	}
 	return craftBatchSpec{Limit: maxCraftQty, Yield: 1}
+}
+
+// vendRecipeReports 判定配方是否走贩卖机语义：recipe_id 以 _vend 结尾的
+// 全部是图内诱饵贩卖机商品（feed 14 + pva_stick 3 + pva_stinger 5，共 22 条），
+// 官方语义是机器按货架价卖料+搅拌一步完成，玩家不需要持有原料。
+func vendRecipeReports(recipeID string) bool {
+	return strings.HasSuffix(recipeID, "_vend")
+}
+
+// vendCharge 是贩卖机配方每套材料要按份购买的一种配料（Qty 未乘制作套数）。
+type vendCharge struct {
+	ItemID string
+	Qty    int64
+}
+
+// resolveVendCharges 解析贩卖机配方每套材料的购买清单。
+// 静态库读取必须在经济事务开启前完成（SQLite 单连接）。
+// 需求带显式 item_id 直接采用；类别/标签需求取客户端材料槽 f2 提交的
+// 具体物品（craftSlot.Species 承载，实抓 2026-11-09：槽 = {需求id, 临时GUID,
+// 具体item id}），槽序即需求序，已认领的槽不复用；类别可校验则校验，
+// 标签沿用既有"无法反查、忽略"口径（见 consumeByDemand）。
+func (s *Server) resolveVendCharges(ctx context.Context, demands []craftDemand, slots []craftSlot) ([]vendCharge, error) {
+	used := make([]bool, len(slots))
+	out := make([]vendCharge, 0, len(demands))
+	for _, d := range demands {
+		if d.ItemID != "" {
+			out = append(out, vendCharge{ItemID: d.ItemID, Qty: d.need()})
+			continue
+		}
+		picked := -1
+		for i, sl := range slots {
+			if used[i] || sl.Species == "" {
+				continue
+			}
+			if len(d.Categories) > 0 {
+				cat, ok := s.effectiveCategory(ctx, sl.Species)
+				if !ok || !containsI64(d.Categories, cat) {
+					continue
+				}
+			}
+			picked = i
+			break
+		}
+		if picked < 0 {
+			return nil, fmt.Errorf("需求 %s 没有可定价的材料槽", d.DemandID)
+		}
+		used[picked] = true
+		out = append(out, vendCharge{ItemID: slots[picked].Species, Qty: d.need()})
+	}
+	return out, nil
+}
+
+// vendTotalPrice 按配料单价（货架最低价，缺价时按货架补齐同款口径估价）
+// 合计 times 套的银币总额。价格读取同样必须在经济事务之外。
+func (s *Server) vendTotalPrice(ctx context.Context, charges []vendCharge, times int64) (int64, error) {
+	var total int64
+	for _, c := range charges {
+		price, err := s.DB.CraftIngredientSilverPrice(ctx, c.ItemID)
+		if err != nil {
+			return 0, fmt.Errorf("配料 %s 无法定价", c.ItemID)
+		}
+		q := c.Qty * times
+		if q > 0 && price > math.MaxInt64/q {
+			return 0, fmt.Errorf("配料 %s 价格合计溢出", c.ItemID)
+		}
+		total += price * q
+		if total < 0 {
+			return 0, fmt.Errorf("配料合计溢出")
+		}
+	}
+	return total, nil
+}
+
+// vendChargeNote 把配料清单压成流水 note（item×份 逗号分隔）。
+func vendChargeNote(charges []vendCharge) string {
+	parts := make([]string, 0, len(charges))
+	for _, c := range charges {
+		parts = append(parts, fmt.Sprintf("%sx%d", c.ItemID, c.Qty))
+	}
+	return strings.Join(parts, ",")
+}
+
+func containsI64(list []int64, v int64) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // craftTimesFor 把客户端提交的 qty 收敛到 [1, spec.Limit]。
@@ -586,6 +676,23 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 		}
 	}
 
+	// 贩卖机配方（*_vend）：机器按货架价卖料+搅拌一步完成，玩家不需要持有
+	// 原料。配料解析与定价读静态库/覆盖价，必须在经济事务开启前完成。
+	isVendCraft := vendRecipeReports(recipe.RecipeID)
+	var vendCharges []vendCharge
+	var vendTotal int64
+	if isVendCraft {
+		var verr error
+		vendCharges, verr = srv.resolveVendCharges(cctx, demands, req.Materials)
+		if verr == nil {
+			vendTotal, verr = srv.vendTotalPrice(cctx, vendCharges, times)
+		}
+		if verr != nil {
+			ctx.Log.Warn("9/1 贩卖机配料定价失败", "recipe", recipe.RecipeID, "err", verr)
+			return srv.replyCraftResult(ctx, false, nil, nil, nil)
+		}
+	}
+
 	tx, err := beginEconomyTx(cctx, srv.DB)
 	if err != nil {
 		ctx.Log.Warn("9/1 开启事务失败", "err", err)
@@ -612,6 +719,22 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 			cctx, tx, uid, req.Materials, demands, times)
 		if materialErr != nil {
 			return fail("引线材料扣除失败", "err", materialErr)
+		}
+	} else if isVendCraft {
+		// 同一事务内按货架价扣款：余额不足整体回滚，不产出、不扣钱。
+		if vendTotal > 0 {
+			if err := applyWalletTx(cctx, tx, uid, -vendTotal, 0, "buy", outputID, "",
+				fmt.Sprintf("vend recipe=%s qty=%d items=%s",
+					recipe.RecipeID, times, vendChargeNote(vendCharges))); err != nil {
+				if errors.Is(err, errInsufficientFunds) {
+					return fail("贩卖机余额不足", "total", vendTotal)
+				}
+				return fail("贩卖机扣款失败", "err", err)
+			}
+		}
+		// 自制窝料成分按实例记账：配料即真实用料，投进窝里后成分比例不变。
+		for _, c := range vendCharges {
+			usedMats = appendMaterialUses(usedMats, c.ItemID, c.Qty*times)
 		}
 	} else if len(demands) > 0 && allDemandsExplicit(demands) {
 		need, ok := scaleDemands(demands, times)
@@ -881,6 +1004,10 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 	ctx.AfterResponse(func() {
 		if masteryGain > 0 {
 			ctx.Sess.Push2_4SkillTree("制作 " + outputID)
+		}
+		if isVendCraft && vendTotal > 0 {
+			// 扣了银币就刷新钱包 HUD（与商店购买同一信号）。
+			ctx.Sess.Push2_1()
 		}
 		if mounted != nil {
 			// 4/21 是物品移除信号：客户端据它把鱼护里的原鱼撤下
@@ -1379,7 +1506,8 @@ func (s *Server) mountedFishTreeTx(ctx context.Context, tx *sql.Tx, uid int64, s
 		if sl.Species != "" && entry.Species != "" && sl.Species != entry.Species {
 			return nil, fmt.Sprintf("鱼种不符 slot=%s keepnet=%s", sl.Species, entry.Species), nil
 		}
-		fish := buildKeepnet25(entry, "", store.SpeciesRarityTx(ctx, tx, entry.Species))
+		s.fillKeepnetVariant(entry)
+		fish := buildKeepnet25(entry, "", store.SpeciesRarityTx(ctx, tx, entry.Species), entry.ModelVariant)
 		if idx := fieldIdxByCS("ecknbkpeeji", csGUID); idx >= 0 && idx < len(fish.Fields) {
 			fish.Fields[idx].Hex = uuid5OIDHex(boardGUID + "/mounted_fish")
 		}
@@ -1434,7 +1562,8 @@ func (s *Server) consumeMountedFishTx(ctx context.Context, tx *sql.Tx, uid int64
 
 // hCraftCost 处理 9/4 制作询价，返回 501 价格行：
 // STR 配方 systemID、U64 银价、U64 金价、U32 数量。
-// 当前制作只扣材料、不收费，因此价格为 0；数量缺省为 1。
+// 家用版制作只扣材料、不收费，价格为 0；贩卖机配方（*_vend）按货架最低价
+// 报真实总价，数量按产出品类上限收敛，保证与 9/1 的实际扣款一致。
 func hCraftCost(ctx *Ctx) ([]byte, bool) {
 	srv := ctx.Sess.Srv
 	if !srv.requireDB(ctx) {
@@ -1445,13 +1574,29 @@ func hCraftCost(ctx *Ctx) ([]byte, bool) {
 	if qty == 0 {
 		qty = 1
 	}
+	silver := int64(0)
+	cctx := ctx.Sess.pushCtx()
+	if recipe := srv.resolveRecipe(cctx, req.Recipe); recipe != nil && vendRecipeReports(recipe.RecipeID) {
+		if def, derr := srv.DB.GetItemDefByItemID(cctx, recipe.OutputID); derr == nil && def != nil {
+			qty = craftTimesFor(craftBatchSpecFor(def), req.Qty)
+		}
+		if charges, err := srv.resolveVendCharges(cctx, parseDemands(recipe.MaterialsJSON), req.Materials); err == nil {
+			if total, terr := srv.vendTotalPrice(cctx, charges, qty); terr == nil {
+				silver = total
+			} else {
+				ctx.Log.Warn("9/4 贩卖机配料定价失败", "recipe", recipe.RecipeID, "err", terr)
+			}
+		} else {
+			ctx.Log.Warn("9/4 贩卖机配料解析失败", "recipe", recipe.RecipeID, "err", err)
+		}
+	}
 	row := wiregen.MustMakeObj("ifdefblccde", map[int]*proto.Value{
-		0: proto.StrVal(req.Recipe), // f0 systemID（必须与请求一致）
-		1: proto.U64(0),             // f1 银价（制作不收货币）
-		2: proto.U64(0),             // f2 金币价
-		3: proto.U32(uint32(qty)),   // f3 数量（请求里的制作数量）
+		0: proto.StrVal(req.Recipe),  // f0 systemID（必须与请求一致）
+		1: proto.U64(uint64(silver)), // f1 银价（贩卖机配方为配料总价）
+		2: proto.U64(0),              // f2 金币价
+		3: proto.U32(uint32(qty)),    // f3 数量（贩卖机配方收敛后数量）
 	})
-	ctx.Log.Info("9/4 询价", "recipe", req.Recipe, "qty", qty,
+	ctx.Log.Info("9/4 询价", "recipe", req.Recipe, "qty", qty, "silver", silver,
 		"materials", len(req.Materials), "tools", len(req.Tools), "source", req.Source)
 	body, err := proto.EncodeValue(row, ctx.Sess.Table())
 	if err != nil {
@@ -1462,81 +1607,284 @@ func hCraftCost(ctx *Ctx) ([]byte, bool) {
 
 // ---- 9/6 添加配方模板 ----
 
-// hCraftAddTemplate 处理 9/6 配方模板请求，返回 171 配方详情。
-// 请求键可以是配方 id 或产出物 id；未指定或未知时使用第一条配方，
-// 配方表为空时返回 null。
+// craftTemplateElemCode 是 171 的 f3/f4 元素容器 args code。
+//
+// 元素类必须是 hbokamnohjb（type_id 170，DTO bpdjphlfjdj）：客户端
+// dmolhiobcbb.plphdfehkjl 把这两格读成 bpdjphlfjdj[]，发 17(kdpbhdffjaf)
+// 会在 lpdfanjcalm<T> 抛 InvalidCastException，保存回调抛出后面板卡在
+// busy 态（Player.log 2026-11-11 12:46:32 实栈）。
+// 170 -> 96 取自 argcode_table.json 的 by_type_id；9/5 的 171 列表用 97，
+// 96/97 成对，互证这组映射。
+const craftTemplateElemCode = "96"
+
+// craftTemplateListCode 是 9/5 响应里 171 列表的容器 args code。
+// by_cmd["9/5"]="97" 且 by_type_id["171"]="97"，两处一致。
+const craftTemplateListCode = "97"
+
+// hCraftAddTemplate 处理 9/6 保存配方模板。
+//
+// 请求体就是一整个 171 对象（实抓 2026-11-11 14:29:20）：
+//
+//	f0 GUID（客户端未分配时为全零）
+//	f1 模板名（玩家填的「奶油1」）
+//	f2 配方键（craft_feed_dry）
+//	f3 args(96) 工具条目、f4 args(96) 材料条目，元素 170 = {需求key, 序号, 真实物品id}
+//
+// 客户端已经把模板内容算好了，服务端只做两件事：补一个稳定 GUID、落库，
+// 然后按 171 回包。不再按配方重新推导材料——那会把玩家选的具体物品丢掉。
 func hCraftAddTemplate(ctx *Ctx) ([]byte, bool) {
 	srv := ctx.Sess.Srv
 	if !srv.requireDB(ctx) {
 		return nil, false
 	}
 	cctx := ctx.Sess.pushCtx()
-	recipeID := ""
-	if strs := deepStrings(ctx.Tree); len(strs) > 0 {
-		recipeID = strs[0]
-	}
-	recipe := srv.resolveRecipe(cctx, recipeID)
-	if recipe == nil {
-		if list, err := srv.DB.ListRecipes(cctx); err == nil && len(list) > 0 {
-			recipe = list[0]
-		}
-	}
-	if recipe == nil {
+
+	tmpl, ok := craftTemplateFromRequest(ctx.Tree)
+	if !ok {
+		ctx.Log.Warn("9/6 请求体不是合法 171 模板（缺字段或 f3/f4 形状不符）")
 		return []byte{0x00}, true // ctx.reply(None)
 	}
-	guid := uuid5OIDHex(recipe.RecipeID)
-	tmpl := craftTemplate(guid, recipe.Name, recipe.Kind, craftDemandObjs(recipe))
+	if tmpl.Fields[2].StrOr() == "" {
+		ctx.Log.Warn("9/6 请求缺配方键")
+		return []byte{0x00}, true
+	}
+	recipe := srv.resolveRecipe(cctx, tmpl.Fields[2].StrOr())
+	if recipe == nil {
+		ctx.Log.Warn("9/6 未知配方", "recipe", tmpl.Fields[2].StrOr())
+		return []byte{0x00}, true
+	}
+
+	guid := tmpl.Fields[0].GuidHex()
+	if guid == "" || guid == zeroGUIDHex {
+		guid = uuid5OIDHex(fmt.Sprintf("%d:%s:%s", ctx.Sess.Userid, recipe.RecipeID, tmpl.Fields[1].StrOr()))
+	}
+	tmpl.Fields[0] = proto.FGuid(guid)
+
+	// f3/f4 已由 craftTemplateFromRequest 校验为非 nil 的 args(96) 容器，
+	// 这里只解析一次，落库与日志共用结果，不再二次解引用字段。
+	toolsJSON, toolCount := craftTemplateEntriesJSON(tmpl.Fields[3].Val)
+	materialsJSON, materialCount := craftTemplateEntriesJSON(tmpl.Fields[4].Val)
+
+	now := float64(time.Now().Unix())
+	row := &store.CraftTemplate{
+		UID:           ctx.Sess.Userid,
+		GUID:          guid,
+		RecipeID:      recipe.RecipeID,
+		Name:          tmpl.Fields[1].StrOr(),
+		Kind:          tmpl.Fields[2].StrOr(),
+		ToolsJSON:     toolsJSON,
+		MaterialsJSON: materialsJSON,
+		CreatedTs:     now,
+		UpdatedTs:     now,
+	}
+	if err := srv.DB.SaveCraftTemplate(cctx, row); err != nil {
+		ctx.Log.Error("9/6 模板落库失败", "err", err, "recipe", recipe.RecipeID)
+		return []byte{0x00}, true
+	}
+
 	body, err := proto.EncodeValue(tmpl, ctx.Sess.Table())
 	if err != nil {
 		return nil, false
 	}
-	ctx.Log.Info("9/6 配方模板", "recipe", recipe.RecipeID, "guid", guid)
+	ctx.Log.Info("9/6 配方模板", "recipe", recipe.RecipeID, "guid", guid,
+		"name", row.Name, "tools", toolCount, "materials", materialCount)
 	return body, true
 }
 
-// craftTemplate 构造 171 配方模板：f0 GUID、f1 名称、f2 分类、
-// f3 输入材料、f4 输出产品。9/6 不返回输出产品，f4 使用空 args("61")。
-func craftTemplate(guid, name, kind string, inputs []*proto.Value) *proto.Value {
+// zeroGUIDHex 是客户端「还没分配模板 id」时下发的全零 GUID。
+const zeroGUIDHex = "00000000000000000000000000000000"
+
+// hCraftDeleteTemplate 处理 9/7 删除配方模板，响应 null。
+//
+// 请求里带模板 GUID（16 字节 hex）；只删本人模板，别人的 GUID 传进来删不到。
+// 模板本来就不存在时同样回 null——删除是幂等的，客户端不需要区分。
+func hCraftDeleteTemplate(ctx *Ctx) ([]byte, bool) {
+	srv := ctx.Sess.Srv
+	if srv == nil || srv.DB == nil {
+		return []byte{0x00}, true
+	}
+	guid := templateGUIDOf(ctx.Tree)
+	if guid == "" {
+		ctx.Log.Warn("9/7 请求形状不认识或缺少模板 GUID，按失败关闭不执行删除")
+		return []byte{0x00}, true
+	}
+	deleted, err := srv.DB.DeleteCraftTemplate(ctx.Sess.pushCtx(), ctx.Sess.Userid, guid)
+	if err != nil {
+		ctx.Log.Error("9/7 模板删除失败", "err", err, "guid", guid)
+	}
+	ctx.Log.Info("9/7 删除配方模板", "guid", guid, "deleted", deleted)
+	return []byte{0x00}, true
+}
+
+// templateGUIDOf 取 9/7 的模板 GUID。
+//
+// 实抓形状（2026-11-11 15:52:57，len=24）是 args(524) 的第一个参数直接就是
+// GUID：`03 03 "524" 0100 0c <16 bytes>`。因此只认顶层 args 的第 0 个元素，
+// 不再整树找"第一个 32 位 hex"——那样一旦请求里先出现容器/玩家 GUID，
+// 就会删错行。形状不认识时返回空串（fail closed，宁可不删也不删错）。
+func templateGUIDOf(root *proto.Value) string {
+	if root == nil {
+		return ""
+	}
+	if root.Kind != proto.KindArgs && root.Kind != proto.KindValList {
+		return ""
+	}
+	if len(root.Items) == 0 {
+		return ""
+	}
+	return guidOfValue(root.Items[0])
+}
+
+// guidOfValue 取单个 GUID 值；非 GUID 或全零返回空串。
+func guidOfValue(v *proto.Value) string {
+	if v == nil || v.Kind != proto.KindGuid {
+		return ""
+	}
+	if len(v.Hex) != 32 || v.Hex == zeroGUIDHex {
+		return ""
+	}
+	return v.Hex
+}
+
+// craftTemplateEntryTypeID / craftTemplateEntryClass 是 171.f3/f4 的元素类：
+// hbokamnohjb(170)，DTO bpdjphlfjdj。客户端按 bpdjphlfjdj[] 强转。
+const (
+	craftTemplateEntryTypeID = 170
+	craftTemplateEntryClass  = "hbokamnohjb"
+)
+
+// craftTemplateFromRequest 从请求树里取 171 模板对象并校验 f3/f4 形状。
+//
+// 只找到 171 还不够：f3/f4 是 VAL 字段，畸形请求可以让它是 null、标量或
+// 别的类型。不校验就往下走会在解引用 Val.Items 时 panic（handler 层没有
+// recover，panic 会打死整个 gameserver 进程），或者在 panic 之前先落库一条
+// 空模板脏数据。因此形状不符一律返回 false，由调用方回 null，既不落库也不崩。
+func craftTemplateFromRequest(root *proto.Value) (*proto.Value, bool) {
+	var found *proto.Value
+	var walk func(v *proto.Value)
+	walk = func(v *proto.Value) {
+		if v == nil || found != nil {
+			return
+		}
+		if v.Kind == proto.KindObj {
+			if v.TypeID == 171 || v.Class == "dmolhiobcbb" {
+				found = v
+				return
+			}
+			for i := range v.Fields {
+				if v.Fields[i].Val != nil {
+					walk(v.Fields[i].Val)
+				}
+			}
+			return
+		}
+		if v.Kind == proto.KindArgs || v.Kind == proto.KindValList ||
+			v.Kind == proto.KindArray || v.Kind == proto.KindTypedArr {
+			for _, it := range v.Items {
+				walk(it)
+			}
+		}
+	}
+	walk(root)
+	if found == nil || len(found.Fields) < 5 {
+		return nil, false
+	}
+	if !craftTemplateEntryListValid(found.Fields[3].Val) {
+		return nil, false
+	}
+	if !craftTemplateEntryListValid(found.Fields[4].Val) {
+		return nil, false
+	}
+	return found, true
+}
+
+// craftTemplateEntryListValid 校验 171.f3/f4：必须是 args 容器，且每个元素
+// 都是 hbokamnohjb(170) 三字段对象；空列表合法。
+func craftTemplateEntryListValid(v *proto.Value) bool {
+	if v == nil || v.Kind != proto.KindArgs {
+		return false
+	}
+	for _, it := range v.Items {
+		if it == nil || it.Kind != proto.KindObj || len(it.Fields) < 3 {
+			return false
+		}
+		if it.TypeID != craftTemplateEntryTypeID && it.Class != craftTemplateEntryClass {
+			return false
+		}
+	}
+	return true
+}
+
+// craftTemplateEntriesJSON 把 170 条目列表序列化成存取用的 JSON，并返回条数。
+//
+// 只接受 hbokamnohjb(170) 元素：旧客户端或畸形请求可能塞进别的三字段对象，
+// 不校验就会把任意对象当成模板条目存下来，9/5 再原样下发成坏模板。
+func craftTemplateEntriesJSON(v *proto.Value) (string, int) {
+	if v == nil || v.Kind != proto.KindArgs || len(v.Items) == 0 {
+		return "[]", 0
+	}
+	type entry struct {
+		Desc   string `json:"desc"`
+		Idx    uint32 `json:"idx"`
+		ItemID string `json:"item_id"`
+	}
+	out := make([]entry, 0, len(v.Items))
+	for _, it := range v.Items {
+		if it == nil || it.Kind != proto.KindObj || len(it.Fields) < 3 {
+			continue
+		}
+		if it.TypeID != craftTemplateEntryTypeID && it.Class != craftTemplateEntryClass {
+			continue
+		}
+		e := entry{Desc: it.Fields[0].StrOr(), ItemID: it.Fields[2].StrOr()}
+		if n := it.Fields[1].Num; n != nil {
+			e.Idx = uint32(*n)
+		}
+		out = append(out, e)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return "[]", 0
+	}
+	return string(raw), len(out)
+}
+
+// craftTemplateEntriesFromJSON 还原 170 条目列表；坏数据返回空列表而不是报错，
+// 让单条模板坏掉时不影响整个 9/5 列表。
+func craftTemplateEntriesFromJSON(raw string) []*proto.Value {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	type entry struct {
+		Desc   string `json:"desc"`
+		Idx    uint32 `json:"idx"`
+		ItemID string `json:"item_id"`
+	}
+	var ents []entry
+	if err := json.Unmarshal([]byte(raw), &ents); err != nil {
+		return nil
+	}
+	out := make([]*proto.Value, 0, len(ents))
+	for _, e := range ents {
+		out = append(out, wiregen.MustMakeObj("hbokamnohjb", map[int]*proto.Value{
+			0: proto.StrVal(e.Desc),
+			1: proto.U32(e.Idx),
+			2: proto.StrVal(e.ItemID),
+		}))
+	}
+	return out
+}
+
+// craftTemplate 构造 171 配方模板：f0 GUID、f1 名称、f2 分类（保存时为配方键）、
+// f3 工具、f4 材料，两格都是 args(96) 的 hbokamnohjb(170) 列表。
+func craftTemplate(guid, name, kind string, tools, materials []*proto.Value) *proto.Value {
 	return wiregen.MustMakeObj("dmolhiobcbb", map[int]*proto.Value{
 		0: proto.Guid(guid),
 		1: proto.StrVal(name),
 		2: proto.StrVal(kind),
-		3: proto.Args(proto.S(listCodeForObjs(inputs)), inputs...),
-		4: proto.Args(proto.S("61")),
+		3: proto.Args(proto.S(craftTemplateElemCode), tools...),
+		4: proto.Args(proto.S(craftTemplateElemCode), materials...),
 	})
-}
-
-// craftDemandObjs 根据权威配方数据构造 501 配方需求条目。
-// materials_json 为空时返回 nil，对应空的需求列表。
-func craftDemandObjs(recipe *store.Recipe) []*proto.Value {
-	if recipe.MaterialsJSON == "" {
-		return nil
-	}
-	var mats []craftDemand
-	if err := json.Unmarshal([]byte(recipe.MaterialsJSON), &mats); err != nil {
-		return nil
-	}
-	out := make([]*proto.Value, 0, len(mats))
-	for _, m := range mats {
-		// f4 item id 列表（utf-8 字节，非 null 数组；空也要给数组）
-		hexes := make([]string, 0, len(m.Alternatives)+1)
-		for _, a := range demandAccepts(m) {
-			if a == "" {
-				continue
-			}
-			hexes = append(hexes, hex.EncodeToString([]byte(a)))
-		}
-		out = append(out, wiregen.MustMakeObj("kdpbhdffjaf", map[int]*proto.Value{
-			0: proto.StrVal(fmt.Sprintf("%s_req", recipe.RecipeID)), // 需求 key
-			1: proto.Str(nil),                                       // f1 固定为 null
-			2: proto.U32(0),                                         // lmmhdlhogdc 容器：背包
-			3: proto.Null(),                                         // f3 可接受槽位（无 gdgifedhinj → null）
-			4: proto.ArrayOf(hexes),
-			5: proto.U32(uint32(m.need())),
-			// f6..f8 OPT=0 由 MakeObj 零值填充
-		}))
-	}
-	return out
 }
 
 // ---- 803 构造 ----

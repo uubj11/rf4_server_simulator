@@ -20,7 +20,7 @@ var PlayerTables = []string{
 	"profile", "item", "container_slot", "owned_items", "rig", "rig_component",
 	"rod_pod_setting", "rod_pod_alarm", "rod_setting", "txn", "mail", "keepnet_items",
 	"skill", "skill_node", "player_counters", "player_achievements", "player_qualifications", "device",
-	"catch_log", "competition", "competition_member", "competition_result", "named_fish", "place_access",
+	"catch_log", "catch_seen", "competition", "competition_member", "competition_result", "named_fish", "place_access",
 	"fishing_state", "item_damage_log", "membership_order", "reel_performance", "cafe_order", "cafe_order_completion",
 	"player_condition", "campfire_state", "happy_hour_state",
 	"drink_bonus_clock", "drink_bonus_effect", "trip_state", "trip_grant",
@@ -30,6 +30,9 @@ var PlayerTables = []string{
 	// 双轨保底计数按 (uid, loc) 聚合后独立成表；不登记会让 seed 的表归属校验
 	// 直接失败（seed.go 里是硬错误），也会让玩家库拆分/备份漏掉保底进度。
 	"fish_hunt_pity",
+	// 配方模板是玩家在制作页自建的模板，随玩家操作增删；不进玩家存档
+	// 就等于每次重登都把玩家保存的模板丢掉（9/5 列表因此恒空）。
+	"craft_template",
 }
 
 // RuntimeTables 是运营/运行时/迁移元数据表，不属于静态资料或玩家存档。
