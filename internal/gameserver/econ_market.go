@@ -787,7 +787,12 @@ func (s *Server) repairPartsOf(ctx context.Context, it *store.Item) []repairPart
 	// 本体耐久是轮内零件的综合。正常有磨损零件时让客户端选具体零件，
 	// 只有内部零件都还满、但本体已经掉耐久时，才补一行本体修理入口；
 	// 否则会和整机保养重复报价，也会把正常的零件修理界面挤乱。
-	if !hasWornPart {
+	//
+	// 例外：本体耐久已归零。damageReelLockOverload 按官服口径把"渔轮被拉爆"
+	// 一步写成本体 0，轮内零件并不跟着归零，往往还留着几个百分点的微磨损。
+	// 这种状态必须无条件给本体行，否则 hasWornPart 为真 → 不补本体行 →
+	// 客户端只列出几乎全新的零件，玩家看着"没有地方需要修"，而本体 0 永远修不回去。
+	if !hasWornPart || it.Durability <= 0 {
 		if def, derr := s.DB.GetItemDefByItemID(ctx, it.ItemID); derr == nil && def != nil &&
 			def.Category == gearCatReel && it.Durability < 1 {
 			add(it.GUID, uint32(it.NumericID), uint32(gearCatReel), it.Durability)
