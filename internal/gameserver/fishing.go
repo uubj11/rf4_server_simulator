@@ -605,6 +605,11 @@ const (
 	// 不再把主观补偿值作为全体鱼的基准。
 	defaultFishStaminaScale        = 1.0
 	defaultFishInitialStaminaRatio = verifiedInitialStaminaRatio
+	// defaultBigFishStaminaCapG 是大鱼体力池的封顶线（克）。38 kg 对应商店在售
+	// 最强渔轮 Furia 30000 的 38.55 kgf 泄力：越过这条线的鱼，鱼拉力恒大于能买到的
+	// 泄力，张力被压在泄力上限，搏斗时长就只剩「体力池随体重线性膨胀」这一项。
+	// 封顶后大鱼的搏斗时长最多等于一尾 38 kg 的鱼；<=0 关闭封顶，回到原版线性体力池。
+	defaultBigFishStaminaCapG = 38000.0
 )
 
 // newtonPerKgf 是 obj27#8 鱼拉力（牛）与公斤力的换算系数，由 verifiedForcePerGram
@@ -1579,13 +1584,33 @@ func (s *Server) fishStaminaFor(f *RolledFish) float64 {
 	return s.fishStaminaForProfile(f, s.fishFightProfileFor(f))
 }
 
+// bigFishStaminaCapG 返回计体力池时用的等效体重（克）。
+// capG<=0 表示不封顶；体重不超过 capG 时原样返回，小鱼手感完全保留。
+func bigFishStaminaCapG(weightG, capG float64) float64 {
+	if capG <= 0 || weightG <= capG {
+		return weightG
+	}
+	return capG
+}
+
 func (s *Server) fishStaminaForProfile(f *RolledFish, profile fishFightProfile) float64 {
 	if f == nil {
 		return 0
 	}
+	weightG := float64(f.WeightG)
 	stamina := f.Stamina
 	if stamina <= 0 {
-		stamina = verifiedStaminaPerGram * float64(f.WeightG)
+		stamina = verifiedStaminaPerGram * weightG
+	}
+	// 大鱼体力池封顶：体力池原本随体重线性膨胀，而渔轮泄力有硬上限（商店在售最强
+	// 38.55 kgf）。越线之后鱼拉力恒大于泄力，张力被压死在泄力上限上，
+	// 搏斗时长 ∝ 体力池 ∝ 体重，就成了「随便来条大鱼都要拉半小时」。
+	// 这里只压体力池，不动 f8 拉力：大鱼照样拉力爆表、照样要放线、照样有搏斗感，
+	// 只是血条不再无限长。f.Stamina 已被显式预设且更小时保持预设值（取 min）。
+	if capG := s.tunableF("big_fish_stamina_cap_g", defaultBigFishStaminaCapG); capG > 0 {
+		if capped := verifiedStaminaPerGram * bigFishStaminaCapG(weightG, capG); capped > 0 && capped < stamina {
+			stamina = capped
+		}
 	}
 	scale := s.tunableF("fish_stamina_scale", defaultFishStaminaScale)
 	if scale > 0 {
