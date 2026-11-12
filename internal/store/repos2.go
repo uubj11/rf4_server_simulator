@@ -283,6 +283,18 @@ func (d *DB) RareSpeciesCount(ctx context.Context, uid, minGrade int64) (int64, 
 	return n, err
 }
 
+// LocDisplayName 把地图 slug（如 level_018_moskitnoe）换成钓点表与宝典用的中文图名。
+// 映射来自 loc_alias；未登记的地图返回空串，调用方据此跳过，避免把 slug 混进
+// 中文名体系造成两套键。
+func (d *DB) LocDisplayName(ctx context.Context, slug string) (string, error) {
+	var loc string
+	err := d.SQL.QueryRowContext(ctx, `SELECT COALESCE(loc,'') FROM loc_alias WHERE alias=?`, slug).Scan(&loc)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return loc, err
+}
+
 // CatchLogInsert 记录一次新增钓获；入护重试由 KeepFishingCatch 按鱼 GUID 去重。
 func (d *DB) CatchLogInsert(ctx context.Context, uid int64, loc string, spot int64, fishKey, nameZh string, weightG int64, lengthM float64, source, bait string, grade, xp, silver int64, locLevel string) error {
 	var identifier [16]byte

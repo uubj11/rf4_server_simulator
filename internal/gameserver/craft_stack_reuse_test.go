@@ -59,14 +59,15 @@ func TestCraftedStackSingleSlotReusable(t *testing.T) {
 				t.Fatalf("卸载后挂载子实例仍存在: %+v", row)
 			}
 
-			// 连续使用：每次从同一堆拆 1 个消耗，背包始终只有一堆。
+			// 连续使用：笼里始终保持 1 份，每次抛投从背包同款堆补 1 份扣减，
+			// 背包始终只有一堆（食笼自动补料的既定语义）。
 			for use := 0; use < 3; use++ {
 				mounted = mount()
 				if _, err := s.consumeBaitEvent(ctx, uid, rod,
 					fmt.Sprintf("cast-%s-%d", itemID, use), []string{mounted}, true); err != nil {
 					t.Fatal(err)
 				}
-				want := int64(59 - use)
+				want := int64(58 - use)
 				if rows, qty := backpackStacks(itemID); rows != 1 || qty != want {
 					t.Fatalf("第 %d 次使用后背包 rows=%d qty=%d，期望 1/%d", use+1, rows, qty, want)
 				}

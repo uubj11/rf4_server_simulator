@@ -27,6 +27,9 @@ var PlayerTables = []string{
 	// 窝料账本随玩家投放/咬口/衰减变化，必须进玩家存档与备份；
 	// groundbait_recipe 记的是每袋自制窝料实例的用料，丢了就等于把配方忘了。
 	"groundbait_deposit", "groundbait_clock", "groundbait_recipe", "fish_hunt_state",
+	// 双轨保底计数按 (uid, loc) 聚合后独立成表；不登记会让 seed 的表归属校验
+	// 直接失败（seed.go 里是硬错误），也会让玩家库拆分/备份漏掉保底进度。
+	"fish_hunt_pity",
 }
 
 // RuntimeTables 是运营/运行时/迁移元数据表，不属于静态资料或玩家存档。

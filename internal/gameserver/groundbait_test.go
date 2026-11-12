@@ -170,12 +170,14 @@ func TestGroundbaitWeatherSofteningLiftsWithinBaseline(t *testing.T) {
 	const uid = int64(1000001)
 	gbDeposit(t, s, uid, "feed_karp", 8, "feeder", "gb:s1")
 
+	// 季节走游戏内历法（1 游戏日 = 1 真实小时），真实月份与游戏季节并不对应，
+	// 拿真实日期假想春夏秋冬会把冬天算成春天，断言自然反了。这里按目标季节反查时刻。
 	warm := fishRollContext{uid: uid, loc: "gb-test-loc", x: 100, z: 100, hasPos: true, spot: 7,
-		now: time.Now(), rigType: 1, depthCM: 100, cache: newFishingRollCache(),
+		now: nowForGameSeason(t, 1), rigType: 1, depthCM: 100, cache: newFishingRollCache(),
 		weather: fishingWeather{known: true, kind: fishingWeatherClear, airTemp: 18, previousAirTemp: 18, wind: 3}}
 	cold := warm
-	// 深冬傍晚 + 大雨：季节、水温、天气三重不利，是软门最差的一档。
-	cold.now = time.Date(2027, 1, 15, 17, 0, 0, 0, time.UTC)
+	// 冬季 + 大雨：季节、水温、天气三重不利，是软门最差的一档。
+	cold.now = nowForGameSeason(t, 3)
 	cold.weather = fishingWeather{known: true, kind: fishingWeatherHeavyRain, airTemp: -4, previousAirTemp: -4, wind: 6}
 
 	mult := func(c fishRollContext) (float64, float64) {
@@ -887,4 +889,19 @@ func TestGroundbaitHandThrowConsumesAndDeposits(t *testing.T) {
 	if got := s.stackCountOf(ctx, row); got != 1 {
 		t.Fatalf("非窝料物件数量应不变，实得 %d", got)
 	}
+}
+
+// nowForGameSeason 按游戏内历法找到属于指定季节的时刻（0 春/1 夏/2 秋/3 冬）。
+// 游戏日 = 真实小时，所以按真实小时步进就能扫过一整轮季节。
+func nowForGameSeason(t *testing.T, want int) time.Time {
+	t.Helper()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 24*40; i++ {
+		cand := base.Add(time.Duration(i) * time.Hour)
+		if fishSeasonAt(cand.Unix()) == want {
+			return cand
+		}
+	}
+	t.Fatalf("找不到游戏季节 %d 的时刻", want)
+	return base
 }

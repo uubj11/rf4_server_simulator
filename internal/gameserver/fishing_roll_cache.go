@@ -41,6 +41,10 @@ type fishingRollCache struct {
 	baitTierLoaded       map[string]bool
 	companionEvidence    map[string]int64
 	companionEvidenceSet bool
+	baitEvidence         map[string]map[string]int64
+	baitEvidenceLoaded   map[string]bool
+	evidenceAvg          map[string]float64
+	evidenceAvgLoaded    bool
 	baitDefs             map[string]cachedBaitDef
 	fishNames            map[string]string
 	fishNamesLoaded      bool
@@ -54,19 +58,21 @@ type fishingRollCache struct {
 
 func newFishingRollCache() *fishingRollCache {
 	return &fishingRollCache{
-		statLocs:          map[string]string{},
-		rosters:           map[string][]*store.FishRosterRow{},
-		gradeLines:        map[string]cachedGradeLines{},
-		settleStatics:     map[string][6]int64{},
-		lengthKP:          map[string][2]float64{},
-		baitTiers:         map[string]map[string]int64{},
-		baitTierLoaded:    map[string]bool{},
-		baitDefs:          map[string]cachedBaitDef{},
-		localEvidence:     map[localBaitEvidenceKey]map[string]bool{},
-		fishEcology:       map[string]fishEcologyProfile{},
-		fishEcologyLoaded: map[string]bool{},
-		gbAff:             map[groundbaitAffKey]cachedGroundbaitAff{},
-		gbFishDiet:        map[string]map[string]float64{},
+		statLocs:           map[string]string{},
+		rosters:            map[string][]*store.FishRosterRow{},
+		gradeLines:         map[string]cachedGradeLines{},
+		settleStatics:      map[string][6]int64{},
+		lengthKP:           map[string][2]float64{},
+		baitTiers:          map[string]map[string]int64{},
+		baitTierLoaded:     map[string]bool{},
+		baitEvidence:       map[string]map[string]int64{},
+		baitEvidenceLoaded: map[string]bool{},
+		baitDefs:           map[string]cachedBaitDef{},
+		localEvidence:      map[localBaitEvidenceKey]map[string]bool{},
+		fishEcology:        map[string]fishEcologyProfile{},
+		fishEcologyLoaded:  map[string]bool{},
+		gbAff:              map[groundbaitAffKey]cachedGroundbaitAff{},
+		gbFishDiet:         map[string]map[string]float64{},
 	}
 }
 
@@ -207,6 +213,54 @@ func (s *Server) cachedCompanionEvidence(ctx context.Context, c fishRollContext)
 	cache.companionEvidenceSet = true
 	cache.mu.Unlock()
 	return evidence
+}
+
+// cachedBaitEvidence 缓存「该饵对各鱼种的真实证据」，与 cachedBaitTiers 同生命周期。
+func (s *Server) cachedBaitEvidence(ctx context.Context, c fishRollContext, bait string) map[string]int64 {
+	if s.DB == nil {
+		return nil
+	}
+	cache := rollCache(c)
+	if cache == nil {
+		return s.DB.BaitEvidence(ctx, bait)
+	}
+	cache.mu.Lock()
+	if cache.baitEvidenceLoaded[bait] {
+		ev := cache.baitEvidence[bait]
+		cache.mu.Unlock()
+		return ev
+	}
+	cache.mu.Unlock()
+	ev := s.DB.BaitEvidence(ctx, bait)
+	cache.mu.Lock()
+	cache.baitEvidence[bait] = ev
+	cache.baitEvidenceLoaded[bait] = true
+	cache.mu.Unlock()
+	return ev
+}
+
+// cachedCompanionEvidenceAvg 缓存「该鱼种全部饵的平均证据」，作为连续加权的分母。
+func (s *Server) cachedCompanionEvidenceAvg(ctx context.Context, c fishRollContext) map[string]float64 {
+	if s.DB == nil {
+		return nil
+	}
+	cache := rollCache(c)
+	if cache == nil {
+		return s.DB.CompanionEvidenceAvg(ctx)
+	}
+	cache.mu.Lock()
+	if cache.evidenceAvgLoaded {
+		avg := cache.evidenceAvg
+		cache.mu.Unlock()
+		return avg
+	}
+	cache.mu.Unlock()
+	avg := s.DB.CompanionEvidenceAvg(ctx)
+	cache.mu.Lock()
+	cache.evidenceAvg = avg
+	cache.evidenceAvgLoaded = true
+	cache.mu.Unlock()
+	return avg
 }
 
 func (s *Server) cachedBaitDefinition(ctx context.Context, c fishRollContext, id string) (ruleBait, bool) {

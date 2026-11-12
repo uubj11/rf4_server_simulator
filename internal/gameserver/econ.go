@@ -292,6 +292,8 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 			return nil, true
 		}
 		keepLoc, keepSpot := st.Loc, st.Spot
+		// 落点坐标在解锁前抓出来：入护成功后要把它累加进钓点表（spot_fish）。
+		castX, castZ, hasCastPos := st.CastPosX, st.CastPosZ, st.HasCastPos
 		st.Pending = nil
 		st.CastActive = false
 		st.Hooked = false
@@ -307,6 +309,8 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 		// 14/4 收竿时 Pending 已被这里清空（hooked=false），原先挂在 14/4 的
 		// recordHuntCatch 永远不会触发，计数会永久卡死在上一次的值。
 		s.recordHuntCatch(cctx, uid, keepLoc, keepSpot, &kept)
+		// 本尾真实入护的落点累加进钓点表，让钓点数据随玩家自己的渔获增长。
+		s.recordCatchSpot(cctx, keepLevel, castX, castZ, hasCastPos, kept.Species)
 		s.notifyFishKept(ctx.Sess, &kept)
 		// 钓获礼包：入护成功后按概率当场开箱（异步，避免拖慢入护回包）。
 		s.scheduleLootBox(ctx.Sess, &kept)

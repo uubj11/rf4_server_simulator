@@ -860,33 +860,33 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 	if !slices.ContainsFunc(wts, func(w float64) bool { return w > 0 }) {
 		return nil
 	}
-	// companion 周纪录饵效（config bait_pref_scale / bait_pref_weight_shift；
-	// 缺表=空，运行中性）。tier：top5=3 / top20=2 / 在列=1 → ×8/×4/×2；
-	// 未在列 ×(0.9 - 0.6×覆盖度)（覆盖度 = total_evidence/200，封顶 1）。
+	// companion 周纪录饵效（config bait_pref_scale / bait_evidence_*）。
+	// 主路径：用「该饵对该鱼种的 evidence / 该鱼种平均饵证据」做连续加权，
+	// 让真实渔获梯度（如大蒜面团对欧鳊 1455 : 银鲷鱼 105）直接体现为权重差，
+	// 而不是被压成 4 档（×8/×4/×2）后梯度损失 2.7~28 倍。
+	// 回退路径：evidence 缺失（缺表 / 该饵无此鱼记录 / avg=0）时逐条落回旧 tier 逻辑；
+	// tier 也未命中则沿用覆盖度衰减 (0.9-0.6×cov)。任何分支都不会把权重乘成 0。
 	prefScale := s.tunableF("bait_pref_scale", 1.0)
 	var tiers map[string]int64
 	var meta map[string]int64
+	var evMap map[string]int64
+	var avgEv map[string]float64
 	if !strict && bait != "" && prefScale > 0 {
 		tiers = s.cachedBaitTiers(cctx, c, bait)
 		if tiers != nil {
 			meta = s.cachedCompanionEvidence(cctx, c)
+			evMap = s.cachedBaitEvidence(cctx, c, bait)
+			avgEv = s.cachedCompanionEvidenceAvg(cctx, c)
 		}
 	}
 	baitHit := false
 	if tiers != nil {
 		for i, key := range keys {
-			t := tiers[key]
-			if t > 0 {
-				wts[i] *= companionTierMult(t) * prefScale
+			mult, hit := s.baitWeightMult(key, tiers, evMap, avgEv, meta)
+			wts[i] *= mult * prefScale
+			if hit {
 				baitHit = true
-				continue
 			}
-			ev := meta[key]
-			cov := float64(ev) / 200.0
-			if cov > 1.0 {
-				cov = 1.0
-			}
-			wts[i] *= (0.9 - 0.6*cov) * prefScale
 		}
 	}
 	scale := s.tunableF("fish_weight_scale", 1)

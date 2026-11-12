@@ -186,10 +186,26 @@ func (d *DB) SpeciesLengthKP(ctx context.Context, fishKey string) (k, p float64)
 
 // BaitTiers 饵 systemID → {fish_key: tier}（top5=3 / top20=2 / 在列=1）。
 // 表缺失或无数据时返回 nil，不调整鱼种权重。
+// BaitTiers 读取该饵对各鱼种的档位。
+// 静态数据里有少数记录按自制配方 ID（craft_bait_*）落库，而调用方传入的是
+// 产出物 ID（如 dough_cottage）。成品 ID 未命中时按 recipe 反查配方 ID 再查
+// 一次，避免手搓饵的饵效整段被跳过。成品 ID 自有记录时始终优先，不被回退覆盖。
 func (d *DB) BaitTiers(ctx context.Context, baitID string) map[string]int64 {
 	if baitID == "" {
 		return nil
 	}
+	if out := d.baitTiersByID(ctx, baitID); len(out) > 0 {
+		return out
+	}
+	for _, recipeID := range d.recipeIDsForOutput(ctx, baitID) {
+		if out := d.baitTiersByID(ctx, recipeID); len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func (d *DB) baitTiersByID(ctx context.Context, baitID string) map[string]int64 {
 	rows, err := d.SQL.QueryContext(ctx,
 		`SELECT fish_key, tier FROM companion_bait_fish WHERE bait_id=?`, baitID)
 	if err != nil {
@@ -211,6 +227,68 @@ func (d *DB) BaitTiers(ctx context.Context, baitID string) map[string]int64 {
 	return out
 }
 
+// BaitEvidence 返回指定饵对各鱼种的真实渔获证据。
+// 与 BaitTiers 保持同一套 ID 回退策略：先按 bait_id 直查，查不到再按自制配方反查，
+// 保证手搓饵（craft_bait_*）也能命中。
+func (d *DB) BaitEvidence(ctx context.Context, baitID string) map[string]int64 {
+	if baitID == "" {
+		return nil
+	}
+	if out := d.baitEvidenceByID(ctx, baitID); len(out) > 0 {
+		return out
+	}
+	for _, recipeID := range d.recipeIDsForOutput(ctx, baitID) {
+		if out := d.baitEvidenceByID(ctx, recipeID); len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func (d *DB) baitEvidenceByID(ctx context.Context, baitID string) map[string]int64 {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT fish_key, evidence FROM companion_bait_fish WHERE bait_id=?`, baitID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var fk string
+		var ev int64
+		if err := rows.Scan(&fk, &ev); err != nil {
+			return nil
+		}
+		out[fk] = ev
+	}
+	if err := rows.Err(); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// recipeIDsForOutput 找出产出该物品的自制配方 ID；同一产出物可能对应多条配方，
+// 按 recipe_id 稳定排序，保证取到的是确定结果。
+func (d *DB) recipeIDsForOutput(ctx context.Context, outputID string) []string {
+	if outputID == "" {
+		return nil
+	}
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT recipe_id FROM recipe WHERE output_id=? ORDER BY recipe_id`, outputID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // CompanionEvidence fish_key → 该鱼 companion 数据覆盖度（total_evidence）。
 // 缺表返回 nil（覆盖率按 0 处理）。
 func (d *DB) CompanionEvidence(ctx context.Context) map[string]int64 {
@@ -228,6 +306,28 @@ func (d *DB) CompanionEvidence(ctx context.Context) map[string]int64 {
 			return nil
 		}
 		out[fk] = ev
+	}
+	return out
+}
+
+// CompanionEvidenceAvg fish_key → 该鱼种全部饵的平均证据（total_evidence/n_baits）。
+// 用作连续加权的分母：某个饵对某鱼种证据超出该鱼种平均越多，权重越高。
+// n_baits<=0 或表缺失时返回缺项，调用方回退到分档逻辑。
+func (d *DB) CompanionEvidenceAvg(ctx context.Context) map[string]float64 {
+	rows, err := d.SQL.QueryContext(ctx,
+		`SELECT fish_key, CASE WHEN n_baits > 0 THEN CAST(total_evidence AS REAL) / n_baits ELSE 0 END FROM companion_fish_meta`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var fk string
+		var avg float64
+		if err := rows.Scan(&fk, &avg); err != nil {
+			return nil
+		}
+		out[fk] = avg
 	}
 	return out
 }

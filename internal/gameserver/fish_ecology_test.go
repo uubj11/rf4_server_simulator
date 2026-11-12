@@ -49,10 +49,13 @@ func TestFishEcologySeedsSpeciesAndMatchesWaterLayers(t *testing.T) {
 
 	surface := fishRollContext{rigType: 1, depthCM: 50, now: time.Now()}
 	bottom := fishRollContext{rigType: 12, depthCM: 500, now: time.Now()}
-	pikeSurface := srv.fishBiteEnvironmentWeight(ctx, "n.pike", surface)
-	pikeBottom := srv.fishBiteEnvironmentWeight(ctx, "n.pike", bottom)
-	catSurface := srv.fishBiteEnvironmentWeight(ctx, "w_catfish", surface)
-	catBottom := srv.fishBiteEnvironmentWeight(ctx, "w_catfish", bottom)
+	// 这里只断言水层这一维。总权重还叠着昼夜/季节/天气/水温等维度，
+	// 夹具没给天气时会被默认成晴天，用各鱼种的「晴天偏好」把鲶鱼压下去，
+	// 反而掩盖水层本身的方向；那些维度由各自的用例覆盖。
+	pikeSurface := srv.fishLayerWeight(ctx, "n.pike", surface)
+	pikeBottom := srv.fishLayerWeight(ctx, "n.pike", bottom)
+	catSurface := srv.fishLayerWeight(ctx, "w_catfish", surface)
+	catBottom := srv.fishLayerWeight(ctx, "w_catfish", bottom)
 	if pikeSurface <= catSurface {
 		t.Fatalf("上层水层应更偏向掠食鱼: pike=%f catfish=%f", pikeSurface, catSurface)
 	}

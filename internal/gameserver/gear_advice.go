@@ -15,10 +15,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// fmtWeightG 按钓鱼宝典的口径显示重量，跟 FishCodex 的 Db.Wt 完全一致：
+// 不足 1kg 用整数克（388g），达到 1kg 折成 kg 并最多保留两位小数（10.8kg）。
+// 之前这里一律写 %.0fg，一万克的钩会显示成 "10800g"，跟宝典对不上。
+func fmtWeightG(gram float64) string {
+	if gram <= 0 {
+		return "—"
+	}
+	r := math.Round(gram)
+	if r < 1000 {
+		return strconv.FormatFloat(r, 'f', 0, 64) + "g"
+	}
+	s := strconv.FormatFloat(r/1000, 'f', 2, 64)
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	return s + "kg"
+}
 
 // gearAdviceThrottle 同一根竿 20 秒内最多一条建议，避免连嘬时刷屏。
 var gearAdviceThrottle sync.Map
@@ -68,39 +87,39 @@ func (s *Server) gearAdviceText(ctx context.Context, uid int64, rodGUID string, 
 		switch {
 		case gape > 0 && w > gape*0.9:
 			if name, capG := s.bestBackpackHook(ctx, uid, f.WeightG); name != "" {
-				tips = append(tips, fmt.Sprintf("钩小 %.0fg＜鱼%.0fg\n→ 换「%s」%.0fg\n　钓%.0f~%.0fg",
-					gape, w, name, capG, capG*0.25, capG*0.9))
+				tips = append(tips, fmt.Sprintf("钩小 %s＜鱼%s\n→ 换「%s」%s\n　钓%s~%s",
+					fmtWeightG(gape), fmtWeightG(w), name, fmtWeightG(capG), fmtWeightG(capG*0.25), fmtWeightG(capG*0.9)))
 			} else if nm, cp, silver := s.pickShopHook(ctx, f.WeightG); nm != "" {
-				tips = append(tips, fmt.Sprintf("钩小 %.0fg＜鱼%.0fg\n→ 买「%s」\n　%.0fg %d银 钓%.0f~%.0fg",
-					gape, w, nm, cp, silver, cp*0.25, cp*0.9))
+				tips = append(tips, fmt.Sprintf("钩小 %s＜鱼%s\n→ 买「%s」\n　%s %d银 钓%s~%s",
+					fmtWeightG(gape), fmtWeightG(w), nm, fmtWeightG(cp), silver, fmtWeightG(cp*0.25), fmtWeightG(cp*0.9)))
 			} else {
-				tips = append(tips, fmt.Sprintf("钩小 %.0fg＜鱼%.0fg\n→ 背包无更大钩", gape, w))
+				tips = append(tips, fmt.Sprintf("钩小 %s＜鱼%s\n→ 背包无更大钩", fmtWeightG(gape), fmtWeightG(w)))
 			}
 		case gape > 0 && w < gape*0.25:
 			// 鱼远小于钩口：小鱼嘴小，咬不住大号钩，表现就是“啄两下就走、漂不动”。
 			// 背包没有更小的钩时也给一支商店在售的，玩家照着型号去买就行。
 			if name, capG := s.bestBackpackHook(ctx, uid, f.WeightG); name != "" && capG < gape*0.75 {
-				tips = append(tips, fmt.Sprintf("钩偏大 鱼%.0fg＜钩%.0fg\n→ 换「%s」%.0fg\n　钓%.0f~%.0fg",
-					w, gape, name, capG, capG*0.25, capG*0.9))
+				tips = append(tips, fmt.Sprintf("钩偏大 鱼%s＜钩%s\n→ 换「%s」%s\n　钓%s~%s",
+					fmtWeightG(w), fmtWeightG(gape), name, fmtWeightG(capG), fmtWeightG(capG*0.25), fmtWeightG(capG*0.9)))
 			} else if nm, cp, silver := s.pickShopHook(ctx, f.WeightG); nm != "" {
-				tips = append(tips, fmt.Sprintf("钩偏大 鱼%.0fg＜钩%.0fg\n→ 买「%s」\n　%.0fg %d银 钓%.0f~%.0fg",
-					w, gape, nm, cp, silver, cp*0.25, cp*0.9))
+				tips = append(tips, fmt.Sprintf("钩偏大 鱼%s＜钩%s\n→ 买「%s」\n　%s %d银 钓%s~%s",
+					fmtWeightG(w), fmtWeightG(gape), nm, fmtWeightG(cp), silver, fmtWeightG(cp*0.25), fmtWeightG(cp*0.9)))
 			} else {
-				tips = append(tips, fmt.Sprintf("钩偏大 鱼%.0fg＜钩%.0fg\n→ 换更小号钩（商店有）", w, gape))
+				tips = append(tips, fmt.Sprintf("钩偏大 鱼%s＜钩%s\n→ 换更小号钩（商店有）", fmtWeightG(w), fmtWeightG(gape)))
 			}
 		}
 	}
 
 	if rodG := spec.RodPowerKg * 1000; rodG > 0 && w > rodG {
 		if name, _ := s.bestBackpackRod(ctx, uid, f.WeightG); name != "" {
-			tips = append(tips, fmt.Sprintf("竿软 %.0fg＜鱼%.0fg\n→ 换「%s」", rodG, w, name))
+			tips = append(tips, fmt.Sprintf("竿软 %s＜鱼%s\n→ 换「%s」", fmtWeightG(rodG), fmtWeightG(w), name))
 		} else {
-			tips = append(tips, fmt.Sprintf("竿软 %.0fg＜鱼%.0fg\n→ 背包无更硬竿", rodG, w))
+			tips = append(tips, fmt.Sprintf("竿软 %s＜鱼%s\n→ 背包无更硬竿", fmtWeightG(rodG), fmtWeightG(w)))
 		}
 	}
 
 	if lineG := spec.LineStrengthKg * 1000; lineG > 0 && w > lineG*0.9 {
-		tips = append(tips, fmt.Sprintf("线细 %.0fg＜鱼%.0fg\n→ 换更粗主线", lineG, w))
+		tips = append(tips, fmt.Sprintf("线细 %s＜鱼%s\n→ 换更粗主线", fmtWeightG(lineG), fmtWeightG(w)))
 	}
 
 	// 最多报两条：钩、竿优先，线只在前面都没问题时才补，避免整块太长。
