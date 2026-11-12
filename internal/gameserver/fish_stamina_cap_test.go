@@ -29,15 +29,15 @@ func TestBigFishStaminaCurve(t *testing.T) {
 		prev = got
 	}
 
-	// ③ 数值锚点（指数 0.40、拐点 10 kg）。
+	// ③ 数值锚点（指数 0.22、拐点 10 kg）。
 	checks := []struct {
 		w    float64
 		want float64
 	}{
-		{11000, 0.9444},
-		{51948, 0.3722},
-		{246739, 0.1461},
-		{3125000, 0.0319},
+		{11000, 0.9284},
+		{51948, 0.2766},
+		{246739, 0.0820},
+		{3125000, 0.0113},
 	}
 	for _, c := range checks {
 		if got := bigFishStaminaScale(c.w, knee, exp); math.Abs(got-c.want) > 0.001 {
@@ -45,12 +45,12 @@ func TestBigFishStaminaCurve(t *testing.T) {
 		}
 	}
 
-	// ④ 3,125 kg 抽样上限鱼：体力池压到原版的 4% 以内，
+	// ④ 3,125 kg 抽样上限鱼：体力池压到原版的 1.5% 以内，
 	//    这是「最好钓具半小时内拉完」的定量依据。
 	origPool := verifiedStaminaPerGram * 3125000
 	newPool := origPool * bigFishStaminaScale(3125000, knee, exp)
-	if ratio := newPool / origPool; ratio > 0.035 {
-		t.Fatalf("3125kg 体力池应压到 3.5%% 以内，实际 %.4f", ratio)
+	if ratio := newPool / origPool; ratio > 0.015 {
+		t.Fatalf("3125kg 体力池应压到 1.5%% 以内，实际 %.4f", ratio)
 	}
 
 	// ⑤ 回退：指数 1.0 或拐点 <=0 都回到原版线性。
