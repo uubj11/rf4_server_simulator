@@ -354,13 +354,6 @@ func (s *Server) recordFightReelLoad(ctx *Ctx) {
 	probeOn := s.tunableF("fight_load_probe", 1) != 0
 	tick = cached.loadTickSecondsLocked(now, tick, maxTick)
 	ticks, slipWear, stressSecs, slipSecs := s.fightReelTickWear(cached, tick)
-	if protected && cached.locked {
-		// Only suppress locked overload. Normal slip/use wear and previously
-		// incurred damage remain; keep sampling time so protected time is not billed.
-		// 上游 1f23c9c 把磨损改成按受力/打滑秒数结算，这里把两种秒数一并归零，
-		// 等价于锁死期间不计过载磨损（旧口径的 burnWear/burnSecs/segSecs 已被取代）。
-		slipWear, stressSecs, slipSecs = 0, 0, 0
-	}
 	// 搏鱼持续耗精力：14/8 是唯一能证明"正在拉鱼"的遥测，按它结算的真实时长记账，
 	// 拉力占额定制动力的比例越高消耗越快（硬拉大鱼更累）。与消耗品恢复同一条链路，
 	// 走 condition_fight_energy_per_sec 标定，不改任何装备数值。
