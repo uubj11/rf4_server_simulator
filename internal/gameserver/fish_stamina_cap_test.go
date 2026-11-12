@@ -45,7 +45,7 @@ func TestBigFishStaminaCurve(t *testing.T) {
 		}
 	}
 
-	// ④ 三,125 kg 抽样上限鱼：体力池压到原版的 4% 以内，
+	// ④ 3,125 kg 抽样上限鱼：体力池压到原版的 4% 以内，
 	//    这是「最好钓具半小时内拉完」的定量依据。
 	origPool := verifiedStaminaPerGram * 3125000
 	newPool := origPool * bigFishStaminaScale(3125000, knee, exp)
