@@ -74,6 +74,7 @@ type FishState struct {
 	biteTicket      uint64
 	pendingTicket   uint64
 	PendingRepush   int           // 14/12 f0=3/5/6 连续拒收鱼实体时的重推次数
+	LuckRepush      int           // 蓝冠天命鱼的有限重推次数
 	BiteAt          time.Time     // 原定咬钩绝对时刻；硬重启后据此恢复 timer
 	Keepnet         []*RolledFish // 回退缓存（DB 权威）
 	Bait            string
@@ -83,13 +84,6 @@ type FishState struct {
 	persist         fishPersistMeta
 
 	hookedChatFishGUID string // 仅进程内：同一尾鱼的确认与拒收重推共用播报标记。
-	// 仅进程内：耐力播报的节流时间与鱼标识，不进持久化快照。
-	lastStaminaReportAt time.Time
-	lastStaminaFishGUID string
-	// 仅进程内：耐力播报开关的缓存。14/8 搏鱼期约 2 秒一帧，开关落 kv，
-	// 不缓存就等于每个搏鱼玩家每 2 秒一次单行查询；菜单改设置时清掉重读。
-	staminaFlagCached bool
-	staminaFlagOn     bool
 }
 
 // effectiveBaitDepthCMLocked 返回当前有效饵深。手杆从落水开始按固定
@@ -2172,6 +2166,7 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	st.Pending = nil
 	st.hookedChatFishGUID = ""
 	st.PendingRepush = 0
+	st.LuckRepush = 0
 	if !preserveHooked {
 		st.Hooked = false
 	}
