@@ -42,7 +42,7 @@ func TestHappyHourFollowsPermanentMembership(t *testing.T) {
 	if r := advance("a", now, false, true); r.Started || r.Active || !r.Qualified || !r.Unlimited || r.RemainingSeconds != HappyHourUnlimitedSeconds {
 		t.Fatalf("idle %+v", r)
 	}
-	if r := advance("a", now, true, true); !r.Active || r.XPBonus != .5 || r.BiteBonus != .1 || r.ProficiencyBonus != .25 {
+	if r := advance("a", now, true, true); !r.Active || r.XPBonus != 1.0 || r.BiteBonus != .1 || r.ProficiencyBonus != 1.0 {
 		t.Fatalf("start %+v", r)
 	}
 	if r := advance("a", now.Add(20*time.Second), false, false); r.Active {

@@ -174,7 +174,8 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	}
 	if happy {
 		// 57 才是客户端结算面板的「欢乐时光」加成行；56 是另一类加成，客户端不会显示。
-		bonuses = append(bonuses, catchXPBonus{Kind: 57, GUID: zeroGUID, Multiplier: .5, XP: int64(math.Round(float64(xp) * .5))})
+		// 原版口径 “Experience ... is doubled”：对 base 再 +100%，与会员 +100% 叠成 3×base。
+		bonuses = append(bonuses, catchXPBonus{Kind: 57, GUID: zeroGUID, Multiplier: 1, XP: xp})
 	}
 	card, err := s.prepareCatchCard(ctx, uid, f, bait)
 	if err != nil {

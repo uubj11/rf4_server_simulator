@@ -1503,7 +1503,7 @@ func TestCraftProficiencyByRecipeFamily(t *testing.T) {
 
 	srv.randFloat = fixedRolls(0.1, 0.9)
 	for _, cat := range []int64{craftCookSkillID, craftFeedSkillID, craftLureSkillID} {
-		if gain := srv.awardCraftProficiency(ctx, uid, cat, 1); math.Abs(gain-0.1) > 1e-9 {
+		if gain := srv.awardCraftProficiency(ctx, uid, cat, 1, false); math.Abs(gain-0.1) > 1e-9 {
 			t.Fatalf("技能 %d 单件制作应加 0.1，实得 %.3f", cat, gain)
 		}
 		if pts, err := db.GetSkillPoints(ctx, uid, cat); err != nil || pts != 0.1 {
@@ -1512,7 +1512,7 @@ func TestCraftProficiencyByRecipeFamily(t *testing.T) {
 	}
 
 	// 无对应技能的配方不写库。
-	if gain := srv.awardCraftProficiency(ctx, uid, 0, 1); gain != 0 {
+	if gain := srv.awardCraftProficiency(ctx, uid, 0, 1, false); gain != 0 {
 		t.Fatalf("无对应技能的配方不应加分，实得 %.3f", gain)
 	}
 	if pts, _ := db.GetSkillPoints(ctx, uid, 0); pts != 0 {
@@ -1521,7 +1521,7 @@ func TestCraftProficiencyByRecipeFamily(t *testing.T) {
 
 	// 未命中概率时熟练度不变。
 	srv.randFloat = fixedRolls(0.95, 0.9)
-	if gain := srv.awardCraftProficiency(ctx, uid, craftCookSkillID, 1); gain != 0 {
+	if gain := srv.awardCraftProficiency(ctx, uid, craftCookSkillID, 1, false); gain != 0 {
 		t.Fatalf("未命中时不应加分，实得 %.3f", gain)
 	}
 	if pts, _ := db.GetSkillPoints(ctx, uid, craftCookSkillID); pts != 0.1 {
@@ -1530,7 +1530,7 @@ func TestCraftProficiencyByRecipeFamily(t *testing.T) {
 
 	// 按件累计：5 件全中 = 0.5。
 	srv.randFloat = fixedRolls(0.1, 0.9)
-	if gain := srv.awardCraftProficiency(ctx, uid, craftCookSkillID, 5); math.Abs(gain-0.5) > 1e-9 {
+	if gain := srv.awardCraftProficiency(ctx, uid, craftCookSkillID, 5, false); math.Abs(gain-0.5) > 1e-9 {
 		t.Fatalf("5 件应加 0.5，实得 %.3f", gain)
 	}
 	if pts, _ := db.GetSkillPoints(ctx, uid, craftCookSkillID); math.Abs(pts-0.6) > 1e-9 {
@@ -1542,7 +1542,7 @@ func TestCraftProficiencyByRecipeFamily(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.randFloat = fixedRolls(0.1, 0.0)
-	if gain := srv.awardCraftProficiency(ctx, uid, craftLureSkillID, 1); math.Abs(gain-0.1) > 1e-9 {
+	if gain := srv.awardCraftProficiency(ctx, uid, craftLureSkillID, 1, false); math.Abs(gain-0.1) > 1e-9 {
 		t.Fatalf("接近上限时应只加 0.1，实得 %.3f", gain)
 	}
 	if pts, _ := db.GetSkillPoints(ctx, uid, craftLureSkillID); math.Abs(pts-100) > 1e-9 {

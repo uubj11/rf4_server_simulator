@@ -647,9 +647,29 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 	uid := ctx.Sess.Userid
 	isLeaderCraft := strings.HasPrefix(recipe.RecipeID, "craft_leader_")
 
+	// 切鱼：一条鱼只切一次，块数按该鱼重量分档，不随请求 qty 放大。
+	// 鱼在事务外先定位（产物数量要用它的重量），事务内再按 GUID 复核并消费。
+	isCutFish := recipe.RecipeID == cutFishRecipeID
+	outQty := times * spec.Yield
+	var cutFishEntry *store.KeepnetEntry
+	if isCutFish {
+		cutFishEntry = srv.resolveCutFishEntry(cctx, uid, req.Materials)
+		if cutFishEntry == nil {
+			ctx.Log.Warn("9/1 切鱼没有可用的渔获", "uid", uid)
+			return srv.replyCraftResult(ctx, false, nil, nil, nil)
+		}
+		outQty = fishPieceCountForWeight(cutFishEntry.WeightG)
+	}
+
 	// 先在事务外构造物品；构造失败时尚未扣材料。
-	producedRow, err := srv.prepareNewItem(cctx, uid, outputID, "backpack",
-		times*spec.Yield, "")
+	// 切鱼的产物按「块」计数，必须精确写入数量字段，不能乘物品自带的每件 30 块。
+	var producedRow *store.Item
+	var err error
+	if isCutFish {
+		producedRow, err = srv.prepareNewItemWithCount(cctx, uid, outputID, "backpack", outQty, "")
+	} else {
+		producedRow, err = srv.prepareNewItem(cctx, uid, outputID, "backpack", outQty, "")
+	}
 	if err != nil {
 		ctx.Log.Warn("9/1 产出物不可构造", "output", outputID, "err", err)
 		return srv.replyCraftResult(ctx, false, nil, nil, nil)
@@ -711,6 +731,23 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 	fail := func(reason string, args ...any) ([]byte, bool) {
 		ctx.Log.Warn("9/1 制作失败："+reason, args...)
 		return srv.replyCraftResult(ctx, false, nil, nil, nil)
+	}
+
+	// 切鱼：事务内按 GUID 复核并消费这条鱼护渔获；并发已被消费则整体回滚。
+	if isCutFish {
+		if cutFishEntry == nil {
+			return fail("切鱼缺少渔获")
+		}
+		ok, cerr := srv.consumeKeepnetEntryTx(cctx, tx, uid, cutFishEntry.EchoGUID)
+		if cerr != nil {
+			return fail("切鱼消耗渔获失败", "guid", shortGUID(cutFishEntry.EchoGUID), "err", cerr)
+		}
+		if !ok {
+			return fail("切鱼渔获已被消费", "guid", shortGUID(cutFishEntry.EchoGUID))
+		}
+		keepnetTaken = append(keepnetTaken, cutFishEntry.EchoGUID)
+		touched = append(touched, cutFishEntry.EchoGUID)
+		usedMats = appendMaterialUses(usedMats, cutFishEntry.Species, 1)
 	}
 
 	if isLeaderCraft {
@@ -955,7 +992,9 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 		return fail("事务提交失败", "err", err)
 	}
 	skillCat := craftSkillCatForRecipe(recipe.RecipeID)
-	masteryGain := srv.awardCraftProficiency(cctx, uid, skillCat, times)
+	// 原版欢乐时光覆盖制作技能；Active 由 5s 心跳刷新，制作时同样有效。
+	happyActive := ctx.Sess != nil && ctx.Sess.currentHappyHour().Active
+	masteryGain := srv.awardCraftProficiency(cctx, uid, skillCat, times, happyActive)
 	ctx.Log.Info("9/1 制作入库", "output", outputID, "qty", times,
 		"took", len(touched), "recipe", recipe.RecipeID,
 		"skill", skillCat, "mastery_gain", masteryGain)
@@ -1443,7 +1482,9 @@ func (s *Server) digBaitWithShovel(ctx *Ctx, shovel *store.Item) ([]byte, bool) 
 		}
 		produced = append(produced, tree)
 	}
-	skillGain := s.awardSkillProficiency(cctx, ctx.Sess.Userid, baitCatchSkillCat)
+	// 挖饵同样吃欢乐时光加成（原版 Premium 明确包含 crafting 技能）。
+	skillGain := s.awardSkillProficiency(cctx, ctx.Sess.Userid, baitCatchSkillCat,
+		ctx.Sess != nil && ctx.Sess.currentHappyHour().Active)
 	progress := wiregen.MustMakeObj("kegeppimjbm", map[int]*proto.Value{
 		0: proto.U64(0),
 		1: proto.U32(0),

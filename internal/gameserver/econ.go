@@ -103,7 +103,7 @@ func (s *Server) fishingEnd(ctx *Ctx) ([]byte, bool) {
 		levelsGained = gained
 		prevLevel = max64(1, newLevel-1)
 		// 按实际钓组大类增长；概率随当前熟练度反比下降，满熟练度不再增加。
-		skillID, skillGain := s.awardFishingProficiency(cctx, uid, rigType)
+		skillID, skillGain := s.awardFishingProficiency(cctx, uid, rigType, hasFish && pending != nil && pending.HappyHour)
 		// catch_log 已在 settleCatchOnce 的 14/4 事务里写下这一尾（source='catch'），
 		// 入护只把同一行抬成 'keep'，放生保持 'catch'——图鉴与统计都认「钓到过」。
 		pending.XP = xp

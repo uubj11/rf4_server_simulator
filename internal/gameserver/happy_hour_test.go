@@ -42,7 +42,9 @@ func TestHappyHourXPAddsToBaseAndReplaysOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := r.baseXP + int64(math.Round(float64(r.baseXP)*.5))
+	// 原版“Experience ... is doubled”：欢乐时光对 base 再 +100%，总倍率 3×base
+	// （base + 会员 +100% + 欢乐 +100%）。
+	want := r.baseXP + r.baseXP
 	if r.totalXP != want || len(r.bonuses) != 1 || r.bonuses[0].Kind != 57 {
 		t.Fatalf("breakdown %+v", r)
 	}
@@ -124,7 +126,7 @@ func TestHappyHourProficiencyChanceAndPermanentCap(t *testing.T) {
 	for _, tc := range []struct {
 		current, roll float64
 		want          bool
-	}{{0, .94, true}, {0, .96, false}, {50, .35, true}, {50, .38, false}, {100, 0, false}} {
+	}{{0, .94, true}, {0, .96, false}, {50, .58, true}, {50, .62, false}, {100, 0, false}} {
 		gain := fishingProficiencyGainForRoll(tc.current, happyHourProficiencyRoll(tc.current, tc.roll, true), 0)
 		if (gain > 0) != tc.want {
 			t.Fatalf("current=%v roll=%v gain=%v", tc.current, tc.roll, gain)
@@ -140,23 +142,12 @@ func TestHappyHourValidFishingPendingAndCloseFence(t *testing.T) {
 	ctx := context.Background()
 	const uid = int64(1000001)
 	grantHappyHourTestProfile(t, db, uid)
-	rod := baitTestRod(t, s)
 	sess := registerHappyHourTestSession(t, s, 828)
-	st := s.fishingState(uid)
-	st.mu.Lock()
-	st.GearGuid = rod
-	st.CastActive, st.InWater, st.Resolved = true, true, false
-	st.mu.Unlock()
 	now := time.Now()
-	if r := sess.updateHappyHour(now, false); r.Active {
-		t.Fatal("empty rod started happy hour")
-	}
-	st.mu.Lock()
-	st.Pending = &RolledFish{FishGUID: newFishGUID()}
-	st.Hooked = true
-	st.mu.Unlock()
+	// 原版 Happy Hour 是登录后的时间窗口，与是否抛竿无关；本服永久会员没有时长
+	// 上限，等价于“在线即生效”，制作与挖饵因此也能吃到加成。
 	if r := sess.updateHappyHour(now, false); !r.Active {
-		t.Fatal("pending fight after bait consumption lost qualification")
+		t.Fatal("online session should stay in happy hour")
 	}
 	if r := sess.updateHappyHour(now.Add(10*time.Second), false); r.RemainingSeconds != store.HappyHourUnlimitedSeconds {
 		t.Fatalf("permanent member remaining changed: %+v", r)
@@ -261,5 +252,44 @@ func TestProfile307HappyHourState(t *testing.T) {
 	setMembership(store.HappyHourUnlimited, 0)
 	if state, minutes, end := build(0); state != 4 || minutes != 0 || end != pass745F2 {
 		t.Fatalf("总开关关闭 f24=%d/%d/%d", state, minutes, end)
+	}
+}
+
+// TestHappyHourCoversCraftAndDigProficiency 锁定原版口径：欢乐时光把“技能提升
+// 概率”翻倍，并且覆盖制作（配置饵料等）与挖饵，不只是钓鱼结算。
+// 50% 熟练度时 base = 0.9*25/(25+50) = 0.3；roll 0.55 平时不中，
+// 翻倍后 chance = 0.6、折算 0.55*0.3/0.6 = 0.275 < 0.3，必中 0.1。
+func TestHappyHourCoversCraftAndDigProficiency(t *testing.T) {
+	t.Parallel()
+	db := openMigratedTestDB(t)
+	ctx := context.Background()
+	srv := newSkillsCraftServer(t, db)
+	const uid = int64(2000009)
+	if _, err := db.EnsureProfile(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		cat   int64
+		award func(happy bool) float64
+	}{
+		{"配置饵料", craftFeedSkillID, func(happy bool) float64 {
+			return srv.awardCraftProficiency(ctx, uid, craftFeedSkillID, 1, happy)
+		}},
+		{"捕获鱼饵", baitCatchSkillCat, func(happy bool) float64 {
+			return srv.awardSkillProficiency(ctx, uid, baitCatchSkillCat, happy)
+		}},
+	} {
+		if err := db.AddSkillPoints(ctx, uid, tc.cat, 50); err != nil {
+			t.Fatal(err)
+		}
+		srv.randFloat = fixedRolls(0.55, 0.9)
+		if gain := tc.award(false); gain != 0 {
+			t.Fatalf("%s 非欢乐时光不应涨点，实得 %.3f", tc.name, gain)
+		}
+		srv.randFloat = fixedRolls(0.55, 0.9)
+		if gain := tc.award(true); math.Abs(gain-0.1) > 1e-9 {
+			t.Fatalf("%s 欢乐时光应涨 0.1，实得 %.3f", tc.name, gain)
+		}
 	}
 }

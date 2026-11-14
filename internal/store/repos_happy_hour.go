@@ -60,7 +60,10 @@ func happyHourStatus(enabled bool, ent HappyHourEntitlement, started, active boo
 	r := HappyHourStatus{Enabled: enabled, Qualified: ent.Qualified, Unlimited: ent.Unlimited, ExpiresAt: ent.ExpiresAt,
 		Started: started, Active: enabled && ent.Qualified && active, RemainingSeconds: ent.RemainingSeconds}
 	if r.Active {
-		r.XPBonus, r.BiteBonus, r.ProficiencyBonus = .5, .1, .25
+		// 原版“欢乐时光”把经验与技能提升都翻倍，这里按面板百分比下发：
+		// XP +100%（对 base 翻倍，与会员 +100% 叠成 3×）、咬口 +10%、
+		// 技能提升 +100%（×2）。
+		r.XPBonus, r.BiteBonus, r.ProficiencyBonus = 1.0, .1, 1.0
 	}
 	return r
 }
@@ -93,6 +96,8 @@ func (d *DB) happyHourEntitlement(ctx context.Context, uid, now int64) (HappyHou
 
 // AdvanceHappyHour 只刷新当前在线会话是否有效：会员资格由会员到期时间决定，
 // 不再按天累计/扣除时长，因此在线钓鱼即生效，离线不会消耗任何额度。
+// fishing 是历史参数名，现在表示“会话在线”——原版欢乐时光与是否抛竿无关，
+// 制作/挖饵在非钓鱼状态下同样要吃技能加成。
 func (d *DB) AdvanceHappyHour(ctx context.Context, uid int64, owner string, now time.Time, fishing, takeover bool, maxGap time.Duration) (HappyHourStatus, error) {
 	tx, err := d.SQL.BeginTx(ctx, nil)
 	if err != nil {

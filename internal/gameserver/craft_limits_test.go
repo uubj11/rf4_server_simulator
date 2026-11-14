@@ -432,14 +432,15 @@ func TestCraftBatchCapsAndSlotScaling(t *testing.T) {
 	t.Run("零材料配方限制1份", func(t *testing.T) {
 		uid := int64(2200048)
 		box := setup(uid)
+		// 切鱼（craft_bait_cut_fish）改为消耗鱼护渔获后已不再是纯零材料配方，
+		// 其「一次一条、按重量出块」的规则由 craft_cutfish_test.go 覆盖。
 		for _, c := range []struct{ recipe, output string }{
 			{"craft_crushed_boils", "crushed_boils"},
-			{"craft_bait_cut_fish", "fish_pieces"},
 		} {
 			if !craft(box, c.recipe, nil, 1000) {
 				t.Fatalf("%s 零材料制作应成功", c.recipe)
 			}
-			// 物品定义自带单位量（fish_pieces 每批 30），按事务记录的套数断言批次。
+			// 物品定义可能自带单位量，按事务记录的套数断言批次。
 			var note string
 			if err := db.SQL.QueryRow(
 				`SELECT note FROM txn WHERE uid=? AND kind='craft' ORDER BY id DESC LIMIT 1`, uid).

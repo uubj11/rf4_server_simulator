@@ -48,7 +48,7 @@ func TestAwardBaitCatchSkillProficiency(t *testing.T) {
 	ctx := context.Background()
 	const uid = int64(1000001)
 
-	gain := srv.awardSkillProficiencyWithRolls(ctx, uid, baitCatchSkillCat, 0, 0)
+	gain := srv.awardSkillProficiencyWithRolls(ctx, uid, baitCatchSkillCat, 0, 0, false)
 	if math.Abs(gain-0.2) > 1e-9 {
 		t.Fatalf("首次捕获诱饵熟练度增量=%v, want 0.2", gain)
 	}
@@ -63,7 +63,7 @@ func TestAwardBaitCatchSkillProficiency(t *testing.T) {
 	if _, err := db.SQL.ExecContext(ctx, `INSERT OR REPLACE INTO skill(uid, skill_id, points) VALUES(?,?,100)`, uid, baitCatchSkillCat); err != nil {
 		t.Fatal(err)
 	}
-	if gain := srv.awardSkillProficiencyWithRolls(ctx, uid, baitCatchSkillCat, 0, 0); gain != 0 {
+	if gain := srv.awardSkillProficiencyWithRolls(ctx, uid, baitCatchSkillCat, 0, 0, false); gain != 0 {
 		t.Fatalf("满熟练度增量=%v, want 0", gain)
 	}
 }

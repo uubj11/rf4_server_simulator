@@ -103,10 +103,10 @@ func fishingProficiencyGainForRoll(current, gainRoll, amountRoll float64) float6
 	return 0.1
 }
 
-// awardFishingProficiency 按实际钓组大类增加熟练度。
-func (s *Server) awardFishingProficiency(ctx context.Context, uid, rigType int64) (int64, float64) {
+// awardFishingProficiency 按实际钓组大类增加熟练度；happy 表示欢乐时光是否生效。
+func (s *Server) awardFishingProficiency(ctx context.Context, uid, rigType int64, happy bool) (int64, float64) {
 	cat := fishingSkillCatForRig(rigType)
-	return cat, s.awardSkillProficiency(ctx, uid, cat)
+	return cat, s.awardSkillProficiency(ctx, uid, cat, happy)
 }
 
 // rollSkillFloat 返回 [0,1) 随机数；测试可替换 Server.randFloat。
@@ -119,13 +119,14 @@ func (s *Server) rollSkillFloat() float64 {
 
 // awardSkillProficiency 按指定技能大类增加熟练度。满熟练度不写库；
 // 接近上限时只增加剩余可容纳的数值。
-func (s *Server) awardSkillProficiency(ctx context.Context, uid, cat int64) float64 {
-	return s.awardSkillProficiencyWithRolls(ctx, uid, cat, s.rollSkillFloat(), s.rollSkillFloat())
+func (s *Server) awardSkillProficiency(ctx context.Context, uid, cat int64, happy bool) float64 {
+	return s.awardSkillProficiencyWithRolls(ctx, uid, cat, s.rollSkillFloat(), s.rollSkillFloat(), happy)
 }
 
 // awardCraftProficiency 按制作件数结算熟练度：每件独立判定，
 // 概率与钓鱼相同（熟练度越高越难涨），命中后加 0.1 或 0.2。
-func (s *Server) awardCraftProficiency(ctx context.Context, uid, cat, items int64) float64 {
+// happy 为欢乐时光状态，命中概率按原版口径翻倍（制作/挖饵同样覆盖）。
+func (s *Server) awardCraftProficiency(ctx context.Context, uid, cat, items int64, happy bool) float64 {
 	if s == nil || s.DB == nil || cat <= 0 || items <= 0 {
 		return 0
 	}
@@ -135,7 +136,9 @@ func (s *Server) awardCraftProficiency(ctx context.Context, uid, cat, items int6
 	}
 	gain := 0.0
 	for i := int64(0); i < items && current+gain < profCap; i++ {
-		if g := fishingProficiencyGainForRoll(current+gain, s.rollSkillFloat(), s.rollSkillFloat()); g > 0 {
+		if g := fishingProficiencyGainForRoll(current+gain,
+			happyHourProficiencyRoll(current+gain, s.rollSkillFloat(), happy),
+			s.rollSkillFloat()); g > 0 {
 			gain += g
 		}
 	}
@@ -153,7 +156,7 @@ func (s *Server) awardCraftProficiency(ctx context.Context, uid, cat, items int6
 }
 
 // awardSkillProficiencyWithRolls 允许测试注入随机数，实际写库仍复用同一概率公式。
-func (s *Server) awardSkillProficiencyWithRolls(ctx context.Context, uid, cat int64, gainRoll, amountRoll float64) float64 {
+func (s *Server) awardSkillProficiencyWithRolls(ctx context.Context, uid, cat int64, gainRoll, amountRoll float64, happy bool) float64 {
 	if s == nil || s.DB == nil {
 		return 0
 	}
@@ -161,7 +164,7 @@ func (s *Server) awardSkillProficiencyWithRolls(ctx context.Context, uid, cat in
 	if err != nil {
 		return 0
 	}
-	gain := fishingProficiencyGainForRoll(current, gainRoll, amountRoll)
+	gain := fishingProficiencyGainForRoll(current, happyHourProficiencyRoll(current, gainRoll, happy), amountRoll)
 	if gain <= 0 {
 		return 0
 	}

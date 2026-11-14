@@ -87,7 +87,7 @@ func TestFishingProficiencyCategoryAndCap(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < 20; i++ {
-			gotCat, gain := srv.awardFishingProficiency(ctx, uid, c.rig)
+			gotCat, gain := srv.awardFishingProficiency(ctx, uid, c.rig, false)
 			if gotCat != c.cat || gain != 0 {
 				t.Fatalf("rig=%d: got cat=%d gain=%v, want cat=%d gain=0", c.rig, gotCat, gain, c.cat)
 			}

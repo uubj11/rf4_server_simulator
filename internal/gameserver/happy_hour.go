@@ -17,30 +17,13 @@ func (sess *Session) updateHappyHour(now time.Time, closing bool) store.HappyHou
 	sess.happyOpMu.Lock()
 	defer sess.happyOpMu.Unlock()
 	closing = closing || sess.Closed()
-	fishing := false
-	if !closing {
-		for _, st := range s.fishingStatesFor(sess.Userid) {
-			st.mu.Lock()
-			active := st.CastActive && st.InWater && !st.Resolved
-			gear, pending := st.GearGuid, st.Pending != nil
-			st.mu.Unlock()
-			if !active || gear == "" {
-				continue
-			}
-			rod, err := s.DB.GetItemByGUID(sess.pushCtx(), gear)
-			if err != nil || rod == nil || rod.UID != sess.Userid || rod.Durability <= 0 {
-				continue
-			}
-			def, err := s.itemDefForRow(sess.pushCtx(), rod)
-			if err == nil && def != nil && def.Category == gearCatRod && (pending || s.canFishWithBait(sess.pushCtx(), sess.Userid, gear)) {
-				fishing = true
-				break
-			}
-		}
-	}
+	// 原版“欢乐时光”是登录后的一段现实时间窗口（经验与技能提升都翻倍），
+	// 与是否抛竿无关。本服是永久会员、没有时长上限，等价口径就是“在线即生效”，
+	// 制作与挖饵因此也能在非钓鱼状态下吃到技能加成。
+	online := !closing
 
 	owner := fmt.Sprintf("%d:%d", sess.ID, sess.startedAt.UnixNano())
-	status, err := s.DB.AdvanceHappyHour(s.dbCtx(), sess.Userid, owner, now, fishing, !closing,
+	status, err := s.DB.AdvanceHappyHour(s.dbCtx(), sess.Userid, owner, now, online, !closing,
 		max(30*time.Second, 3*s.cfg.KeepaliveInterval()))
 	if err != nil {
 		s.log.Warn("欢乐时光状态未保存", "err", err)
@@ -85,12 +68,14 @@ func (c fishRollContext) acceptHappyHourBite(interest float64, activities ...flo
 	return roll() < chance
 }
 
+// happyHourProficiencyRoll 复刻原版“欢乐时光：技能提升翻倍”的口径：判定概率
+// 变为 base × 2（上限 0.95），随机数按比例缩放，命中后的单次增量仍是 0.1/0.2。
 func happyHourProficiencyRoll(current, roll float64, active bool) float64 {
 	if !active {
 		return roll
 	}
 	base := fishingProficiencyGainChance(current)
-	chance := math.Min(.95, base*1.25)
+	chance := math.Min(.95, base*2)
 	if chance > 0 {
 		return roll * base / chance
 	}
