@@ -183,14 +183,7 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 			membershipExp = uint64(proto.UnixToFiletime(membership.ExpiresAt))
 		}
 	}
-	// 本地服修正：资料页 f6 下发"可用技能点"（总获得 + 管理员偏移 - 已投入），
-	// 与技能树 311.f0、服务端 skillLearn 的点数校验保持同一口径。
-	// 原版此处只发累计总获得，玩家把点数用掉后资料页数字不减少，
-	// 在每级点数放大后会被误认为奖励发多。
-	totalPts := skillPointsTotal(p.Level) + s.skillBonusPoints(ctx, uid) - s.skillSpentPoints(ctx, uid)
-	if totalPts < 0 {
-		totalPts = 0
-	}
+	availablePts := s.skillAvailablePointsForLevel(ctx, uid, p.Level)
 
 	// 322 里的等级经验拆分
 	base := baseXp(p.Level)
@@ -287,7 +280,7 @@ func (s *Server) BuildProfile307W(ctx context.Context, uid int64, wNow int64) (*
 		3:  proto.U64(uint64(p.XP)),
 		4:  proto.U64(inLevel),
 		5:  proto.U64(uint64(nextLevelReq(p.Level))),
-		6:  proto.U32(uint32(totalPts)),
+		6:  proto.U32(uint32(availablePts)),
 		7:  proto.U64(uint64(p.Silver)),
 		8:  proto.U64(uint64(p.Gold)),
 		9:  proto.StrVal(""),
@@ -359,12 +352,7 @@ func (s *Server) BuildSkillTree311(ctx context.Context, uid int64, availablePoin
 	if err != nil {
 		return nil, err
 	}
-	total := skillPointsTotal(p.Level) + s.skillBonusPoints(ctx, uid)
-	used := s.skillSpentPoints(ctx, uid)
-	avail := uint64(0)
-	if total > used {
-		avail = uint64(total - used)
-	}
+	avail := uint64(s.skillAvailablePointsForLevel(ctx, uid, p.Level))
 	if availablePointsOverride != ^uint64(0) {
 		avail = availablePointsOverride
 	}
