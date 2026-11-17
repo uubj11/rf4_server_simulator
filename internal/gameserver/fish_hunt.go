@@ -519,6 +519,15 @@ func growthToleranceProgress(level, cap int64) float64 {
 	return float64(level) / float64(cap)
 }
 
+// hookSpawnFloorR 是发鱼阶段的相对尺寸下限：r = 鱼重 / 钩口容量。
+// 宽容带只应放宽「够得着的中段」，相对尺寸低于本值的个体不再享受抬升，
+// 否则大钩会发出一堆小到不达标的鱼。
+const hookSpawnFloorR = 0.08
+
+// hookSpawnFloorMaxG 是发鱼下限的绝对封顶（30kg）。超大钩口（海钓 2700kg）按纯比例
+// 会得到 216kg 的下限，等于把中小型海鱼全判死，所以下限最多按 30kg 算。
+const hookSpawnFloorMaxG = 30000
+
 // hookToleranceBand 是宽容带展开后的三组分段阈值。
 // tol=0 时全部退化为原版常量（.25 / .80 / .45 / .15 / 1.00 / .30 / .50 / .55 / .35 / .80 / .10），
 // 所以普通钓具的手感与改动前逐位一致；tol=1 为满级成长套装的最宽容区间。
@@ -586,6 +595,29 @@ func hookSpawnCompatibility(weightG int64, spec gearPhysicsSpec) float64 {
 	return hookSpawnCompatibilityTol(weightG, spec, 0)
 }
 
+// hookSpawnFloorFade 是发鱼下限的收回系数：鱼重低于下限 hookSpawnFloorG 时，
+// 宽容带带来的低段抬升按 重量/下限 线性收回，越靠近 0 越接近不发。
+// tol=0 恒为 1，普通钓具与原版逐位一致。
+func hookSpawnFloorFade(weightG int64, gape, tol float64) float64 {
+	floor := hookSpawnFloorG(gape)
+	if floor <= 0 || float64(weightG) >= floor {
+		return 1
+	}
+	keep := groundbaitClamp(float64(weightG)/floor, 0, 1)
+	return 1 - groundbaitClamp(tol, 0, 1)*(1-keep)
+}
+
+// hookSpawnFloorG 把相对下限换算成绝对鱼重下限：
+// r×钩口容量，但不超过 hookSpawnFloorMaxG——海钓 2700kg 钩口按纯比例会抬到 216kg，
+// 那会把一票中小型海鱼直接判死，所以给一个绝对封顶。
+func hookSpawnFloorG(gape float64) float64 {
+	floor := gape * hookSpawnFloorR
+	if floor > hookSpawnFloorMaxG {
+		return hookSpawnFloorMaxG
+	}
+	return floor
+}
+
 // hookSpawnCompatibilityTol 在指定宽容进度下返回发鱼软匹配权重。
 func hookSpawnCompatibilityTol(weightG int64, spec gearPhysicsSpec, tol float64) float64 {
 	if weightG <= 0 || !spec.HookPresent {
@@ -598,7 +630,9 @@ func hookSpawnCompatibilityTol(weightG int64, spec gearPhysicsSpec, tol float64)
 	b := hookToleranceBandFor(tol)
 	r := float64(weightG) / gape
 	if r < b.lo {
-		return groundbaitClamp(b.compatBase+(1-b.compatBase)*(r/b.lo), b.compatBase, 1)
+		v := b.compatBase + (1-b.compatBase)*(r/b.lo)
+		v *= hookSpawnFloorFade(weightG, gape, tol)
+		return groundbaitClamp(v, .02, 1)
 	}
 	if r <= b.holdKink {
 		return 1

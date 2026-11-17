@@ -118,6 +118,8 @@ func TestHookToleranceHoldsTrophyAtCap(t *testing.T) {
 }
 
 // H5：发鱼权重同步放宽，但保留「大钩小鱼权重略低」的策略性。
+// 2026-11-17 追加发鱼下限后：1kg（r≈.0159）属于超小个体，满级宽容也不得再抬高（发鱼下限见 hook_spawn_floor_test.go），
+// 下限之上的 5kg 段才享受抬升。
 func TestHookToleranceSpawnCompatibility(t *testing.T) {
 	spec := tolHookSpec(25, 18)
 	base := hookSpawnCompatibilityTol(1000, spec, 0)
@@ -125,11 +127,14 @@ func TestHookToleranceSpawnCompatibility(t *testing.T) {
 		t.Fatalf("原版 25 号钓 1kg 的发鱼权重应约 0.391，实得 %.4f", base)
 	}
 	got := hookSpawnCompatibilityTol(1000, spec, 1)
-	if got < .62 {
-		t.Fatalf("满级宽容后发鱼权重应 ≥0.62，实得 %.4f", got)
+	if got > .20 {
+		t.Fatalf("满级宽容下 1kg 超小个体应被压到 ≤0.20，实得 %.4f", got)
 	}
-	if got >= 1 {
-		t.Fatalf("应保留一点策略性（<1），实得 %.4f", got)
+	if got <= .02 {
+		t.Fatalf("不得低于发鱼权重 .02 地板，实得 %.4f", got)
+	}
+	if lifted := hookSpawnCompatibilityTol(5000, spec, 1); lifted < .90 {
+		t.Fatalf("下限之上的 5kg 段应放宽到 ≥0.90，实得 %.4f", lifted)
 	}
 	// 高段（小钩钓超重鱼）也要跟着放宽，但仍有地板：2.33kg 钩钓 100kg，r≈42.9。
 	small := tolHookSpec(14, 6) // 2.33kg gape
