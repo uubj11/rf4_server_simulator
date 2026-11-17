@@ -365,6 +365,8 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 			case outcome.ComponentBroken:
 				// 钩/拟饵等终端件断裂：竿仍在手上，钓组摘除损坏件。
 				srv.bumpFishingCounter(ctx.Sess.Userid, "component_breaks")
+			case outcome.GrowthSpared:
+				// 成长套装件豁免：竿没报废，只是耐久掉到下限，不计断竿。
 			default:
 				srv.bumpFishingCounter(ctx.Sess.Userid, "rod_breaks")
 			}
@@ -395,6 +397,7 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 			reelBroken := outcome.ReelBroken
 			frictionWorn := outcome.FrictionWorn
 			keepFight := outcome.KeepFight
+			growthSpared := outcome.GrowthSpared
 			ctx.AfterResponse(func() {
 				ctx.Sess.Push4_22Items(syncGUIDs)
 				switch {
@@ -407,6 +410,9 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 				case frictionWorn:
 					// 摩擦片磨穿、泄力失效，本体没坏，换摩擦片即可。
 					ctx.Sess.pushSystemChat("摩擦片磨穿、泄力失效，请到工坊更换摩擦片")
+				case growthSpared:
+					// 成长套装件豁免：竿没报废，只是耐久被打到下限，钓鱼继续。
+					ctx.Sess.pushSystemChat("成长钓具严重受损（耐久仅剩一成），未彻底损坏；可继续使用，建议到工坊修复")
 				}
 			})
 			if keepFight {
@@ -416,6 +422,9 @@ func hDynamicRodBreak(ctx *Ctx) ([]byte, bool) {
 			// 断件必丢鱼：11028 只表达装备损坏，另经聊天频道提示跑鱼。
 			reason := "断竿"
 			switch {
+			case outcome.GrowthSpared:
+				// 竿还在，只是超载把鱼拉跑了。
+				reason = "成长钓具受损"
 			case outcome.ComponentBroken:
 				reason = "钓组组件断裂"
 			case outcome.ReelBroken:

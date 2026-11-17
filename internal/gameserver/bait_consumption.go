@@ -426,8 +426,13 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 				return out, err
 			}
 			row.Durability = math.Max(0, row.Durability-wear)
-			if idx := fieldIdxByCS(row.WireClass, csDurability); idx >= 0 {
-				if !setWireFloat(fields, row.WireClass, idx, row.Durability) {
+			// 存量精简快照可能没有耐久槽（idx 越界），列与字段也可能不同步；
+			// 这两种都靠 item.durability 列承载，不能判成字段无效让整次抛投失败。
+			if idx := fieldIdxByCS(row.WireClass, csDurability); idx >= 0 && idx < len(fields) {
+				switch fieldOpAt(row.WireClass, idx) {
+				case "FLOAT", "DOUBLE", "U32":
+					setWireFloat(fields, row.WireClass, idx, row.Durability)
+				default:
 					return out, fmt.Errorf("饵料耐久字段无效")
 				}
 			}

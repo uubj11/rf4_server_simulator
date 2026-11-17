@@ -197,7 +197,7 @@ func main() {
 	})
 
 	// 上次异常退出可能遗留 launcher 管理的 hosts 行；先按归属状态恢复官方解析。
-	if err := hostsRestore(hostsFilePath()); err != nil {
+	if err := hostsRestoreHost(hostsFilePath(), localHost(app.cfg)); err != nil {
 		app.log.Warn("清理上次 hosts 遗留状态失败: " + err.Error())
 	}
 
@@ -208,7 +208,7 @@ func main() {
 			return
 		}
 		if app.cfg.Launcher.HostsSwitch {
-			if err := hostsSetLocal(hostsFilePath(), loginDomains(app.cfg)); err != nil {
+			if err := hostsSetLocalHost(hostsFilePath(), loginDomains(app.cfg), localHost(app.cfg)); err != nil {
 				app.log.Warn("hosts 自动切换失败（请以管理员身份运行 launcher）: " + err.Error() +
 					"；可手动将 api.rf4game.ru/com 指向 127.0.0.1，或以管理员 PowerShell 运行 tools/hosts.ps1 local")
 			} else {
@@ -217,11 +217,16 @@ func main() {
 		}
 	}()
 
+	// ---- 成长套装面板校准跟随游戏（不挑启动入口、不占开机自启）----
+	// 玩家从 Steam 库直接启动游戏时不会走「启动游戏（Steam版）.cmd」，这里由
+	// launcher 兜底：看到 rf4_x64.exe 就拉起 RF4_GrowthPanelWatcher。
+	go app.startPanelGuard(appCtx)
+
 	// ---- 托盘常驻 ----
 	systray.Run(app.onTrayReady, func() {
 		app.sup.StopAll()
 		if app.cfg.Launcher.HostsSwitch {
-			if err := hostsRestore(hostsFilePath()); err != nil {
+			if err := hostsRestoreHost(hostsFilePath(), localHost(app.cfg)); err != nil {
 				app.log.Error("hosts 还原失败: " + err.Error() +
 					"；hosts 仍指向本地服，如需回官服请手动删除 hosts 中的 rf4s-local 行，或以管理员 PowerShell 运行 tools/hosts.ps1 official")
 			} else {
@@ -365,7 +370,7 @@ func (a *app) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"admin_error":     adminErr,
 		"game_path":       gamePath,
 		"game_region":     gameRegion,
-		"hosts":           hostsMode(hostsFilePath()),
+		"hosts":           hostsModeFor(hostsFilePath(), localHost(a.cfg)),
 		"current_version": buildinfo.Version,
 		"update":          update,
 		"update_status":   a.updateHealthSnapshot(),
@@ -377,15 +382,15 @@ func (a *app) handleHosts(w http.ResponseWriter, r *http.Request) {
 	path := hostsFilePath()
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, map[string]any{"mode": hostsMode(path)})
+		writeJSON(w, map[string]any{"mode": hostsModeFor(path, localHost(a.cfg))})
 	case http.MethodPost:
 		mode := r.URL.Query().Get("mode")
 		var err error
 		switch mode {
 		case "local":
-			err = hostsSetLocal(path, loginDomains(a.cfg))
+			err = hostsSetLocalHost(path, loginDomains(a.cfg), localHost(a.cfg))
 		case "official":
-			err = hostsRestore(path)
+			err = hostsRestoreHost(path, localHost(a.cfg))
 		default:
 			httpError(w, "mode 必须是 local 或 official")
 			return

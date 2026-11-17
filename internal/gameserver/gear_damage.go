@@ -56,6 +56,9 @@ type gearBreakOutcome struct {
 	// KeepFight 表示渔轮损坏但钓组与鱼保留：搏鱼继续，等客户端断线(17/9)
 	// 或剪线(17/10)收尾，不能按跑鱼处理。
 	KeepFight bool
+	// GrowthSpared 表示这次硬报废被成长套装豁免：竿耐久只压到下限、
+	// 钓组与组件保留，鱼照样跑掉。回包仍按断件形状（11028），只是移除列表为空。
+	GrowthSpared bool
 }
 
 type gearBreakDecision struct {
@@ -1554,11 +1557,18 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 	if err != nil {
 		return nil, err
 	}
+	// 成长套装件不彻底损坏：17/9 只把耐久压到下限，钓组与组件原样保留，
+	// 玩家丢掉这竿鱼但不会失去套装归属（growth_item 绑老 guid，重买不跟新件）。
+	spared := s.growthBreakSparedTx(ctx, tx, rodGUID)
+	after := 0.0
+	if spared {
+		after = growthDurabilityFloor
+	}
 	idx := fieldIdxByCS(rod.WireClass, csDurability)
-	if idx < 0 || !setWireFloat(fields, rod.WireClass, idx, 0) {
+	if idx < 0 || !setWireFloat(fields, rod.WireClass, idx, after) {
 		return nil, errDurabilityField
 	}
-	rod.Durability = 0
+	rod.Durability = after
 	if err := updateItemFieldsTx(ctx, s.DB, tx, rod, fields); err != nil {
 		return nil, err
 	}
@@ -1619,56 +1629,58 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 	lineKept := lineRow != nil && (lossLength == 0 || afterLength > 0)
 
 	stored := protoFieldAt(fields, rod.WireClass, csRigObject)
-	compGUIDs := map[string]bool{}
-	if rows, qerr := tx.QueryContext(ctx,
-		`SELECT COALESCE(guid,'') FROM rig_component WHERE rig_guid=?`, rodGUID); qerr == nil {
-		for rows.Next() {
-			var g string
-			if err := rows.Scan(&g); err == nil && g != "" {
-				compGUIDs[g] = true
-			}
-		}
-		_ = rows.Err()
-		_ = rows.Close()
-	}
-	for _, c := range rigCompsOf(stored) {
-		if c.GUID != "" {
-			compGUIDs[c.GUID] = true
-		}
-	}
-	delete(compGUIDs, reelGUID)
-	delete(compGUIDs, lineGUID)
-	guids := make([]string, 0, len(compGUIDs))
-	for g := range compGUIDs {
-		guids = append(guids, g)
-	}
-	sort.Strings(guids)
 	stackNumericIDs := map[int64]bool{}
 	stackSourceGUIDs := map[string]bool{}
-	for _, g := range guids {
-		row, gerr := s.DB.GetItemByGUIDTx(ctx, tx, g)
-		if gerr != nil || row == nil {
-			continue
-		}
-		// 官服口径：断竿时挂线配件全部丢失销毁（含拆分子饵），不再摘回背包。
-		if category, ok := effectiveCategoryTx(ctx, tx, row.ItemID); ok && countableCategories[category] {
-			if srcGUID := splitSourceGUID(row); len(srcGUID) == 32 {
-				stackSourceGUIDs[srcGUID] = true
+	if !spared {
+		compGUIDs := map[string]bool{}
+		if rows, qerr := tx.QueryContext(ctx,
+			`SELECT COALESCE(guid,'') FROM rig_component WHERE rig_guid=?`, rodGUID); qerr == nil {
+			for rows.Next() {
+				var g string
+				if err := rows.Scan(&g); err == nil && g != "" {
+					compGUIDs[g] = true
+				}
 			}
-			stackNumericIDs[row.NumericID] = true
+			_ = rows.Err()
+			_ = rows.Close()
 		}
-		if err := s.DB.DeleteItemCascadeTx(ctx, tx, g); err != nil {
-			return nil, err
+		for _, c := range rigCompsOf(stored) {
+			if c.GUID != "" {
+				compGUIDs[c.GUID] = true
+			}
 		}
-		entry := store.ItemDamageLog{
-			UID: uid, ItemGUID: g, ItemID: row.ItemID, Event: damageEventLostOnRodBreak,
-			BeforeDurability: ptrFloat64(row.Durability), BrokenGUID: brokenGUID,
-			DetailJSON: damageDetailJSON(map[string]any{"rod_guid": rodGUID, "reason": "rod_break"}),
+		delete(compGUIDs, reelGUID)
+		delete(compGUIDs, lineGUID)
+		guids := make([]string, 0, len(compGUIDs))
+		for g := range compGUIDs {
+			guids = append(guids, g)
 		}
-		if err := store.AddItemDamageLog(ctx, tx, entry); err != nil {
-			return nil, err
+		sort.Strings(guids)
+		for _, g := range guids {
+			row, gerr := s.DB.GetItemByGUIDTx(ctx, tx, g)
+			if gerr != nil || row == nil {
+				continue
+			}
+			// 官服口径：断竿时挂线配件全部丢失销毁（含拆分子饵），不再摘回背包。
+			if category, ok := effectiveCategoryTx(ctx, tx, row.ItemID); ok && countableCategories[category] {
+				if srcGUID := splitSourceGUID(row); len(srcGUID) == 32 {
+					stackSourceGUIDs[srcGUID] = true
+				}
+				stackNumericIDs[row.NumericID] = true
+			}
+			if err := s.DB.DeleteItemCascadeTx(ctx, tx, g); err != nil {
+				return nil, err
+			}
+			entry := store.ItemDamageLog{
+				UID: uid, ItemGUID: g, ItemID: row.ItemID, Event: damageEventLostOnRodBreak,
+				BeforeDurability: ptrFloat64(row.Durability), BrokenGUID: brokenGUID,
+				DetailJSON: damageDetailJSON(map[string]any{"rod_guid": rodGUID, "reason": "rod_break"}),
+			}
+			if err := store.AddItemDamageLog(ctx, tx, entry); err != nil {
+				return nil, err
+			}
+			removed = append(removed, g)
 		}
-		removed = append(removed, g)
 	}
 	// 主线随断竿只扣放出去的米数：扣剩的线更新长度后仍挂在断竿上（f3 与
 	// catLine 投影行保留）；上报米数 ≥ 剩余线长时耗尽删除，与断主线耗尽同形。
@@ -1707,33 +1719,37 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 	}
 	// 钓组已整体清空：补饵请求和饵-钩映射必须一起清掉，否则断竿后
 	// 第一次抛竿（换竿或换轮）会把饵挂回一条空钓组。
-	if err := clearRodBaitSettingsTx(ctx, tx, rodGUID); err != nil {
-		return nil, err
-	}
-	delCond := `DELETE FROM rig_component WHERE rig_guid=? AND COALESCE(guid,'')<>?`
-	delArgs := []any{rodGUID, reelGUID}
-	if lineKept {
-		// 线留在断竿上：catLine 投影行与 f3 同步保留，避免投影漂移出幽灵行。
-		delCond += ` AND COALESCE(guid,'')<>?`
-		delArgs = append(delArgs, lineGUID)
-	}
-	if _, err := tx.ExecContext(ctx, delCond, delArgs...); err != nil {
-		return nil, err
-	}
-	// 清空竿上的钓组存储与主线引用；渔轮引用（f4）保留——轮子仍挂在断竿上。
-	comps := rigCompsOf(stored)
-	for k := range comps {
-		delete(comps, k)
-	}
-	name, rigType, typeOK := rigIdentity(stored)
-	if !typeOK {
-		rigType = s.defaultRigTypeForRod(ctx, rod.ItemID)
-		name = rigNameForType(rigType)
-	}
-	depth := rigDepthOf(stored, defaultDepthFor(name, rigType))
-	if i := fieldIdxByCS(rod.WireClass, csRigObject); i >= 0 && i < len(fields) {
-		fields[i].Op = "VAL"
-		fields[i].Val = buildRig153WithClip(name, rigType, comps, depth, rigClipOf(stored))
+	// 成长件豁免时钓组原样保留，所以这一段（含饵映射与 rig_component 清理）
+	// 整块跳过，只留下面的主线引用处理。
+	if !spared {
+		if err := clearRodBaitSettingsTx(ctx, tx, rodGUID); err != nil {
+			return nil, err
+		}
+		delCond := `DELETE FROM rig_component WHERE rig_guid=? AND COALESCE(guid,'')<>?`
+		delArgs := []any{rodGUID, reelGUID}
+		if lineKept {
+			// 线留在断竿上：catLine 投影行与 f3 同步保留，避免投影漂移出幽灵行。
+			delCond += ` AND COALESCE(guid,'')<>?`
+			delArgs = append(delArgs, lineGUID)
+		}
+		if _, err := tx.ExecContext(ctx, delCond, delArgs...); err != nil {
+			return nil, err
+		}
+		// 清空竿上的钓组存储与主线引用；渔轮引用（f4）保留——轮子仍挂在断竿上。
+		comps := rigCompsOf(stored)
+		for k := range comps {
+			delete(comps, k)
+		}
+		name, rigType, typeOK := rigIdentity(stored)
+		if !typeOK {
+			rigType = s.defaultRigTypeForRod(ctx, rod.ItemID)
+			name = rigNameForType(rigType)
+		}
+		depth := rigDepthOf(stored, defaultDepthFor(name, rigType))
+		if i := fieldIdxByCS(rod.WireClass, csRigObject); i >= 0 && i < len(fields) {
+			fields[i].Op = "VAL"
+			fields[i].Val = buildRig153WithClip(name, rigType, comps, depth, rigClipOf(stored))
+		}
 	}
 	// csReel（f4）不清：断竿后轮子仍挂在竿上；线扣剩时 csLine（f3）也不清。
 	if !lineKept {
@@ -1748,8 +1764,8 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 
 	entry := store.ItemDamageLog{
 		UID: uid, ItemGUID: rod.GUID, ItemID: rod.ItemID, Event: damageEventRodBreak,
-		BeforeDurability: ptrFloat64(before), AfterDurability: ptrFloat64(0), BrokenGUID: brokenGUID,
-		DetailJSON: damageDetailJSON(map[string]any{"rod_guid": rodGUID}),
+		BeforeDurability: ptrFloat64(before), AfterDurability: ptrFloat64(after), BrokenGUID: brokenGUID,
+		DetailJSON: damageDetailJSON(map[string]any{"rod_guid": rodGUID, "spared": spared}),
 	}
 	if err := store.AddItemDamageLog(ctx, tx, entry); err != nil {
 		return nil, err
@@ -1771,6 +1787,7 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 		LineLossM:         lossLength,
 		StackRefreshGUIDs: stackRefresh,
 		UpdatedTrees:      s.loadUpdatedTrees(ctx, updated),
+		GrowthSpared:      spared,
 	}, nil
 }
 

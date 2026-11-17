@@ -69,9 +69,11 @@ const (
 // 空字符串表示数据缺失，该部件不参与最弱环计算。
 type rigGearIDs struct {
 	Rod                 string
+	RodGUID             string
 	Reel                string
 	ReelGUID            string
 	Line                string
+	LineGUID            string
 	Leader              string
 	LeaderGUID          string
 	Leadcore            string
@@ -616,12 +618,16 @@ func (s *Server) loadGearSpec(ctx context.Context, ids rigGearIDs) gearPhysicsSp
 		}
 		return v * durability
 	}
-	spec.RodPowerKg = applyDurability(rodPowerKg(load(ids.Rod)), ids.RodDurability)
-	s.logMissingRodPhysics(ids.Rod, load(ids.Rod))
+	// 成长套装：每件按套装等级乘自己的倍率。服务端断件判定与下发必须用同一套倍率，
+	// 否则会出现「客户端显示 3125、服务端按 238 判竿」的错位。
+	rodDef := load(ids.Rod)
+	rodMult := s.growthMultiplierForItem(ctx, ids.RodGUID)
+	spec.RodPowerKg = applyDurability(rodPowerKg(rodDef)*rodMult, ids.RodDurability)
+	s.logMissingRodPhysics(ids.Rod, rodDef)
 	spec.ReelPresent = strings.TrimSpace(ids.Reel) != ""
-	spec.ReelDragKg = s.reelLockedDragForSpec(ctx, ids, load(ids.Reel))
+	spec.ReelDragKg = s.reelLockedDragForSpec(ctx, ids, load(ids.Reel)) * s.growthMultiplierForItem(ctx, ids.ReelGUID)
 	lineDef := load(ids.Line)
-	spec.LineStrengthKg = applyDurability(lineStrengthKg(lineDef), ids.LineDurability)
+	spec.LineStrengthKg = applyDurability(lineStrengthKg(lineDef)*s.growthMultiplierForItem(ctx, ids.LineGUID), ids.LineDurability)
 	spec.LineStretch = lineStretch(lineDef)
 	// 自制引线（leader_crafted_*）的定义里内嵌线材与连接件都是 null：
 	// 材料是玩家制作时才选的，只有实例上才有。读定义会得到 0，
@@ -631,9 +637,9 @@ func (s *Server) loadGearSpec(ctx context.Context, ids rigGearIDs) gearPhysicsSp
 	if leaderKg <= 0 {
 		leaderKg = s.craftedLeaderBaseStrengthKg(ctx, ids.LeaderGUID)
 	}
-	spec.LeaderStrengthKg = applyDurability(leaderKg, ids.LeaderDurability)
-	spec.LeadcoreStrengthKg = applyDurability(itemDefF32(load(ids.Leadcore), gearAttrMaxLoad), ids.LeadcoreDurability)
-	spec.ConnectorStrengthKg = applyDurability(itemDefF32(load(ids.Connector), gearAttrMaxLoad), ids.ConnectorDurability)
+	spec.LeaderStrengthKg = applyDurability(leaderKg*s.growthMultiplierForItem(ctx, ids.LeaderGUID), ids.LeaderDurability)
+	spec.LeadcoreStrengthKg = applyDurability(itemDefF32(load(ids.Leadcore), gearAttrMaxLoad)*s.growthMultiplierForItem(ctx, ids.LeadcoreGUID), ids.LeadcoreDurability)
+	spec.ConnectorStrengthKg = applyDurability(itemDefF32(load(ids.Connector), gearAttrMaxLoad)*s.growthMultiplierForItem(ctx, ids.ConnectorGUID), ids.ConnectorDurability)
 	return spec
 }
 
@@ -686,7 +692,10 @@ func (s *Server) loadGearSpecForRig(ctx context.Context, ids rigGearIDs, rodGUID
 	if durability > 1 {
 		durability = 1
 	}
-	spec.HookStrengthKg = itemDefF32(def, gearAttrMaxLoad) * durability
+	hookKg := itemDefF32(def, gearAttrMaxLoad) * durability * s.growthMultiplierForItem(ctx, s.mountedHookGuid(ctx, rodGUID))
+	// 自选钩的承力由套装等级托底（只补不削）；钩号、gape 仍取玩家自己选的那把，
+	// 所以"选小钩钓小鱼、选大钩钓大鱼"的选择依然有效。
+	spec.HookStrengthKg = grownPartKg(hookKg, s.growthPartFloorForRod(ctx, rodGUID, growthRoleHook))
 	return spec
 }
 
@@ -779,6 +788,7 @@ func (s *Server) rigGearIDs(ctx context.Context, uid int64, rodGUID string) rigG
 		return out
 	}
 	out.Rod = s.itemSystemID(ctx, row)
+	out.RodGUID = row.GUID
 	out.RodDurability = row.Durability
 
 	compGUIDs := map[int64]string{}
@@ -811,7 +821,8 @@ func (s *Server) rigGearIDs(ctx context.Context, uid int64, rodGUID string) rigG
 
 	out.ReelGUID = compGUIDs[gearCatReel]
 	out.Reel, out.ReelDurability = s.itemSystemIDDurabilityByGUID(ctx, out.ReelGUID)
-	out.Line, out.LineDurability = s.itemSystemIDDurabilityByGUID(ctx, compGUIDs[gearCatLine])
+	out.LineGUID = compGUIDs[gearCatLine]
+	out.Line, out.LineDurability = s.itemSystemIDDurabilityByGUID(ctx, out.LineGUID)
 	out.LeaderGUID = compGUIDs[gearCatLeaderWire]
 	out.Leader, out.LeaderDurability = s.itemSystemIDDurabilityByGUID(ctx, out.LeaderGUID)
 	if out.Leader == "" {

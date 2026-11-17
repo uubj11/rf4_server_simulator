@@ -34,7 +34,10 @@ type fishRollContext struct {
 	spotEnv    fishSpotEnvironment
 	runtime    *fishRollRuntime
 	hook       gearPhysicsSpec
-	query      *fishQueryCapture
+	// hookTol 是成长套装钩宽容进度（0=普通钓具），决定正口率/保持率/发鱼权重
+	// 的平台段宽度。普通竿恒为 0，手感与原版一致。
+	hookTol float64
+	query   *fishQueryCapture
 }
 
 type fishRollRuntime struct {

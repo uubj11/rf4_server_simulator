@@ -43,8 +43,47 @@ type catchWear struct {
 	log        store.ItemDamageLog
 }
 
+// catchWearForItem 计算一件钓组件的本次磨损快照（只算，不落库）。
+// growth 表示该实例已登记为成长套装件：成长件按鱼重回复耐久（见 growthDurabilityAfterCatch）。
+func catchWearForItem(row *store.Item, key string, fishWeightKg float64, growth bool, slot, ordinal int64) (*catchWear, error) {
+	if row == nil {
+		return nil, nil
+	}
+	amount := wearPerCatch[key]
+	if amount <= 0 || row.Durability <= 0 {
+		return nil, nil
+	}
+	durability := growthDurabilityAfterCatch(row.Durability, amount, fishWeightKg, growth)
+	fields, err := FieldsFromJSON(row.FieldsJSON)
+	if err != nil {
+		return nil, err
+	}
+	idx := fieldIdxByCS(row.WireClass, csDurability)
+	// 耐久有两份存储：item.durability 列与 fields_json 的耐久槽，有路径只写列，
+	// 所以"列要变、字段早已等值"是常态；字段也可能根本不在存量快照里（渔轮 13 槽）。
+	// setWireFloat 的返回值只表示"改没改动"，不是成败判据 —— 只要槽存在且 op 可写，
+	// 写不进去这件事本身不会发生。把它当失败会让整条 14/4 结算被丢弃、鱼判跑掉。
+	if idx >= 0 && idx < len(fields) {
+		switch fieldOpAt(row.WireClass, idx) {
+		case "FLOAT", "DOUBLE", "U32":
+			setWireFloat(fields, row.WireClass, idx, durability)
+		}
+	}
+	bumpCreatedTicks(fields, row.WireClass)
+	encoded, err := FieldsToJSON(fields)
+	if err != nil {
+		return nil, err
+	}
+	before := row.Durability
+	return &catchWear{row: row, fields: encoded, durability: durability,
+		log: store.ItemDamageLog{UID: row.UID, ItemGUID: row.GUID, ItemID: row.ItemID,
+			Event: damageEventWear, BeforeDurability: &before, AfterDurability: &durability,
+			DetailJSON: damageDetailJSON(map[string]any{"slot": slot, "ordinal": ordinal, "category": key})}}, nil
+}
+
 // prepareCatchWear 只准备字段快照；结算事务提交前不改物品或损伤历史。
-func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string) ([]catchWear, error) {
+// fishWeightKg 是本次渔获重量，成长套装件按它回复耐久（见 growthDurabilityAfterCatch）。
+func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string, fishWeightKg float64) ([]catchWear, error) {
 	if rigGUID == "" {
 		return nil, nil
 	}
@@ -65,29 +104,18 @@ func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string
 		if row != nil && row.UID != uid {
 			return fmt.Errorf("钓组物品不属于当前玩家")
 		}
-		amount := wearPerCatch[key]
-		if row == nil || amount <= 0 || row.Durability <= 0 {
+		if row == nil || row.Durability <= 0 {
 			return nil
 		}
-		durability := math.Max(0, row.Durability-amount)
-		fields, err := FieldsFromJSON(row.FieldsJSON)
+		growth := s.isGrowthItem(ctx, row.GUID)
+		w, err := catchWearForItem(row, key, fishWeightKg, growth, slot, ordinal)
 		if err != nil {
 			return err
 		}
-		idx := fieldIdxByCS(row.WireClass, csDurability)
-		if idx >= 0 && !setWireFloat(fields, row.WireClass, idx, durability) {
-			return fmt.Errorf("耐久字段写入失败: %s", row.WireClass)
+		if w == nil {
+			return nil
 		}
-		bumpCreatedTicks(fields, row.WireClass)
-		encoded, err := FieldsToJSON(fields)
-		if err != nil {
-			return err
-		}
-		before := row.Durability
-		out = append(out, catchWear{row: row, fields: encoded, durability: durability,
-			log: store.ItemDamageLog{UID: row.UID, ItemGUID: row.GUID, ItemID: row.ItemID,
-				Event: damageEventWear, BeforeDurability: &before, AfterDurability: &durability,
-				DetailJSON: damageDetailJSON(map[string]any{"slot": slot, "ordinal": ordinal, "category": key})}})
+		out = append(out, *w)
 		return nil
 	}
 	components, err := s.DB.ListRigComponents(ctx, rigGUID)
@@ -165,10 +193,12 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	if err != nil {
 		return nil, err
 	}
-	wear, err := s.prepareCatchWear(ctx, uid, gear)
+	wear, err := s.prepareCatchWear(ctx, uid, gear, float64(f.WeightG)/1000.0)
 	if err != nil {
 		return nil, err
 	}
+	// 成长套装经验同样在事务前算好，事务内只落库。
+	growthStates := s.prepareGrowthXP(ctx, uid, gear, float64(f.WeightG)/1000.0)
 	if sess := s.liveSessionByUID(uid); sess != nil {
 		sess.updateHappyHour(time.Now(), false)
 	}
@@ -294,6 +324,11 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 			return nil, err
 		}
 	}
+	for _, st := range growthStates {
+		if err := s.DB.GrowthSetStateUpsert(ctx, tx, st); err != nil {
+			return nil, err
+		}
+	}
 	if card != nil {
 		if err := insertItemTx(ctx, tx, card); err != nil {
 			return nil, err
@@ -318,6 +353,13 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	// 成长套装主线长度：升级后把线补到该等级应有的米数（只补不削）。
+	// 放在提交之后做，避免在事务持有写锁时再开连接查 item / growth_item。
+	for _, st := range growthStates {
+		if err := s.syncGrowthLineLength(ctx, uid, st.SetKey, st.Level); err != nil {
+			s.log.Warn("成长套装主线长度同步失败", "uid", uid, "set", st.SetKey, "err", err)
+		}
 	}
 	// 官方升级礼物：真实升级（非重放）后逐级直发背包，内部按等级幂等；
 	// 钓法大类取本尾鱼（11 级分套依据）。礼物行随结果返回，由 14/4 处理器

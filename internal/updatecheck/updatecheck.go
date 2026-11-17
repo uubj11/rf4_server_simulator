@@ -36,10 +36,10 @@ const (
 //   - cdn.jsdelivr.net 与 raw.githubusercontent.com：TLS 握手被连接重置，
 //     仅作其他网络环境的备选。
 var DefaultSources = []string{
-	"https://gh-proxy.com/https://raw.githubusercontent.com/glance522/rf4_server_simulator/main/version.json",
-	"https://fastly.jsdelivr.net/gh/glance522/rf4_server_simulator@main/version.json",
-	"https://cdn.jsdelivr.net/gh/glance522/rf4_server_simulator@main/version.json",
-	"https://raw.githubusercontent.com/glance522/rf4_server_simulator/main/version.json",
+	"https://gh-proxy.com/https://raw.githubusercontent.com/OpenFisherCommunity/rf4_server_simulator/main/version.json",
+	"https://fastly.jsdelivr.net/gh/OpenFisherCommunity/rf4_server_simulator@main/version.json",
+	"https://cdn.jsdelivr.net/gh/OpenFisherCommunity/rf4_server_simulator@main/version.json",
+	"https://raw.githubusercontent.com/OpenFisherCommunity/rf4_server_simulator/main/version.json",
 }
 
 // ErrUnknownLocalBuildTs 表示本地构建没有可比键（dev 构建），不应检测。

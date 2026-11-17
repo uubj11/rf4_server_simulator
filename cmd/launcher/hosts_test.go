@@ -282,3 +282,47 @@ func TestHostsRestoreClearsOwnershipState(t *testing.T) {
 		t.Fatalf("还原后归属状态应清空: %+v", st)
 	}
 }
+
+// 本机 gateway 登录监听在 127.0.0.2:443（让出 127.0.0.1:443 给加速工具），
+// 面板不能因为认死 127.0.0.1 就把「已经指向本地」误报成官方服务器。
+func TestHostsModeRecognizesConfiguredHost(t *testing.T) {
+	path := writeHosts(t, "127.0.0.2 api.rf4game.ru\r\n127.0.0.2 api.rf4game.com\r\n")
+	if got := hostsModeFor(path, "127.0.0.2"); got != "local" {
+		t.Fatalf("127.0.0.2 生效行应判为本地，实得 %q", got)
+	}
+	if got := hostsModeFor(path, "127.0.0.1"); got != "official" {
+		t.Fatalf("该文件里没有 127.0.0.1 行，不该判成本地，实得 %q", got)
+	}
+}
+
+// hosts 指向的地址必须跟着 gateway 实际监听地址走，写死 127.0.0.1 会把游戏带到空端口。
+func TestLocalHostFollowsLoginAddr(t *testing.T) {
+	for _, tc := range []struct{ addr, want string }{
+		{"127.0.0.2:443", "127.0.0.2"},
+		{"127.0.0.1:443", "127.0.0.1"},
+		{":443", "127.0.0.1"},
+		{"0.0.0.0:443", "127.0.0.1"},
+		{"[::]:443", "127.0.0.1"},
+		{"", "127.0.0.1"},
+	} {
+		cfg := &config.Config{}
+		cfg.Gateway.LoginAddr = tc.addr
+		if got := localHost(cfg); got != tc.want {
+			t.Fatalf("login_addr=%q 应得 %q，实得 %q", tc.addr, tc.want, got)
+		}
+	}
+}
+
+func TestHostsSetLocalHostWritesConfiguredAddress(t *testing.T) {
+	path := writeHosts(t, "")
+	if err := hostsSetLocalHost(path, testDomains, "127.0.0.2"); err != nil {
+		t.Fatal(err)
+	}
+	got := readHosts(t, path)
+	if !strings.Contains(got, "127.0.0.2 api.rf4game.ru") {
+		t.Fatalf("应写入 127.0.0.2 行，实际:\n%s", got)
+	}
+	if mode := hostsModeFor(path, "127.0.0.2"); mode != "local" {
+		t.Fatalf("写完后应判为本地，实得 %q", mode)
+	}
+}

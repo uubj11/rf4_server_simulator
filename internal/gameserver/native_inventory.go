@@ -23,6 +23,11 @@ func nativeInventoryContainers(kind uint64) []string {
 		// containerEnumName 一致）。缺这条映射时 4/1 计数与 4/4 列表
 		// 对房屋容器一律回空，客户端房屋仓库 UI 永远无数据。
 		return []string{"house"}
+	case containerTent, 6:
+		// 帐篷存储（容器枚举 1/6 统一落 item.container='tent'）。缺这条映射
+		// 时 4/1 对帐篷回 used=0（容量也无默认值→0），客户端认为帐篷容量为零，
+		// 「移放到帐篷里」在 UI 层就被拦下——与房屋仓库同一机型。
+		return []string{"tent"}
 	}
 	return nil
 }

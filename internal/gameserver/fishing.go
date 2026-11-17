@@ -736,6 +736,8 @@ var fishPullSpeciesGroup = map[string]string{
 	"gc_smelt":      "salmonid",
 	"taimen":        "salmonid",
 	"os_grayling":   "salmonid",
+	"bh_carp":       "herb_carp",
+	"m_carp":        "carp_mid",
 	"coalfish":      "marine_gadid",
 	"pollachius":    "marine_gadid",
 	"menek":         "marine_gadid",
@@ -868,6 +870,8 @@ func (s *Server) rollFishForRig(ctx context.Context, uid int64, gearGUID, loc, b
 	c.loc, c.skill, c.uid = loc, bonus, uid
 	c.forRig = s.tunableF("fish_bait_rules_enabled", 0) == 1 || s.tunableF("fish_weather_enabled", 0) == 1 || c.happyBite > 0
 	c.rigType = s.rigTypeForWrite(ctx, gearGUID)
+	// 成长套装竿上的钩走宽容带；普通竿恒为 0，判鱼手感与原版一致。
+	c.hookTol = s.hookToleranceForRig(ctx, uid, gearGUID)
 	if s.DB != nil && gearGUID != "" {
 		if rod, _ := s.DB.GetItemByGUID(ctx, gearGUID); rod != nil && rod.UID != uid {
 			return nil
@@ -902,6 +906,10 @@ func (s *Server) rollFishForRig(ctx context.Context, uid int64, gearGUID, loc, b
 			}
 			s.log.Info("派鱼重量上限", "rod", ids.Rod, "reel", ids.Reel, "line", ids.Line,
 				"leader", ids.Leader, "weakest", weakest, "cap_kg", capKg, "rule", capRule)
+		}
+		// 把整副钓具的物理参数带进 roll 上下文，供「半小时」截断按实际泄力换算。
+		if spec := s.loadGearSpecForRig(ctx, ids, gearGUID); spec.RodPowerKg > 0 || spec.ReelDragKg > 0 {
+			c.hook = spec
 		}
 		return s.rollFishWithRules(loc, bait, capKg, bonus, c)
 	}
@@ -1099,16 +1107,20 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 		key := weightedChoice(keys, wts)
 		var w, grade int64
 		var huntReady fishHuntReadiness
+		// 派鱼上限两条分支共用：承力口径与半小时口径取更严的一侧。
+		// hunt（含双轨保底）过去只拿到 capG，于是「半小时上限」在狩猎状态里
+		// 完全不生效，弱装备会被塞进十几倍越级的鱼（§3.33）。
+		effCap := s.rollCapGFor(key, c.hook, capG)
 		if s.huntStateEnabled() && c.uid > 0 {
 			h := s.loadFishHuntState(cctx, c.uid, c.loc, c.spot)
 			w, grade, huntReady = s.sampleHuntWeight(cctx, key,
-				s.baitWeightModeForRoll(key, c.baits, c), scale, capG, c, h)
+				s.baitWeightModeForRoll(key, c.baits, c), scale, effCap, c, h)
 			if w > 0 {
 				s.recordHuntBite(cctx, h)
 			}
 		} else {
 			sample := func() float64 {
-				return float64(s.sampleWeightDB(cctx, key, s.baitWeightModeForRoll(key, c.baits, c), scale, capG, c))
+				return float64(s.sampleWeightDB(cctx, key, s.baitWeightModeForRoll(key, c.baits, c), scale, effCap, c))
 			}
 			w = int64(applyTrophyLuck(sample(), bonus.TrophyLuck, sample))
 		}
@@ -1144,7 +1156,7 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 			f.HuntStage = huntReady.Stage
 			f.HuntStageKnown = true
 		}
-		s.applyHookBiteQuality(f, c.hook)
+		s.applyHookBiteQuality(f, c.hook, c.hookTol)
 		if baitHit {
 			s.log.Info("roll_from_db 命中饵效", "鱼种", key, "重量", w, "tier", tiers[key])
 		}

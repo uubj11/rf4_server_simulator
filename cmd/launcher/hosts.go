@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,16 +30,44 @@ const (
 	hostsLocalRow = "127.0.0.1 "
 )
 
+// localHost 返回 hosts 该指向的本机地址：跟着 gateway 的登录监听走。
+// 本服为把 127.0.0.1:443 让给加速/302 工具，登录监听写成 127.0.0.2:443，
+// 此时 hosts 也必须写 127.0.0.2，否则游戏会连到一个没人监听的端口。
+func localHost(cfg *config.Config) string {
+	if cfg == nil {
+		return "127.0.0.1"
+	}
+	addr := strings.TrimSpace(cfg.Gateway.LoginAddr)
+	if addr == "" {
+		return "127.0.0.1"
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	switch host {
+	case "", "0.0.0.0", "::", "localhost", "localhost.localdomain":
+		return "127.0.0.1"
+	}
+	return host
+}
+
 // hostsState 记录 launcher 实际启用的域名。状态写在 hosts 文件旁，随退出
 // 或下一次启动恢复，崩溃后也能识别归属。
 type hostsState struct {
 	Owned []string `json:"owned,omitempty"`
 }
 
-var (
-	reHostsActive  = regexp.MustCompile(`^127\.0\.0\.1\s+(api\.rf4game\.(?:ru|com))\s*$`)
-	reHostsComment = regexp.MustCompile(`^#\s*rf4s-local\s+127\.0\.0\.1\s+(api\.rf4game\.(?:ru|com))`)
-)
+// 归属行/注释行的正则按目标地址生成：本机可能把登录监听放在 127.0.0.2，
+// 认死 127.0.0.1 会让面板把「已经指向本地」误报成官方服务器。
+func hostsActiveRe(host string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(host) + `\s+(api\.rf4game\.(?:ru|com))\s*$`)
+}
+
+func hostsCommentRe(host string) *regexp.Regexp {
+	return regexp.MustCompile(`^#\s*rf4s-local\s+` + regexp.QuoteMeta(host) + `\s+(api\.rf4game\.(?:ru|com))`)
+}
 
 // hostsFilePath 返回系统 hosts 文件路径。
 func hostsFilePath() string {
@@ -165,6 +194,18 @@ func isTransientReplaceError(err error) bool {
 // 127.0.0.1）。用户原本已有的同域名映射保持不变且不会被标记为 launcher
 // 所有；只有本项目新增或从 rf4s-local 注释恢复的行才会在退出时还原。
 func hostsSetLocal(path string, domains []string) error {
+	return hostsSetLocalHost(path, domains, "127.0.0.1")
+}
+
+// hostsSetLocalHost 同 hostsSetLocal，但生效行写成调用方指定的本机地址
+// （本服登录监听在 127.0.0.2:443 时要写 127.0.0.2）。
+func hostsSetLocalHost(path string, domains []string, host string) error {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	activeRe := hostsActiveRe(host)
+	commentRe := hostsCommentRe(host)
+	row := host + " "
 	text, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -183,7 +224,7 @@ func hostsSetLocal(path string, domains []string) error {
 	}
 	active := make(map[string]bool, len(domains))
 	for _, line := range lines {
-		if m := reHostsActive.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+		if m := activeRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
 			active[m[1]] = true
 		}
 	}
@@ -192,7 +233,7 @@ func hostsSetLocal(path string, domains []string) error {
 	owned := make(map[string]bool, len(domains))
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if m := reHostsActive.FindStringSubmatch(trimmed); m != nil {
+		if m := activeRe.FindStringSubmatch(trimmed); m != nil {
 			domain := m[1]
 			out = append(out, trimmed)
 			if requested[domain] && oldOwned[domain] {
@@ -200,10 +241,10 @@ func hostsSetLocal(path string, domains []string) error {
 			}
 			continue
 		}
-		if m := reHostsComment.FindStringSubmatch(trimmed); m != nil {
+		if m := commentRe.FindStringSubmatch(trimmed); m != nil {
 			domain := m[1]
 			if requested[domain] && !active[domain] {
-				out = append(out, hostsLocalRow+domain)
+				out = append(out, row+domain)
 				active[domain] = true
 				owned[domain] = true
 				continue
@@ -227,7 +268,7 @@ func hostsSetLocal(path string, domains []string) error {
 			out = append(out, hostsSection)
 			sectionAdded = true
 		}
-		out = append(out, hostsLocalRow+d)
+		out = append(out, row+d)
 		active[d] = true
 		owned[d] = true
 	}
@@ -255,12 +296,22 @@ func hostsSetLocal(path string, domains []string) error {
 // hostsMode 判断当前 hosts 指向：local=存在生效的标准格式行；official=
 // 生效行全部处于注释状态或不存在；unknown=读取失败。
 func hostsMode(path string) string {
+	return hostsModeFor(path, "127.0.0.1")
+}
+
+// hostsModeFor 按指定本机地址判断指向：local=存在该地址的生效行；
+// official=生效行全部处于注释状态或不存在；unknown=读取失败。
+func hostsModeFor(path, host string) string {
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	text, err := os.ReadFile(path)
 	if err != nil {
 		return "unknown"
 	}
+	re := hostsActiveRe(host)
 	for _, line := range strings.Split(strings.ReplaceAll(string(text), "\r\n", "\n"), "\n") {
-		if reHostsActive.MatchString(strings.TrimSpace(line)) {
+		if re.MatchString(strings.TrimSpace(line)) {
 			return "local"
 		}
 	}
@@ -269,6 +320,15 @@ func hostsMode(path string) string {
 
 // hostsRestore 只注释 launcher 归属状态中记录的行，恢复官方解析。幂等。
 func hostsRestore(path string) error {
+	return hostsRestoreHost(path, "127.0.0.1")
+}
+
+// hostsRestoreHost 同 hostsRestore，但按调用方指定的本机地址识别归属行。
+func hostsRestoreHost(path, host string) error {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	activeRe := hostsActiveRe(host)
 	st := readHostsState(path)
 	if len(st.Owned) == 0 {
 		return nil
@@ -285,7 +345,7 @@ func hostsRestore(path string) error {
 	changed := false
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if m := reHostsActive.FindStringSubmatch(trimmed); m != nil && owned[m[1]] {
+		if m := activeRe.FindStringSubmatch(trimmed); m != nil && owned[m[1]] {
 			lines[i] = hostsMarker + " " + trimmed
 			changed = true
 		}

@@ -445,8 +445,10 @@ func (s *Server) itemStrengthForPush(
 	it *store.Item,
 	fields []proto.Field,
 ) (float64, bool) {
+	// 成长套装件：定义承力 × 当前耐久 × 套装等级倍率。倍率与服务端断件判定同源，
+	// 保证客户端看到的承力和服务端判竿用的是同一个数。
 	if strength, ok := strengthBitsFor(def, it.Durability); ok {
-		return strength, true
+		return strength * s.growthMultiplierForItem(ctx, it.GUID), true
 	}
 	if def != nil && def.Category == gearCatLeader && it.Durability > 0 {
 		base := s.craftedLeaderBaseStrengthFromFields(ctx, it.WireClass, fields)
@@ -455,7 +457,7 @@ func (s *Server) itemStrengthForPush(
 			if durability > 1 {
 				durability = 1
 			}
-			return base * durability, true
+			return base * durability * s.growthMultiplierForItem(ctx, it.GUID), true
 		}
 	}
 	return 0, false
@@ -489,6 +491,11 @@ func (s *Server) canonicalizeItemPhysicalFields(ctx context.Context, it *store.I
 		kind := rootItemStorageKind(class)
 		if it.Container == "house" {
 			kind = 10
+		}
+		if it.Container == "tent" {
+			// 帐篷存储：客户端物品管理器按容器枚举分组，帐篷恒 0 会让帐篷里的
+			// 物品被算成背包物品（帐篷窗口空、背包里却多出东西）。
+			kind = containerTent
 		}
 		if u64Of(fields[idx].Num) != kind {
 			fields[idx].Num = ptrU64(kind)

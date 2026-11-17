@@ -280,7 +280,7 @@ func TestHookNibbleSwitchKeepsProfileHoldMultiplier(t *testing.T) {
 	}
 	spec := gearPhysicsSpec{HookPresent: true, HookItemID: "small", HookSize: 6, HookLengthMM: 3.3}
 	f := &RolledFish{Grade: 2, WeightG: 1737}
-	s.applyHookBiteQuality(f, spec)
+	s.applyHookBiteQuality(f, spec, 0)
 	if f.BiteQuality != "solid" {
 		t.Fatalf("关闭嘬饵后不得再产生 nibble: %+v", f)
 	}
@@ -292,7 +292,7 @@ func TestHookNibbleSwitchKeepsProfileHoldMultiplier(t *testing.T) {
 func TestLuckProtectedBlueBypassesHookQuality(t *testing.T) {
 	tiny := gearPhysicsSpec{HookPresent: true, HookSize: 0, HookLengthMM: 1.8}
 	f := &RolledFish{Grade: 4, WeightG: 500_000}
-	(&Server{}).applyHookBiteQuality(f, tiny)
+	(&Server{}).applyHookBiteQuality(f, tiny, 0)
 	if !f.LuckProtected || f.BiteQuality != "solid" || f.HookHoldP != 1 {
 		t.Fatalf("蓝冠天命鱼必须绕过钩型判定: %+v", f)
 	}

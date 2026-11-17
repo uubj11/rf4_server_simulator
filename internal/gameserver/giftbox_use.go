@@ -79,11 +79,24 @@ func (s *Server) useGiftBox(ctx *Ctx) ([]byte, bool) {
 		return fail("礼盒打开未完成，请重试")
 	}
 	granted := make([]*store.Item, 0, len(contents))
+	growthSpec, isGrowthBundle := growthSetForBundle(row.ItemID)
+	// 成长套盒的配件必须各自独立成件（含可堆叠的转环）：多个套盒的同类件一旦
+	// 合并成一条库存，这条库存只能登记到一个套的归属，其它套就会缺件、并按错套倍率算。
+	mergeGrant := !isGrowthBundle
 	for _, it := range contents {
-		out, _, gerr := grantPreparedItemTx(cctx, tx, it, true)
+		out, _, gerr := grantPreparedItemTx(cctx, tx, it, mergeGrant)
 		if gerr != nil {
-			ctx.Log.Warn("礼盒内容物入库失败", "item", it.ItemID, "err", gerr)
+			ctx.Log.Warn("礼盒内容物入库失败", "item", it.ItemID, "err", err)
 			return fail("礼盒打开未完成，请重试")
+		}
+		// 成长套盒开箱：每个成员件都要登记自己在套内的角色，否则后续拿不到套装倍率。
+		if isGrowthBundle {
+			if role := growthRoleForMember(growthSpec, out.ItemID); role != "" {
+				if ierr := s.DB.GrowthItemInsertTx(cctx, tx, store.GrowthItem{GUID: out.GUID, UID: uid, SetKey: growthSpec.Key, Role: role}); ierr != nil {
+					ctx.Log.Warn("成长套装成员归属登记失败", "item", out.ItemID, "err", ierr)
+					return fail("礼盒打开未完成，请重试")
+				}
+			}
 		}
 		granted = append(granted, out)
 	}

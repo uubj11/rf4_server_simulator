@@ -52,6 +52,12 @@ const (
 	containerKeepnet       = 5
 	containerTradingCards  = 18
 	houseContainerCapacity = 100
+	// containerTent 是帐篷存储的容器枚举（1/6 共用 tent 存储）。官方容量 30 件，
+	// 会员订阅容量为 1.5 倍 = 45（rf4game.com/userguide Premium 章）。
+	// 4/1 回 0 时客户端认为容量为零，存放交互在 UI 层就被拦下。
+	containerTent               = 1
+	tentContainerCapacity       = 30
+	tentContainerCapacityMember = 45
 	// containerRewards 是客户端奖赏专用分组（lmmhdlhogdc=14）。3/16 响应处理
 	// 函数 ogbnjjglplh 把奖赏写死进该组（GameAssembly 0x1147EC0 `mov edx,0xe`）；
 	// 物品管理器 eegjkjenhoe 按物品 f4 容器枚举分组，house=10 进不了奖赏组。
@@ -87,6 +93,11 @@ func hItemCount(ctx *Ctx) ([]byte, bool) {
 		// 存放交互在 UI 层就被拦下。
 		used, _ = srv.DB.CountItemsByContainers(cctx, ctx.Sess.Userid, []string{"house"})
 		cap = houseContainerCapacity
+	case containerTent, 6:
+		// 帐篷存储：官方容量 30 件，会员订阅 1.5 倍 = 45。与房屋同理，
+		// 回 0 会让客户端把「移放到帐篷里」整项置灰。
+		used, _ = srv.DB.CountItemsByContainers(cctx, ctx.Sess.Userid, []string{"tent"})
+		cap, capMember = tentContainerCapacity, tentContainerCapacityMember
 	default:
 		if names := nativeInventoryContainers(container); names != nil {
 			used, _ = srv.DB.CountItemsByContainers(cctx, ctx.Sess.Userid, names)

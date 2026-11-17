@@ -165,6 +165,18 @@ func hStoreBuy(goldCol bool) Handler {
 			ctx.Log.Warn("商店商品退货属性不可判定", "item", itemID, "err", err)
 			return fail("购买未完成，请刷新商店后重试")
 		}
+		// 成长套装限购：同一类型只能有一套，购买即算持有（礼盒本体也登记归属）。
+		growthSpec, isGrowthSet := growthSetForBundle(itemID)
+		if isGrowthSet {
+			blocked, berr := srv.growthPurchaseBlocked(cctx, uid, growthSpec.Key)
+			if berr != nil {
+				ctx.Log.Warn("成长套装持有判定失败", "item", itemID, "err", berr)
+				return fail("购买未完成，请刷新商店后重试")
+			}
+			if blocked {
+				return fail("该类型成长套装已拥有，同一类型只能拥有一套")
+			}
+		}
 		// 定义查询必须在写事务前完成，避免单连接 SQLite 等待自身事务。
 		mergeable := make(map[string]bool, len(prepared))
 		if !returnable {
@@ -212,6 +224,26 @@ func hStoreBuy(goldCol bool) Handler {
 				return fail("购买未完成，请刷新商店后重试")
 			}
 			granted = append(granted, row)
+		}
+		// 成长套装：登记礼盒本体（或已展开的成员件）归属，并建立 0 级档案。
+		if isGrowthSet {
+			for _, row := range granted {
+				role := "bundle"
+				if !isBundle {
+					role = growthRoleForMember(growthSpec, row.ItemID)
+					if role == "" {
+						continue
+					}
+				}
+				if gerr := srv.DB.GrowthItemInsertTx(cctx, tx, store.GrowthItem{GUID: row.GUID, UID: uid, SetKey: growthSpec.Key, Role: role}); gerr != nil {
+					ctx.Log.Warn("成长套装归属登记失败", "item", itemID, "guid", row.GUID, "err", gerr)
+					return fail("购买未完成，请刷新商店后重试")
+				}
+			}
+			if serr := srv.DB.GrowthSetStateEnsureTx(cctx, tx, uid, growthSpec.Key); serr != nil {
+				ctx.Log.Warn("成长套装建档失败", "item", itemID, "err", serr)
+				return fail("购买未完成，请刷新商店后重试")
+			}
 		}
 		if returnable {
 			if err := srv.saveStorePurchaseTx(cctx, tx, uid, storeID, itemID, price, goldCol, granted); err != nil {

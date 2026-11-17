@@ -491,9 +491,71 @@ func (s *Server) hookBiteDelayFactorForRig(ctx context.Context, uid int64, rod s
 	return hookBiteDelayFactor(s.loadGearSpecForRig(ctx, ids, rod))
 }
 
-// hookSolidHold 返回普通鱼的稳定入口概率与中钩后保持率。
+// hookSolidHold 返回普通鱼的稳定入口概率与中钩后保持率（普通钓具口径，tol=0）。
 // 蓝冠不走这里，蓝冠由 luckProtected 直接保送。
 func hookSolidHold(weightG int64, spec gearPhysicsSpec) (solid, hold float64) {
+	return hookSolidHoldTol(weightG, spec, 0)
+}
+
+// hookToleranceBase 是成长套装在 0 级时的起步宽容度：套装天生比普通钓具宽容一档，
+// 满级再按进度推到 1.0。普通钓具不走这里，仍是 0 = 原版手感。
+const hookToleranceBase = 0.30
+
+// growthToleranceLevel 把等级进度映射成实际宽容度，0 级也有 hookToleranceBase。
+func growthToleranceLevel(progress float64) float64 {
+	progress = groundbaitClamp(progress, 0, 1)
+	return hookToleranceBase + (1-hookToleranceBase)*progress
+}
+
+// growthToleranceProgress 把套装等级换算成 0~1 的钩宽容进度。
+// 0 表示普通钓具手感（与原版逐位一致），1 表示满级成长套装的最宽容区间。
+func growthToleranceProgress(level, cap int64) float64 {
+	if cap <= 0 || level <= 0 {
+		return 0
+	}
+	if level > cap {
+		level = cap
+	}
+	return float64(level) / float64(cap)
+}
+
+// hookToleranceBand 是宽容带展开后的三组分段阈值。
+// tol=0 时全部退化为原版常量（.25 / .80 / .45 / .15 / 1.00 / .30 / .50 / .55 / .35 / .80 / .10），
+// 所以普通钓具的手感与改动前逐位一致；tol=1 为满级成长套装的最宽容区间。
+type hookToleranceBand struct {
+	lo         float64 // 大钩小鱼阈值
+	solidKink  float64 // 正口率平台右端
+	solidSlope float64 // 正口率超重段斜率
+	solidFloor float64
+	holdKink  float64 // 保持率平台右端
+	holdSlope float64
+	holdFloor float64
+	solidBase float64 // 低段基座：r→0 时的正口率系数
+	compatBase  float64 // 发鱼低段基座
+	compatSlope float64 // 发鱼超重段斜率
+	compatFloor float64
+}
+
+func hookToleranceBandFor(tol float64) hookToleranceBand {
+	tol = groundbaitClamp(tol, 0, 1)
+	return hookToleranceBand{
+		lo:          .25 - .15*tol,
+		solidKink:   .80 + .90*tol,
+		solidSlope:  .45 - .18*tol,
+		solidFloor:  .15 + .15*tol,
+		holdKink:    1.00 + .70*tol,
+		holdSlope:   .30 - .12*tol,
+		holdFloor:   .50 + .05*tol,
+		solidBase:   .55 + .27*tol,
+		compatBase:  .35 + .27*tol,
+		compatSlope: .80 - .35*tol,
+		compatFloor: .10 + .12*tol,
+	}
+}
+
+// hookSolidHoldTol 在指定宽容进度下返回普通鱼的稳定入口概率与保持率。
+// 低段写成 base+(1-base)·(r/lo)：lo=.25 时与原来的 (.55+1.8r) 数值等价。
+func hookSolidHoldTol(weightG int64, spec gearPhysicsSpec, tol float64) (solid, hold float64) {
 	if weightG <= 0 || !spec.HookPresent {
 		return .98, .98
 	}
@@ -501,27 +563,31 @@ func hookSolidHold(weightG int64, spec gearPhysicsSpec) (solid, hold float64) {
 	if gape <= 0 {
 		return .98, .98
 	}
+	b := hookToleranceBandFor(tol)
 	r := float64(weightG) / gape
-	solid = .96 - .45*math.Max(0, r-.8)
-	if r < .25 {
-		solid *= .55 + 1.8*r
+	if r < b.lo {
+		// 大钩小鱼：按宽容带把系数从 0.55 抬到 base，越靠近 lo 越接近满分。
+		solid = .96 * (b.solidBase + (1-b.solidBase)*(r/b.lo))
+	} else {
+		solid = .96 - b.solidSlope*math.Max(0, r-b.solidKink)
 	}
-	solid = groundbaitClamp(solid, .15, .96)
-	if r <= 1 {
-		// 鱼重没有超过钩型入口容量时，既然已经中钩，就不再做随机保钩失败。
-		// 这样正常鱼不会因为 2% 掷骰在 1~2 秒后突然脱钩；只有明显超过钩容量的
-		// 鱼才按超载程度降低保持率。
+	solid = groundbaitClamp(solid, b.solidFloor, .96)
+	if r <= b.holdKink {
+		// 鱼重没有超过宽容带上限时，既然已经中钩，就不再做随机保钩失败。
 		hold = 1
 	} else {
-		hold = groundbaitClamp(.98-.30*(r-1), .50, .98)
+		hold = groundbaitClamp(.98-b.holdSlope*(r-b.holdKink), b.holdFloor, .98)
 	}
 	return
 }
 
-// hookSpawnCompatibility 是发鱼阶段的几何软匹配权重，只描述鱼重与钩入口容量
-// 的适配程度，不读取后台钩型咬口/保持倍率。小于 1 表示该档位不匹配，但仍
-// 允许以较低权重出现，避免变成按钩号硬截断。
+// hookSpawnCompatibility 是发鱼阶段的几何软匹配权重（普通钓具口径，tol=0）。
 func hookSpawnCompatibility(weightG int64, spec gearPhysicsSpec) float64 {
+	return hookSpawnCompatibilityTol(weightG, spec, 0)
+}
+
+// hookSpawnCompatibilityTol 在指定宽容进度下返回发鱼软匹配权重。
+func hookSpawnCompatibilityTol(weightG int64, spec gearPhysicsSpec, tol float64) float64 {
 	if weightG <= 0 || !spec.HookPresent {
 		return 1
 	}
@@ -529,14 +595,15 @@ func hookSpawnCompatibility(weightG int64, spec gearPhysicsSpec) float64 {
 	if gape <= 0 {
 		return 1
 	}
+	b := hookToleranceBandFor(tol)
 	r := float64(weightG) / gape
-	if r < .25 {
-		return groundbaitClamp(.35+2.6*r, .35, 1)
+	if r < b.lo {
+		return groundbaitClamp(b.compatBase+(1-b.compatBase)*(r/b.lo), b.compatBase, 1)
 	}
-	if r <= 1 {
+	if r <= b.holdKink {
 		return 1
 	}
-	return groundbaitClamp(1/(1+.80*(r-1)), .10, 1)
+	return groundbaitClamp(1/(1+b.compatSlope*(r-b.holdKink)), b.compatFloor, 1)
 }
 
 // applyHookSpawnMatch 对非蓝冠档位应用钩型软匹配，并同比缩放 w4，保持蓝冠
@@ -587,12 +654,12 @@ func (s *Server) hookSpawnCompatibilityByGrade(ctx context.Context, c fishRollCo
 			continue
 		}
 		weight := int64(math.Round(mode * scale * mult))
-		compat[grade-1] = hookSpawnCompatibility(weight, c.hook)
+		compat[grade-1] = hookSpawnCompatibilityTol(weight, c.hook, c.hookTol)
 	}
 	return compat
 }
 
-func (s *Server) applyHookBiteQuality(f *RolledFish, spec gearPhysicsSpec) {
+func (s *Server) applyHookBiteQuality(f *RolledFish, spec gearPhysicsSpec, tol float64) {
 	if f == nil {
 		return
 	}
@@ -603,7 +670,7 @@ func (s *Server) applyHookBiteQuality(f *RolledFish, spec gearPhysicsSpec) {
 		f.LuckProtected = true
 		return
 	}
-	solid, hold := hookSolidHold(f.WeightG, spec)
+	solid, hold := hookSolidHoldTol(f.WeightG, spec, tol)
 	if p, ok := s.hookBiteProfileFor(spec.HookItemID); ok {
 		solid, hold = applyHookBiteProfile(f.WeightG, spec, p, solid, hold)
 	}

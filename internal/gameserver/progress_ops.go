@@ -186,9 +186,15 @@ func (s *Server) persistItemDurability(ctx context.Context, row *store.Item, dur
 		return err
 	}
 	idx := fieldIdxByCS(row.WireClass, csDurability)
-	if idx >= 0 {
-		if !setWireFloat(fields, row.WireClass, idx, durability) {
-			return fmt.Errorf("耐久字段写入失败: class=%s idx=%d", row.WireClass, idx)
+	if idx >= 0 && idx < len(fields) {
+		// 列与字段可能不同步（有路径只写列），setWireFloat 返回 false 只说明"没改动"，
+		// 不是写失败；槽不存在于存量快照时同理跳过，耐久以 item.durability 列为准。
+		switch fieldOpAt(row.WireClass, idx) {
+		case "FLOAT", "DOUBLE", "U32":
+			setWireFloat(fields, row.WireClass, idx, durability)
+		default:
+			return fmt.Errorf("耐久字段类型不支持: class=%s idx=%d op=%s",
+				row.WireClass, idx, fieldOpAt(row.WireClass, idx))
 		}
 	}
 	bumpCreatedTicks(fields, row.WireClass)
