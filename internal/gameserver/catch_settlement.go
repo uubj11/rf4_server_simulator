@@ -361,9 +361,10 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	// 跨级播报放在提交之后：事务里写账，聊天推送不进事务。
-	if mpProg.After > mpProg.Before {
-		s.notifyMapProfLevelUp(ctx, uid, locLevel, mpProg.After, mpProg.Catches)
+	// 熟练度播报放在提交之后：事务里写账，聊天推送不进事务。
+	// 默认每抓一条都弹（map_prof_chat_every_catch=0 时退回只在升级弹）。
+	if mpProg.Catches > 0 {
+		s.notifyMapProfCatch(ctx, uid, locLevel, mpProg)
 	}
 	// 成长套装主线长度：升级后把线补到该等级应有的米数（只补不削）。
 	// 放在提交之后做，避免在事务持有写锁时再开连接查 item / growth_item。

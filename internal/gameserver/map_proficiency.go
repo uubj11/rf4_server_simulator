@@ -235,23 +235,65 @@ func (s *Server) mapProfLocName(ctx context.Context, loc string) string {
 	return strings.TrimSpace(name)
 }
 
-// notifyMapProfLevelUp 跨级时给在线会话推一条系统聊天。
-func (s *Server) notifyMapProfLevelUp(ctx context.Context, uid int64, loc string, level int, catches int64) {
-	if s == nil || uid <= 0 || level <= 0 {
+// notifyMapProfCatch 给在线会话推一条熟练度播报：默认每抓一条都弹，
+// map_prof_chat_every_catch=0 时退回「只在升级弹」。
+func (s *Server) notifyMapProfCatch(ctx context.Context, uid int64, loc string, prog mapProfProgress) {
+	if s == nil || uid <= 0 || prog.Catches <= 0 {
 		return
 	}
-	text := mapProfLevelUpText(s.mapProfLocName(ctx, loc), level, catches)
+	if prog.After <= prog.Before && !s.mapProfChatEveryCatch() {
+		return
+	}
+	text := mapProfCatchText(s.mapProfLocName(ctx, loc), prog.Before, prog.After, prog.Catches, s.mapProfSteps())
 	for _, sess := range s.sessionsForUID(uid) {
 		sess.pushSystemChat(text)
 	}
 }
 
-// mapProfLevelUpText 跨级播报文案：地图名缺失时不让引号空着。
-func mapProfLevelUpText(name string, level int, catches int64) string {
+// mapProfChatEveryCatch 是否每尾都播报（默认开）。
+func (s *Server) mapProfChatEveryCatch() bool {
+	if s == nil {
+		return false
+	}
+	return s.tunableF("map_prof_chat_every_catch", 1) != 0
+}
+
+// mapProfCatchText 每尾播报文案：升级用「升至」，未升级显示累计与差额，满级不算差额。
+func mapProfCatchText(name string, before, after int, catches int64, steps []int64) string {
 	if strings.TrimSpace(name) == "" {
 		name = "未知水域"
 	}
-	return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d（累计 %d 尾）", name, level, catches)
+	next := mapProfNextNeed(after, steps)
+	if after > before {
+		if next < 0 {
+			return fmt.Sprintf("「%s」钓鱼熟练度升至 Lv.%d（累计 %d 尾，已满级）", name, after, catches)
+		}
+		return fmt.Sprintf("「%s」钓鱼熟练度升至 Lv.%d（累计 %d 尾，下一级 %d 尾）",
+			name, after, catches, next)
+	}
+	if next < 0 {
+		return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d（累计 %d 尾，已满级）", name, after, catches)
+	}
+	left := next - catches
+	if left < 0 {
+		left = 0
+	}
+	return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d · 累计 %d/%d 尾（还差 %d 尾升 Lv.%d）",
+		name, after, catches, next, left, after+1)
+}
+
+// mapProfNextNeed 返回升到下一档需要的累计尾数（满级返回 -1）。
+func mapProfNextNeed(level int, steps []int64) int64 {
+	if len(steps) == 0 || level+1 >= len(steps) {
+		return -1
+	}
+	if level < 0 {
+		level = 0
+	}
+	if level+1 >= len(steps) {
+		return -1
+	}
+	return steps[level+1]
 }
 
 // mapProfEnabled 整条链路的开关（默认开）。

@@ -274,14 +274,23 @@ func TestMapProfGradeBelowPct(t *testing.T) {
 	}
 }
 
-// 跨级播报文案。
-func TestMapProfLevelUpText(t *testing.T) {
-	got := mapProfLevelUpText("克马羚诺也湖", 3, 41)
-	want := "「克马羚诺也湖」钓鱼熟练度 Lv.3（累计 41 尾）"
-	if got != want {
-		t.Fatalf("播报=%q, want %q", got, want)
+// 每尾播报文案：升级用「升至」，未升级显示当前累计与还差多少，满级不再算差额。
+func TestMapProfCatchText(t *testing.T) {
+	steps := mapProfStepList(defMapProfSteps)
+	cases := []struct {
+		name         string
+		before, after int
+		catches      int64
+		want         string
+	}{
+		{"克马羚诺也湖", 4, 5, 301, "「克马羚诺也湖」钓鱼熟练度升至 Lv.5（累计 301 尾，下一级 600 尾）"},
+		{"克马羚诺也湖", 4, 4, 158, "「克马羚诺也湖」钓鱼熟练度 Lv.4 · 累计 158/300 尾（还差 142 尾升 Lv.5）"},
+		{"白河", 0, 0, 3, "「白河」钓鱼熟练度 Lv.0 · 累计 3/10 尾（还差 7 尾升 Lv.1）"},
+		{"", 9, 9, 5000, "「未知水域」钓鱼熟练度 Lv.9（累计 5000 尾，已满级）"},
 	}
-	if got := mapProfLevelUpText("", 1, 10); got != "「未知水域」钓鱼熟练度 Lv.1（累计 10 尾）" {
-		t.Fatalf("地图名缺失时应回退占位，实得 %q", got)
+	for _, tc := range cases {
+		if got := mapProfCatchText(tc.name, tc.before, tc.after, tc.catches, steps); got != tc.want {
+			t.Fatalf("播报=%q, want %q", got, tc.want)
+		}
 	}
 }

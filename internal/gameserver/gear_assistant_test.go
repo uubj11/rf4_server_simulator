@@ -255,9 +255,12 @@ func TestGearAssistantToggleKeepsWearBoundaries(t *testing.T) {
 	// 搏鱼受力磨损照常累计，开关只重置时间边界，切换后的一小时空窗不得补记。
 	sendGearAssistantForTest(t, s, sess, "开")
 	load := miscCtx(sess, 14, 8, nil)
-	for i := 0; i < 3; i++ {
+	// 受力秒数要远离耐久取整边界，否则 1~2 秒的账面偶尔取整成 0 会让断言抖动；
+	// 同时每轮把中途落库节流窗口重置，避免 claim 把账本提前取走导致最终结算无账可记。
+	for i := 0; i < 10; i++ {
 		st.mu.Lock()
 		st.reelWear.lastLoadAt = time.Now().Add(-2 * time.Second)
+		st.reelWear.lastFlushAt = time.Now()
 		st.mu.Unlock()
 		s.recordFightReelLoad(load)
 	}
