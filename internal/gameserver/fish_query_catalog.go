@@ -95,23 +95,11 @@ func (s *Server) fishQueryMaps(ctx context.Context, req FishQueryRequest, c fish
 		if current != nil && current.LevelKey == key && current.Scene != "" {
 			loc.scene = current.Scene
 		}
-		refs, err := s.DB.SQL.QueryContext(ctx, `SELECT spot,SUM(catches) FROM spot_fish WHERE loc=? AND fish_key=? GROUP BY spot ORDER BY SUM(catches) DESC,spot LIMIT 6`, statLoc, req.Fish)
+		refs, err := s.spotReferences(ctx, statLoc, req.Fish, req.UID)
 		if err != nil {
 			return nil, err
 		}
-		for refs.Next() {
-			var r FishQueryReference
-			if err := refs.Scan(&r.Coordinate, &r.Catches); err != nil {
-				refs.Close()
-				return nil, err
-			}
-			loc.references = append(loc.references, r)
-		}
-		if err := refs.Err(); err != nil {
-			refs.Close()
-			return nil, err
-		}
-		refs.Close()
+		loc.references = append(loc.references, refs...)
 		if req.X != nil {
 			zone, _ := sonarZoneForPoint(key, *req.X, *req.Z)
 			loc.points = []fishQueryPoint{{x: req.X, z: req.Z, zone: zone, kind: "manual"}}

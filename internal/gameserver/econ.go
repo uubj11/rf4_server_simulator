@@ -315,8 +315,9 @@ func (s *Server) fishingKeep(ctx *Ctx) ([]byte, bool) {
 		// 14/4 收竿时 Pending 已被这里清空（hooked=false），原先挂在 14/4 的
 		// recordHuntCatch 永远不会触发，计数会永久卡死在上一次的值。
 		s.recordHuntCatch(cctx, uid, keepLoc, keepSpot, &kept)
-		// 本尾真实入护的落点累加进钓点表，让钓点数据随玩家自己的渔获增长。
-		s.recordCatchSpot(cctx, keepLevel, castX, castZ, hasCastPos, kept.Species)
+		// 本尾真实入护的落点累加进「玩家自钓点位表」，让钓点数据随玩家自己的渔获增长。
+		// 目标是可写跑批表 spot_catch_player，不是只读的攻略表 spot_fish。
+		s.recordCatchSpot(cctx, uid, keepLevel, castX, castZ, hasCastPos, kept.Species)
 		s.notifyFishKept(ctx.Sess, &kept)
 		// 稀有鱼 / 超级稀有鱼鱼种数奖座**不在这里判定**：官方结算界面（801）在
 		// 玩家选择入护或放生之前就弹出奖座礼物卡，因此口径是「钓到过的鱼种数」，

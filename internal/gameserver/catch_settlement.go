@@ -274,8 +274,10 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	// 存量库里的浮点累加尾差（如 99.99999999999996）量化到 0.1 显示格，
 	// 否则钳位后产生正残渣增量，客户端渲染「+0 = 100%」技能行。
 	oldSkill = store.QuantizeSkillPoints(oldSkill)
-	gain := math.Min(fishingProficiencyGainForRoll(oldSkill, happyHourProficiencyRoll(oldSkill, rand.Float64(), happy), rand.Float64()), math.Max(0, profCap-oldSkill))
-	gain = store.QuantizeSkillPoints(gain) // 钳位残渣（如 3.6e-14）归零，增量保持 0.1/0.2 格
+	// 基础增量只看熟练度（原版口径），再按鱼重 × 稀有度加权；tunable 置 0 可退回原版。
+	baseGain := fishingProficiencyGainForRoll(oldSkill, happyHourProficiencyRoll(oldSkill, rand.Float64(), happy), rand.Float64())
+	gain := profWeightedGain(baseGain, s.profCatchWeightFactor(f.WeightG, f.Grade),
+		s.profCatchGainCap(), math.Max(0, profCap-oldSkill))
 	r.SkillGain = &gain
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(weight_g),0) FROM catch_log WHERE uid=? AND fish_key=?`, uid, f.Species).Scan(&r.PreviousBest); err != nil {
 		return nil, err
@@ -295,6 +297,11 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	// 稀有鱼 / 超级稀有鱼的鱼种数按「钓到过」记（catch_seen），同样在本事务内落库：
 	// 官方结算界面在玩家选择入护/放生之前就画奖座礼物卡，判定必须在结算时成立。
 	if err := recordCatchSeenTx(ctx, tx, uid, f.Species, locLevel, f.Grade, now); err != nil {
+		return nil, err
+	}
+	// 每图钓鱼熟练度：钓到即计数（放生也算），与经验、图鉴同事务提交。
+	mpProg, err := s.addMapProfCatchTx(ctx, tx, uid, locLevel, now)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE profile SET xp=?,level=?,updated_ts=? WHERE uid=?`, newXP, level, now, uid); err != nil {
@@ -353,6 +360,10 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	// 跨级播报放在提交之后：事务里写账，聊天推送不进事务。
+	if mpProg.After > mpProg.Before {
+		s.notifyMapProfLevelUp(ctx, uid, locLevel, mpProg.After, mpProg.Catches)
 	}
 	// 成长套装主线长度：升级后把线补到该等级应有的米数（只补不削）。
 	// 放在提交之后做，避免在事务持有写锁时再开连接查 item / growth_item。

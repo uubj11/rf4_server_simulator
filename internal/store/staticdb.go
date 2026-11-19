@@ -85,10 +85,14 @@ func openDatabase(path, staticPath string) (*DB, error) {
 	}
 
 	sqlDB := sql.OpenDB(connector)
-	// 本地单写者负载足够；写并发靠 busy_timeout 兜底。固定一个物理连接也让
-	// ATTACH、TEMP 视图和 authorizer 的生命周期与当前进程完全一致。
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	// SQLite 单库仍是单写者（写靠 WAL + busy_timeout 串行），但读不该排在写后面：
+	// 池里只留 1 条物理连接时，任何慢查询/长事务都会把读请求堵在池里，
+	// 读方只能等 ctx 超时（2026-11-18 实测：欢乐时光 30s、水域奖杯 5s 双双
+	// 报 context deadline exceeded，客户端整屏转「请稍等…」）。
+	// 每条物理连接都会各自 ATTACH 静态库 + 建 TEMP 视图 + 装 authorizer
+	// （见 staticConnector / prepareStaticConnection），所以放宽池子不放宽写保护。
+	sqlDB.SetMaxOpenConns(4)
+	sqlDB.SetMaxIdleConns(4)
 	sqlDB.SetConnMaxLifetime(0)
 	dbStaticPath := ""
 	if state != nil {

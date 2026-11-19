@@ -37,7 +37,10 @@ type fishRollContext struct {
 	// hookTol 是成长套装钩宽容进度（0=普通钓具），决定正口率/保持率/发鱼权重
 	// 的平台段宽度。普通竿恒为 0，手感与原版一致。
 	hookTol float64
-	query   *fishQueryCapture
+	// mapLevel 是本次判鱼所在地图的钓鱼熟练度等级（0=该图没钓过/Lv0），
+	// 用于下调「未达标」鱼占比。由 rollFishFromDBWithRules 填，不改存档格式。
+	mapLevel int
+	query    *fishQueryCapture
 }
 
 type fishRollRuntime struct {

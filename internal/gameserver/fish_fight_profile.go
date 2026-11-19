@@ -17,19 +17,32 @@ type fishFightProfile struct {
 type fishFightArchetype struct {
 	Stamina   float64
 	CurvePool string
+	// Fatigue 是本地「鱼搏斗自耗」的行为型档：鱼越活跃/越猛，自己挣扎越耗体力。
+	// 它乘在看官方 f6 上（见 applyFishFatigueScale），1.00 = 官方口径。
+	// 判据是服务端既有的行为型分类，不涉及客户端逐事件改动。
+	Fatigue float64
 }
 
 var fishFightArchetypes = map[string]fishFightArchetype{
-	"default":  {Stamina: 1.00, CurvePool: "crucian"},
-	"ambush":   {Stamina: 0.95, CurvePool: "perch"},
-	"salmonid": {Stamina: 1.28, CurvePool: "e.chub"},
-	"cyprinid": {Stamina: 1.38, CurvePool: "c.carp"},
-	"catfish":  {Stamina: 1.65, CurvePool: "e.chub"},
-	"sturgeon": {Stamina: 1.75, CurvePool: "e.chub"},
-	"small":    {Stamina: 0.72, CurvePool: "c.roach"},
-	"marine":   {Stamina: 1.18, CurvePool: "perch"},
-	"eel":      {Stamina: 0.92, CurvePool: "a.sleeper"},
-	"apex":     {Stamina: 1.55, CurvePool: "e.chub"},
+	"default":  {Stamina: 1.00, CurvePool: "crucian", Fatigue: 1.00},
+	"ambush":   {Stamina: 0.95, CurvePool: "perch", Fatigue: 1.00},
+	"salmonid": {Stamina: 1.28, CurvePool: "e.chub", Fatigue: 1.45},
+	"cyprinid": {Stamina: 1.38, CurvePool: "c.carp", Fatigue: 1.25},
+	"catfish":  {Stamina: 1.65, CurvePool: "e.chub", Fatigue: 1.15},
+	"sturgeon": {Stamina: 1.75, CurvePool: "e.chub", Fatigue: 1.25},
+	"small":    {Stamina: 0.72, CurvePool: "c.roach", Fatigue: 0.90},
+	"marine":   {Stamina: 1.18, CurvePool: "perch", Fatigue: 1.25},
+	"eel":      {Stamina: 0.92, CurvePool: "a.sleeper", Fatigue: 0.90},
+	"apex":     {Stamina: 1.55, CurvePool: "e.chub", Fatigue: 1.45},
+}
+
+// fishFatigueArchetypeScale 返回该鱼种行为型对应的自耗档（1.00 = 官方口径）。
+func fishFatigueArchetypeScale(species string) float64 {
+	arch := fishFightArchetypeFor(species)
+	if arch.Fatigue <= 0 {
+		return 1.0
+	}
+	return arch.Fatigue
 }
 
 func fishFightArchetypeFor(species string) fishFightArchetype {

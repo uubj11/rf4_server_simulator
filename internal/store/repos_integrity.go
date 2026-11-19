@@ -37,6 +37,12 @@ var PlayerTables = []string{
 	// 的哪个角色（growth_item）。两者都是玩家进度，进玩家存档与备份；不登记会让
 	// 表归属校验直接失败，拆分/备份也会把玩家的成长进度丢掉。
 	"growth_set_state", "growth_item",
+	// 玩家自己的渔获点位统计（世界坐标口径）。攻略点位 spot_fish 是只读静态表，
+	// 玩家累加必须落在可写表里，否则会被 staticWriteAuthorizer 拒绝（SQLITE_AUTH）。
+	"spot_catch_player",
+	// 每 (玩家, 地图) 的累计渔获数与熟练度进度：等级由尾数派生，是纯玩家进度，
+	// 不登记会让表归属校验失败、拆分/备份也丢。
+	"map_proficiency",
 }
 
 // RuntimeTables 是运营/运行时/迁移元数据表，不属于静态资料或玩家存档。

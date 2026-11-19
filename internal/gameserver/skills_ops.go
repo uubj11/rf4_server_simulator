@@ -866,3 +866,95 @@ func argsIntsDeep(v *proto.Value) []uint64 {
 	walk(v)
 	return out
 }
+
+// ---- 熟练度按鱼重 / 稀有度加权（本地 mod，0.9.57）----
+//
+// 原版口径：熟练度增量只看当前熟练度（概率 22.5/(25+cur)，命中 +0.1 或 +0.2），
+// 与鱼重、稀有度完全无关 —— 42g 小鱼和 22kg 鲤鱼涨一样多。
+// 这里加两根轴：重量档把「大鱼更难遇」折算成增量，稀有度档再乘一层；
+// 两轴各有一个 tunable 倍率，设 0 即回到原版行为（默认 1 = 生效）。
+const (
+	tunableProfWeightScale = "prof_weight_scale"
+	tunableProfRarityScale = "prof_rarity_scale"
+	tunableProfGainCap     = "prof_gain_cap"
+
+	defProfWeightScale = 1.0
+	defProfRarityScale = 1.0
+	defProfGainCap     = 1.0
+)
+
+// profWeightTierFactor 按渔获重量给熟练度增量倍率。
+// 档位边界按本地鱼情定：200g 以下基本是杂鱼，10kg 以上已经是巨物。
+func profWeightTierFactor(weightG int64) float64 {
+	switch {
+	case weightG < 200:
+		return 0.6
+	case weightG < 1000:
+		return 1.0
+	case weightG < 3000:
+		return 1.5
+	case weightG < 10000:
+		return 2.2
+	default:
+		return 3.0
+	}
+}
+
+// profGradeTierFactor 按稀有度档（RolledFish.Grade）给倍率。
+func profGradeTierFactor(grade int64) float64 {
+	switch {
+	case grade <= 1:
+		return 1.0
+	case grade == 2:
+		return 1.2
+	case grade == 3:
+		return 1.4
+	default:
+		return 1.7
+	}
+}
+
+// profCatchFactor 合并两轴；对应 scale=0 时该轴退化为 1（旧行为）。
+func profCatchFactor(weightG, grade int64, weightScale, rarityScale float64) float64 {
+	w := 1 + (profWeightTierFactor(weightG)-1)*weightScale
+	g := 1 + (profGradeTierFactor(grade)-1)*rarityScale
+	return w * g
+}
+
+// profWeightedGain 按倍率放大基础增量，落到 0.1 格（与库内
+// ROUND((points+gain)*10)/10 同一口径），再依次受单次封顶与剩余空间约束。
+func profWeightedGain(base, factor, capGain, remaining float64) float64 {
+	if base <= 0 || factor <= 0 || remaining <= 0 {
+		return 0
+	}
+	gain := math.Round(base*factor*10) / 10
+	if capGain > 0 && gain > capGain {
+		gain = capGain
+	}
+	if gain > remaining {
+		gain = remaining
+	}
+	return math.Round(gain*10) / 10
+}
+
+// profCatchWeightFactor 读 tunables 并合并两轴（0 = 关闭该轴）。
+func (s *Server) profCatchWeightFactor(weightG, grade int64) float64 {
+	if s == nil {
+		return 1
+	}
+	ws := clampFloat(s.tunableF(tunableProfWeightScale, defProfWeightScale), 0, 3)
+	rs := clampFloat(s.tunableF(tunableProfRarityScale, defProfRarityScale), 0, 3)
+	return profCatchFactor(weightG, grade, ws, rs)
+}
+
+// profCatchGainCap 单次熟练度增量上限（格），防止一条巨物直接涨满一档。
+func (s *Server) profCatchGainCap() float64 {
+	if s == nil {
+		return defProfGainCap
+	}
+	v := s.tunableF(tunableProfGainCap, defProfGainCap)
+	if v <= 0 {
+		return defProfGainCap
+	}
+	return clampFloat(v, 0.1, profCap)
+}

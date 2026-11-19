@@ -1043,6 +1043,19 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 			return nil
 		}
 	}
+	// 每图钓鱼熟练度：钓得越多的地图，稀有 / 超稀有鱼种的候选权重越高。
+	// 倍率只乘在 rarity>=1 的候选上（普通鱼不动），且必须放在筛选/分布之后，
+	// 否则会污染 strict 模式下的 interests 基数。攻略查询（uid=0 / query 上下文）不参与。
+	var prof mapProfRoll
+	if c.uid > 0 && c.query == nil {
+		prof = s.mapProfForRoll(cctx, c.uid, statLoc)
+		c.mapLevel = prof.level
+		if prof.level > 0 {
+			if rarity, rerr := s.DB.SpeciesRarityMap(cctx); rerr == nil {
+				applyMapProfSpeciesBias(keys, wts, rarity, int64(prof.level), prof.rareStep)
+			}
+		}
+	}
 	for i, key := range keys {
 		wts[i] *= s.fishBiteEnvironmentWeight(cctx, key, c)
 	}
@@ -1113,14 +1126,32 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 		effCap := s.rollCapGFor(key, c.hook, capG)
 		if s.huntStateEnabled() && c.uid > 0 {
 			h := s.loadFishHuntState(cctx, c.uid, c.loc, c.spot)
-			w, grade, huntReady = s.sampleHuntWeight(cctx, key,
-				s.baitWeightModeForRoll(key, c.baits, c), scale, effCap, c, h)
+			huntOnce := func() (int64, int64, fishHuntReadiness) {
+				return s.sampleHuntWeight(cctx, key,
+					s.baitWeightModeForRoll(key, c.baits, c), scale, effCap, c, h)
+			}
+			w, grade, huntReady = huntOnce()
+			// 与普通分支同构：命中重抽时取两次较大值。否则鱼猎/两档制链路
+			// 完全吃不到本图熟练度的「偏重」加成（保底加权只在档位层生效）。
+			if mapProfHeavyHit(prof.heavyChance, rand.Float64) {
+				if w2, g2, r2 := huntOnce(); w2 > w {
+					w, grade, huntReady = w2, g2, r2
+				}
+			}
 			if w > 0 {
 				s.recordHuntBite(cctx, h)
 			}
 		} else {
-			sample := func() float64 {
+			sampleOnce := func() float64 {
 				return float64(s.sampleWeightDB(cctx, key, s.baitWeightModeForRoll(key, c.baits, c), scale, effCap, c))
+			}
+			// 每图熟练度越高，偏重个体越常见：命中概率时重抽一次取较大值，
+			// 与奖杯幸运同构（不改分布形状，只把右尾出现率抬一点）。
+			sample := sampleOnce
+			if prof.heavyChance > 0 {
+				sample = func() float64 {
+					return mapProfHeavyDraw(prof.heavyChance, sampleOnce, rand.Float64)
+				}
 			}
 			w = int64(applyTrophyLuck(sample(), bonus.TrophyLuck, sample))
 		}
@@ -1229,7 +1260,7 @@ func (s *Server) sampleWeightDB(ctx context.Context, key string, modeMult, scale
 	if s.tunableF("grade_ratio_enabled", 1) == 1 {
 		settle := s.cachedSettleStatics(ctx, c, key)
 		ratioLines := cachedGradeLines{val: &settle[0], trophy: &settle[1], blue: &settle[2]}
-		if w, ok := s.sampleWeightByGradeRatio(ratioLines, modeMult, scale, capG); ok {
+		if w, ok := s.sampleWeightByGradeRatio(ratioLines, modeMult, scale, capG, c.mapLevel); ok {
 			return w
 		}
 	}
@@ -1278,7 +1309,9 @@ type fishGradeRatioModel struct {
 	total, scale, capG float64
 }
 
-func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float64) (fishGradeRatioModel, bool) {
+// gradeRatioModel 展开四档权重。mapLevel 是该图钓鱼熟练度等级（可选，缺省 0=原版口径）：
+// 等级越高，「未达标」份额越低，让出的份额补给「合格」，四档合计不变。
+func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float64, mapLevel ...int) (fishGradeRatioModel, bool) {
 	if s.tunableF("grade_ratio_enabled", 1) != 1 {
 		return fishGradeRatioModel{}, false
 	}
@@ -1336,11 +1369,23 @@ func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float
 			return fishGradeRatioModel{}, true
 		}
 	}
+	// 未达标占比随本图熟练度下调：让出的份额补给合格档，四档合计保持 100。
+	level := 0
+	if len(mapLevel) > 0 {
+		level = mapLevel[0]
+	}
+	belowBase := s.tunableF("grade_pct_below", 3)
+	belowPct := gradeBelowPctFor(belowBase,
+		s.tunableF(tunableGradeBelowMin, defGradeBelowMin),
+		s.tunableF(tunableGradeBelowStep, defGradeBelowStep), level)
 	w := map[int64]float64{
-		1: s.tunableF("grade_pct_below", 3),
+		1: belowPct,
 		2: s.tunableF("grade_pct_qualified", 87.5),
 		3: s.tunableF("grade_pct_trophy", 9),
 		4: s.tunableF("grade_pct_super", 0.5),
+	}
+	if shift := belowBase - belowPct; shift > 0 {
+		w[2] += shift
 	}
 	// 饵效命中：把一部分"合格"份额挪给奖杯，模拟大饵更招大鱼。
 	if modeMult > 1.0 {
@@ -1368,8 +1413,8 @@ func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float
 	return fishGradeRatioModel{bands: usable, weights: wts, total: total, scale: scale, capG: capG}, true
 }
 
-func (s *Server) sampleWeightByGradeRatio(l cachedGradeLines, modeMult, scale, capG float64) (int64, bool) {
-	model, handled := s.gradeRatioModel(l, modeMult, scale, capG)
+func (s *Server) sampleWeightByGradeRatio(l cachedGradeLines, modeMult, scale, capG float64, mapLevel ...int) (int64, bool) {
+	model, handled := s.gradeRatioModel(l, modeMult, scale, capG, mapLevel...)
 	if !handled || model.total <= 0 {
 		return 0, handled
 	}
@@ -1872,8 +1917,19 @@ var fishF6Step = map[string]struct {
 	"crucian": {AboveG: 450, F6: 0.60},
 }
 
-// fishF6For 返回本鱼 f6：实测种量化表（含体重台阶）→ 旧版校准常数 fallback。
+// fishF6For 返回本鱼 f6：实测种量化表（含体重台阶）→ 旧版校准常数 fallback，
+// 再叠本地「鱼搏斗自耗」= 总倍率(fish_fatigue_scale) × 行为型档(fishFightArchetype.Fatigue)。
 func (s *Server) fishF6For(f *RolledFish) float64 {
+	species := ""
+	if f != nil {
+		species = f.Species
+	}
+	scale := fishFatigueEffectiveScale(species, s.fishFatigueScale(), s.fishFatigueProfileScale())
+	return applyFishFatigueScale(s.fishF6BaseFor(f), scale)
+}
+
+// fishF6BaseFor 官方口径的 f6（未叠本地自耗倍率）。
+func (s *Server) fishF6BaseFor(f *RolledFish) float64 {
 	if f == nil {
 		return s.fishInitialStaminaRatio()
 	}
@@ -2070,6 +2126,7 @@ func (s *Session) Push14_14(f *RolledFish, hookGUID, gearGuid string, rigType in
 		"rod", shortGUID(gearGuid), "fish", shortGUID(f.FishGUID), "hook", shortGUID(hookGUID),
 		"鱼种", f.Species, "重量_g", f.WeightG, "体力池", stamina,
 		"初始体力", initialStamina, "拉力", force, "体型比例", profile.SizeRatio,
+		"自耗档", fishFatigueEffectiveScale(f.Species, s.Srv.fishFatigueScale(), s.Srv.fishFatigueProfileScale()),
 		"拉力K0", s.Srv.fishPullK0For(f.Species), "耐力倍率", profile.StaminaScale)
 	return s.Push(14, 14, proto.Args524(
 		proto.Guid(gearGuid),
@@ -2746,3 +2803,64 @@ func (s *Server) setLevel(uid int64, level string) {
 
 var _ = store.KeepnetEntry{}
 var _ = wiregen.MakeObj
+
+// ---- 鱼搏斗自耗（本地 mod，0.9.57）----
+//
+// 客户端疲劳积分器（docs/analysis-fish-fight-physics-fish-stamina-2026-11-07.md）：
+//   疲劳 += (1 - f6) × 5 × 倍率 × 挣扎功率 × dt
+//   力量比 = clamp(1 - (疲劳/容量)^2, 0.1, 1)
+// 也就是说 fish 27.f6 是「抗疲劳系数」：(1-f6) 越大，鱼自己的挣扎越耗它体力。
+// 服务端能合法影响的只有 f6（f5 只改总力气体量），所以这里用 fish_fatigue_scale
+// 直接压缩 (1-f6)：scale=1 与官方抓包完全一致，>1 让鱼搏斗更耗体力。
+const (
+	tunableFishFatigueScale        = "fish_fatigue_scale"
+	tunableFishFatigueProfileScale = "fish_fatigue_profile_scale"
+	defFishFatigueScale            = 1.0
+	// 行为型分档默认关闭（0），保证发包 f6 与官服锚点完全一致；
+	// 本地库把它设成 1 才启用「猛的鱼自己耗得快」。
+	defFishFatigueProfileScale = 0.0
+)
+
+// applyFishFatigueScale 把自耗倍率折进 f6。f6>=1（永不疲劳的测试鱼）必须原样保留。
+func applyFishFatigueScale(f6, scale float64) float64 {
+	if f6 >= 1 {
+		return 1
+	}
+	if scale <= 0 {
+		scale = 1
+	}
+	v := 1 - (1-clampFloat(f6, 0, 1))*scale
+	return clampFloat(v, 0, 0.95)
+}
+
+func (s *Server) fishFatigueScale() float64 {
+	v := s.tunableF(tunableFishFatigueScale, defFishFatigueScale)
+	if v <= 0 {
+		return defFishFatigueScale
+	}
+	return clampFloat(v, 0.2, 4)
+}
+
+// fishFatigueEffectiveScale 合成最终自耗倍率：
+//   总倍率(fish_fatigue_scale) × (1 + (行为型档-1) × 行为型开关)
+// 开关为 0 时恒等于总倍率（默认即官服口径），设 1 才启用完整的行为型差异。
+func fishFatigueEffectiveScale(species string, global, profileScale float64) float64 {
+	if global <= 0 {
+		global = defFishFatigueScale
+	}
+	arch := fishFatigueArchetypeScale(species)
+	profileScale = clampFloat(profileScale, 0, 2)
+	return global * (1 + (arch-1)*profileScale)
+}
+
+// fishFatigueProfileScale 读行为型分档开关（0 = 关闭，与官服口径一致）。
+func (s *Server) fishFatigueProfileScale() float64 {
+	if s == nil {
+		return defFishFatigueProfileScale
+	}
+	v := s.tunableF(tunableFishFatigueProfileScale, defFishFatigueProfileScale)
+	if v <= 0 {
+		return 0
+	}
+	return clampFloat(v, 0, 2)
+}

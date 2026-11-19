@@ -136,33 +136,44 @@ func fnvHash(s string) uint64 {
 	return h
 }
 
-// loadFishSpotPreference 读取攻略钓点观测。挪威海的点位按海图区号记录，
-// 与客户端水域 systemID 的数字段同源，可以直接对上；内陆湖的点位是攻略地图
-// 上的网格文本（"67:57"），换不成客户端落点坐标，这里一律不启用，避免把
-// 别处的鱼种当成当前钓点的观测。
+// loadFishSpotPreference 读取钓点观测，两路来源同口径合并：
+//
+//  1. 攻略观测（spot_fish，只读静态表）：挪威海的点位按海图区号记录，与客户端水域
+//     systemID 的数字段同源，可以直接对上；内陆湖的点位是攻略地图上的网格文本
+//     （"67:57"），换不成客户端落点坐标，这里一律不启用，避免把别处的鱼种当成
+//     当前钓点的观测。
+//  2. 玩家自钓观测（spot_catch_player，可写玩家表）：记录的是客户端世界坐标，
+//     按当前落点半径命中即可，内陆湖同样生效。
 func (s *Server) loadFishSpotPreference(ctx context.Context, statLoc string, c *fishRollContext) (map[string]float64, bool) {
 	out := map[string]float64{}
-	if s == nil || s.DB == nil || statLoc == "" || c == nil || c.runtime == nil || !c.runtime.zoneKnown {
+	if s == nil || s.DB == nil || statLoc == "" || c == nil || c.runtime == nil {
 		return out, false
 	}
-	rows, err := s.DB.SQL.QueryContext(ctx,
-		`SELECT spot,fish_key,catches FROM spot_fish WHERE loc=?`, statLoc)
-	if err != nil {
-		return out, false
-	}
-	defer rows.Close()
-	target := strconv.Itoa(c.runtime.zone)
 	matched := false
-	for rows.Next() {
-		var spot, fish string
-		var catches int64
-		if rows.Scan(&spot, &fish, &catches) != nil || catches <= 0 {
-			continue
+	if c.runtime.zoneKnown {
+		rows, err := s.DB.SQL.QueryContext(ctx,
+			`SELECT spot,fish_key,catches FROM spot_fish WHERE loc=?`, statLoc)
+		if err == nil {
+			target := strconv.Itoa(c.runtime.zone)
+			for rows.Next() {
+				var spot, fish string
+				var catches int64
+				if rows.Scan(&spot, &fish, &catches) != nil || catches <= 0 {
+					continue
+				}
+				if spot == target {
+					matched = true
+					out[fish] += math.Sqrt(float64(catches))
+				}
+			}
+			rows.Close()
 		}
-		if spot == target {
-			matched = true
-			out[fish] += math.Sqrt(float64(catches))
+	}
+	if pref, ok := s.loadPlayerSpotPreference(ctx, c, statLoc); ok && len(pref) > 0 {
+		for fish, value := range pref {
+			out[fish] += value
 		}
+		matched = true
 	}
 	return out, matched
 }

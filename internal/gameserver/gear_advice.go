@@ -39,6 +39,55 @@ func fmtWeightG(gram float64) string {
 	return s + "kg"
 }
 
+// gearAdviceSolidRatio 是"稳钓带"的上沿系数：鱼重 <= 0.9 * 入口上限时钩的
+// solid 恒为满值（见 fish_hunt.go 的 hookSolidHold）。超出这条线才开始掉钩，
+// 所以文案里要比较的是 0.9*标称，不是标称本身——否则会出现"10.8kg＜鱼10.53kg"
+// 这种一眼就假的句子。
+const gearAdviceSolidRatio = 0.9
+
+// hookUpgradeAcceptable 判断某支候选钩能否**真正**解决"钩偏小"：
+//   - 鱼必须落在新钩的稳钓带内，即入口上限 >= 鱼重/0.9（约为鱼重的 1.11 倍）；
+//   - 入口上限必须严格大于当前这枚钩，否则换了等于没换（上一版就是这么推荐出
+//     和手上同规格的钩，玩家按提示换完照样跑鱼）。
+func hookUpgradeAcceptable(capG, fishG, currentGapeG float64) bool {
+	if capG <= 0 || fishG <= 0 {
+		return false
+	}
+	if capG < fishG/gearAdviceSolidRatio {
+		return false
+	}
+	if currentGapeG > 0 && capG <= currentGapeG {
+		return false
+	}
+	return true
+}
+
+// hookSmallTip 生成"钩偏小"提示：比较值用稳钓上限，标称另附，避免读数自相矛盾。
+func hookSmallTip(gape, fishG float64, name string, capG float64) string {
+	return fmt.Sprintf("钩偏小 稳钓%s≤鱼%s（这枚钩标称%s）\n→ 换「%s」%s\n　钓%s~%s",
+		fmtWeightG(gape*gearAdviceSolidRatio), fmtWeightG(fishG), fmtWeightG(gape),
+		name, fmtWeightG(capG), fmtWeightG(capG*0.25), fmtWeightG(capG*gearAdviceSolidRatio))
+}
+
+// hookSmallTipShop 与 hookSmallTip 同口径，只是候选来自商店。
+func hookSmallTipShop(gape, fishG float64, name string, capG float64, silver int64) string {
+	return fmt.Sprintf("钩偏小 稳钓%s≤鱼%s（这枚钩标称%s）\n→ 买「%s」\n　%s %d银 钓%s~%s",
+		fmtWeightG(gape*gearAdviceSolidRatio), fmtWeightG(fishG), fmtWeightG(gape),
+		name, fmtWeightG(capG), silver, fmtWeightG(capG*0.25), fmtWeightG(capG*gearAdviceSolidRatio))
+}
+
+// hookSmallNoUpgradeTip 背包与商店都没有"更大且兜得住"的钩时的提示。
+func hookSmallNoUpgradeTip(gape, fishG float64) string {
+	return fmt.Sprintf("钩偏小 稳钓%s≤鱼%s（这枚钩标称%s）\n→ 背包与商店都没有更大号的钩",
+		fmtWeightG(gape*gearAdviceSolidRatio), fmtWeightG(fishG), fmtWeightG(gape))
+}
+
+// lineThinTip 生成"线偏细"提示：同样是稳钓上限（0.9*标称）与鱼重比较。
+func lineThinTip(lineG, fishG float64) string {
+	return fmt.Sprintf("线偏细 稳钓%s≤鱼%s（这盘线标称%s）\n→ 换更粗主线",
+		fmtWeightG(lineG*gearAdviceSolidRatio), fmtWeightG(fishG), fmtWeightG(lineG))
+}
+
 // gearAdviceThrottle 同一根竿 20 秒内最多一条建议，避免连嘬时刷屏。
 var gearAdviceThrottle sync.Map
 
@@ -85,15 +134,14 @@ func (s *Server) gearAdviceText(ctx context.Context, uid int64, rodGUID string, 
 	if spec.HookPresent {
 		gape := hookGapeG(spec)
 		switch {
-		case gape > 0 && w > gape*0.9:
-			if name, capG := s.bestBackpackHook(ctx, uid, f.WeightG); name != "" {
-				tips = append(tips, fmt.Sprintf("钩小 %s＜鱼%s\n→ 换「%s」%s\n　钓%s~%s",
-					fmtWeightG(gape), fmtWeightG(w), name, fmtWeightG(capG), fmtWeightG(capG*0.25), fmtWeightG(capG*0.9)))
-			} else if nm, cp, silver := s.pickShopHook(ctx, f.WeightG); nm != "" {
-				tips = append(tips, fmt.Sprintf("钩小 %s＜鱼%s\n→ 买「%s」\n　%s %d银 钓%s~%s",
-					fmtWeightG(gape), fmtWeightG(w), nm, fmtWeightG(cp), silver, fmtWeightG(cp*0.25), fmtWeightG(cp*0.9)))
+		case gape > 0 && w > gape*gearAdviceSolidRatio:
+			// 鱼已超出这枚钩的稳钓上限：只推"更大且兜得住"的钩，不能拿同规格凑数。
+			if name, capG := s.bestBackpackHookUpgrade(ctx, uid, f.WeightG, gape); name != "" {
+				tips = append(tips, hookSmallTip(gape, w, name, capG))
+			} else if nm, cp, silver := s.pickShopHook(ctx, uid, f.WeightG, gape+1); nm != "" {
+				tips = append(tips, hookSmallTipShop(gape, w, nm, cp, silver))
 			} else {
-				tips = append(tips, fmt.Sprintf("钩小 %s＜鱼%s\n→ 背包无更大钩", fmtWeightG(gape), fmtWeightG(w)))
+				tips = append(tips, hookSmallNoUpgradeTip(gape, w))
 			}
 		case gape > 0 && w < gape*0.25:
 			// 鱼远小于钩口：小鱼嘴小，咬不住大号钩，表现就是“啄两下就走、漂不动”。
@@ -101,7 +149,7 @@ func (s *Server) gearAdviceText(ctx context.Context, uid int64, rodGUID string, 
 			if name, capG := s.bestBackpackHook(ctx, uid, f.WeightG); name != "" && capG < gape*0.75 {
 				tips = append(tips, fmt.Sprintf("钩偏大 鱼%s＜钩%s\n→ 换「%s」%s\n　钓%s~%s",
 					fmtWeightG(w), fmtWeightG(gape), name, fmtWeightG(capG), fmtWeightG(capG*0.25), fmtWeightG(capG*0.9)))
-			} else if nm, cp, silver := s.pickShopHook(ctx, f.WeightG); nm != "" {
+			} else if nm, cp, silver := s.pickShopHook(ctx, uid, f.WeightG, 0); nm != "" {
 				tips = append(tips, fmt.Sprintf("钩偏大 鱼%s＜钩%s\n→ 买「%s」\n　%s %d银 钓%s~%s",
 					fmtWeightG(w), fmtWeightG(gape), nm, fmtWeightG(cp), silver, fmtWeightG(cp*0.25), fmtWeightG(cp*0.9)))
 			} else {
@@ -118,8 +166,8 @@ func (s *Server) gearAdviceText(ctx context.Context, uid int64, rodGUID string, 
 		}
 	}
 
-	if lineG := spec.LineStrengthKg * 1000; lineG > 0 && w > lineG*0.9 {
-		tips = append(tips, fmt.Sprintf("线细 %s＜鱼%s\n→ 换更粗主线", fmtWeightG(lineG), fmtWeightG(w)))
+	if lineG := spec.LineStrengthKg * 1000; lineG > 0 && w > lineG*gearAdviceSolidRatio {
+		tips = append(tips, lineThinTip(lineG, w))
 	}
 
 	// 最多报两条：钩、竿优先，线只在前面都没问题时才补，避免整块太长。
@@ -139,6 +187,7 @@ func (s *Server) gearAdviceText(ctx context.Context, uid int64, rodGUID string, 
 }
 
 // bestBackpackHook 返回背包里"能入口 weightG 克鱼"的最小钩及其入口上限。
+// 用于“钩偏大、鱼太小”的换小钩场景；换大钩走 bestBackpackHookUpgrade。
 func (s *Server) bestBackpackHook(ctx context.Context, uid, weightG int64) (string, float64) {
 	items, err := s.DB.ListItemsByContainer(ctx, uid, "backpack")
 	if err != nil {
@@ -163,14 +212,42 @@ func (s *Server) bestBackpackHook(ctx context.Context, uid, weightG int64) (stri
 	return name, bestCap
 }
 
+// bestBackpackHookUpgrade 返回背包里"能让这尾鱼落进稳钓带、且严格大于当前钩"的最小钩。
+// 上一版只要求 capG >= 鱼重，结果会推荐出和手上同规格的钩（换完照样跑鱼）。
+func (s *Server) bestBackpackHookUpgrade(ctx context.Context, uid, weightG int64, currentGapeG float64) (string, float64) {
+	items, err := s.DB.ListItemsByContainer(ctx, uid, "backpack")
+	if err != nil {
+		return "", 0
+	}
+	name, bestCap := "", 0.0
+	for _, it := range items {
+		def, derr := s.DB.GetItemDef(ctx, it.NumericID)
+		if derr != nil || def == nil || def.Category != 12 {
+			continue
+		}
+		capG := hookWeightCapG(itemDefF32(def, gearAttrHookLen), itemDefInt(def, gearAttrHookSize)) * gearOverloadFactor
+		if !hookUpgradeAcceptable(capG, float64(weightG), currentGapeG) {
+			continue
+		}
+		if name == "" || capG < bestCap {
+			if zh := s.itemZhName(ctx, def.NumericID); zh != "" {
+				name, bestCap = zh, capG
+			}
+		}
+	}
+	return name, bestCap
+}
+
 // pickShopHook 按目标鱼重挑一支“能覆盖这尾鱼、商店在售、价格最低”的钩。
 // 覆盖判据与服务端实际手感一致：入口上限 G 满足 0.25G <= 鱼重 <= 0.9G 时，
 // hookSolidHold 的 solid 恒为 0.96，也就是“稳钓区间” = 0.25G ~ 0.9G。
+// minCapG > 0 时额外要求入口上限不低于它（换大钩场景用来排除同规格）。
 // 返回：中文名、入口上限（克）。
-func (s *Server) pickShopHook(ctx context.Context, weightG int64) (name string, capG float64, silver int64) {
+func (s *Server) pickShopHook(ctx context.Context, uid, weightG int64, minCapG float64) (name string, capG float64, silver int64) {
 	if s == nil || s.DB == nil || weightG <= 0 {
 		return "", 0, 0
 	}
+	_ = uid
 	rows, err := s.DB.SQL.QueryContext(ctx, `
 		SELECT COALESCE(NULLIF(c.name_zh,''), c.name), d.attrs_json, COALESCE(s.silver, 0)
 		FROM item_def d
@@ -181,8 +258,11 @@ func (s *Server) pickShopHook(ctx context.Context, weightG int64) (name string, 
 		return "", 0, 0
 	}
 	defer rows.Close()
-	lo := float64(weightG) * 1.11 // 鱼重 <= 0.9G：至少能扛住，别报“钩小”
-	hi := float64(weightG) * 6.0  // 鱼重 >= 0.17G：再小就只剩嘬饵，放宽以免小鱼无货可荐
+	lo := float64(weightG) / gearAdviceSolidRatio // 鱼重 <= 0.9G：至少能扛住
+	if minCapG > lo {
+		lo = minCapG
+	}
+	hi := float64(weightG) * 6.0 // 鱼重 >= 0.17G：再小就只剩嘬饵，放宽以免小鱼无货可荐
 	bestPrice := int64(0)
 	var fbName string
 	var fbG float64
