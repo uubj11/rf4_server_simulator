@@ -299,8 +299,10 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	if err := recordCatchSeenTx(ctx, tx, uid, f.Species, locLevel, f.Grade, now); err != nil {
 		return nil, err
 	}
-	// 每图钓鱼熟练度：钓到即计数（放生也算），与经验、图鉴同事务提交。
-	mpProg, err := s.addMapProfCatchTx(ctx, tx, uid, locLevel, now)
+	// 每图钓鱼熟练度：钓到即计点（放生也算），稀有/星标/蓝冠按图鉴档位加权，
+	// 与经验、图鉴同事务提交。
+	mpGain := mapProfCatchGain(mapProfRarityTx(ctx, tx, f.Species), f.Grade)
+	mpProg, err := s.addMapProfCatchTx(ctx, tx, uid, locLevel, mpGain, now)
 	if err != nil {
 		return nil, err
 	}

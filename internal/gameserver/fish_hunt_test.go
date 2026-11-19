@@ -20,6 +20,37 @@ func huntWeightsTestServer(tunables map[string]float64) *Server {
 	return &Server{tunCache: m, tunAt: time.Now()}
 }
 
+// 硬保底必须与发鱼模式解耦：档位比例（grade_ratio_enabled=1）下同样要锁星级。
+func TestHuntForcedGradeLanes(t *testing.T) {
+	// fishHuntEnabled 以 s.DB 非空为前置（真机必满足），这里用空 DB 占位。
+	forced := func(tunables map[string]float64) *Server {
+		s := huntWeightsTestServer(tunables)
+		s.DB = &store.DB{}
+		return s
+	}
+	s := forced(nil)
+	if g := s.huntForcedGrade(&fishHuntState{SuperPity: 49}); g != 0 {
+		t.Fatalf("蓝冠轨 49/50 不该触发，实得 %d", g)
+	}
+	if g := s.huntForcedGrade(&fishHuntState{SuperPity: 50}); g != 4 {
+		t.Fatalf("蓝冠轨走满应锁 4 星，实得 %d", g)
+	}
+	if g := s.huntForcedGrade(&fishHuntState{TrophyPity: 20}); g != 3 {
+		t.Fatalf("奖杯轨走满应锁 3 星，实得 %d", g)
+	}
+	if g := s.huntForcedGrade(&fishHuntState{TrophyPity: 20, SuperPity: 174}); g != 4 {
+		t.Fatalf("两轨同时走满应优先 4 星，实得 %d", g)
+	}
+	ratio := forced(map[string]float64{"grade_ratio_enabled": 1})
+	if g := ratio.huntForcedGrade(&fishHuntState{SuperPity: 174}); g != 4 {
+		t.Fatalf("档位比例模式下保底被绕过，实得 %d", g)
+	}
+	off := forced(map[string]float64{"fish_hunt_enabled": 0, "two_stage_hunt_enabled": 0})
+	if g := off.huntForcedGrade(&fishHuntState{SuperPity: 999, TrophyPity: 999}); g != 0 {
+		t.Fatalf("鱼猎关闭时不该锁星级，实得 %d", g)
+	}
+}
+
 func TestFishHuntStageWeights(t *testing.T) {
 	tests := []struct {
 		stage          int

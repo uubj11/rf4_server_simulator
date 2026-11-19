@@ -134,7 +134,7 @@ func TestMapProfCatchCountAndLevelUp(t *testing.T) {
 		uid, loc, 9); err != nil {
 		t.Fatal(err)
 	}
-	p1, err := srv.addMapProfCatchTx(ctx, tx, uid, loc, 1000)
+	p1, err := srv.addMapProfCatchTx(ctx, tx, uid, loc, 1, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestMapProfCatchCountAndLevelUp(t *testing.T) {
 	if catches != 10 {
 		t.Fatalf("累计渔获=%d, want 10", catches)
 	}
-	after2, err := srv.addMapProfCatchTx(ctx, tx, uid, loc, 1001)
+	after2, err := srv.addMapProfCatchTx(ctx, tx, uid, loc, 1, 1001)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestMapProfDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := srv.addMapProfCatchTx(ctx, tx, uid, loc, 1000); err != nil {
+	if _, err := srv.addMapProfCatchTx(ctx, tx, uid, loc, 1, 1000); err != nil {
 		t.Fatal(err)
 	}
 	var catches int64
@@ -274,6 +274,23 @@ func TestMapProfGradeBelowPct(t *testing.T) {
 	}
 }
 
+// 每尾计入地图熟练度的点数：稀有/罕见 +5，星标 +5，蓝冠 +10，可叠加；都没有按 1 点。
+func TestMapProfCatchGain(t *testing.T) {
+	cases := []struct{ rarity, grade, want int64 }{
+		{0, 1, 1}, {0, 2, 1},
+		{1, 2, 5}, {2, 2, 5}, // 稀有 / 极其罕见同为 5
+		{0, 3, 5},  // 星标
+		{1, 3, 10}, // 稀有 + 星标
+		{0, 4, 10},
+		{2, 4, 15}, // 罕见 + 蓝冠
+	}
+	for _, tc := range cases {
+		if got := mapProfCatchGain(tc.rarity, tc.grade); got != tc.want {
+			t.Fatalf("rarity=%d grade=%d 点数=%d, want %d", tc.rarity, tc.grade, got, tc.want)
+		}
+	}
+}
+
 // 每尾播报文案：升级用「升至」，未升级显示当前累计与还差多少，满级不再算差额。
 func TestMapProfCatchText(t *testing.T) {
 	steps := mapProfStepList(defMapProfSteps)
@@ -283,10 +300,10 @@ func TestMapProfCatchText(t *testing.T) {
 		catches      int64
 		want         string
 	}{
-		{"克马羚诺也湖", 4, 5, 301, "「克马羚诺也湖」钓鱼熟练度升至 Lv.5（累计 301 尾，下一级 600 尾）"},
-		{"克马羚诺也湖", 4, 4, 158, "「克马羚诺也湖」钓鱼熟练度 Lv.4 · 累计 158/300 尾（还差 142 尾升 Lv.5）"},
-		{"白河", 0, 0, 3, "「白河」钓鱼熟练度 Lv.0 · 累计 3/10 尾（还差 7 尾升 Lv.1）"},
-		{"", 9, 9, 5000, "「未知水域」钓鱼熟练度 Lv.9（累计 5000 尾，已满级）"},
+		{"克马羚诺也湖", 4, 5, 301, "「克马羚诺也湖」钓鱼熟练度升至 Lv.5（累计 301 点，下一级 600 点）"},
+		{"克马羚诺也湖", 4, 4, 158, "「克马羚诺也湖」钓鱼熟练度 Lv.4 · 累计 158/300 点（还差 142 点升 Lv.5）"},
+		{"白河", 0, 0, 3, "「白河」钓鱼熟练度 Lv.0 · 累计 3/10 点（还差 7 点升 Lv.1）"},
+		{"", 9, 9, 5000, "「未知水域」钓鱼熟练度 Lv.9（累计 5000 点，已满级）"},
 	}
 	for _, tc := range cases {
 		if got := mapProfCatchText(tc.name, tc.before, tc.after, tc.catches, steps); got != tc.want {

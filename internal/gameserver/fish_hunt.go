@@ -999,11 +999,47 @@ func (s *Server) sampleHuntBand(ctx context.Context, key string, grade int64, mo
 	return int64(math.Round(w))
 }
 
+// huntForcedGrade 返回本竿被硬保底锁定的星级（0=没触发）。
+// 超稀有优先（4 星 > 3 星）；两档制/档位比例同样要走这里，否则保底只在鱼猎链路生效。
+func (s *Server) huntForcedGrade(h *fishHuntState) int64 {
+	if s == nil || h == nil || !s.huntStateEnabled() {
+		return 0
+	}
+	if s.pityDue(h, "super") {
+		return 4
+	}
+	if s.pityDue(h, "trophy") {
+		return 3
+	}
+	return 0
+}
+
 func (s *Server) sampleHuntWeight(ctx context.Context, key string, modeMult, scale, capG float64, c fishRollContext,
 	h *fishHuntState) (int64, int64, fishHuntReadiness) {
 	readiness := s.fishHuntReadiness(ctx, key, c, h)
 	if s.gradeRatioEnabled() {
-		// 档位比例是总开关：不得再叠加鱼猎阶段、奖杯保底/补偿或钩型软匹配。
+		// 档位比例是总开关：不再叠加鱼猎阶段、钩型软匹配。
+		// 但**保底必须继续生效**——曾因为这里直接早退，蓝冠硬保底整整两天没触发过。
+		forcedGrade := s.huntForcedGrade(h)
+		if forcedGrade > 0 {
+			weight := int64(0)
+			for _, candidate := range []int64{forcedGrade, 3, 2, 1} {
+				if candidate > forcedGrade {
+					continue
+				}
+				if weight = s.sampleHuntBand(ctx, key, candidate, modeMult, scale, 0, c); weight > 0 {
+					break
+				}
+			}
+			if weight <= 0 {
+				weight = s.sampleHuntBand(ctx, key, 2, modeMult, scale, 0, c)
+			}
+			if weight > 0 {
+				s.log.Info("熟练度保底触发", "uid", c.uid, "loc", c.loc, "鱼种", key,
+					"星级", forcedGrade, "蓝冠轨", h.SuperPity, "奖杯轨", h.TrophyPity)
+				return weight, forcedGrade, readiness
+			}
+		}
 		weight := s.sampleWeightDB(ctx, key, modeMult, scale, capG, c)
 		if weight <= 0 {
 			return 0, 0, readiness
@@ -1018,12 +1054,7 @@ func (s *Server) sampleHuntWeight(ctx context.Context, key string, modeMult, sca
 	// 本地服硬保底：轨走满周期后，下一竿直接锁定星级，不再只靠权重放大。
 	// 超稀有优先（4 星 > 3 星），并且这竿不吃装备承重上限——否则小钩子会把
 	// 星级档位权重直接清零（capG < 奖杯线时 w3/w4 归零），保底永远不触发。
-	forcedGrade := int64(0)
-	if s.pityDue(h, "super") {
-		forcedGrade = 4
-	} else if s.pityDue(h, "trophy") {
-		forcedGrade = 3
-	}
+	forcedGrade := s.huntForcedGrade(h)
 	if forcedGrade > 0 {
 		capG = 0
 	}

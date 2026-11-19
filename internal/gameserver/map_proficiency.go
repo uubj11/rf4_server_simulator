@@ -11,8 +11,8 @@ import (
 // ---- 每图钓鱼熟练度（本地 mod，0.9.58）----
 //
 // 原版没有「按地图累计」的概念：同一套技能熟练度跟人走，换图上鱼不看你在那张图钓过多少。
-// 这里加一层纯玩家进度：每张地图单独记「钓到过多少尾」，尾数跨档就升级；等级越高，
-// 该图的稀有/超稀有鱼种权重越高、偏重个体越容易出现。等级由尾数派生，不单独存账。
+// 这里加一层纯玩家进度：每张地图单独记「熟练度点数」（普通 1 点，稀有/星标/蓝冠按图鉴档位加权），点数跨档就升级；等级越高，
+// 该图的稀有/超稀有鱼种权重越高、偏重个体越容易出现。等级由点数派生，不单独存账。
 //
 // 三根轴都有 tunable，任一置 0 即退回原版：
 //   map_prof_enabled=0            整条链路关闭（不读等级、不写表、不播报）
@@ -70,7 +70,7 @@ type mapProfRoll struct {
 	heavyChance float64
 }
 
-// mapProfProgress 是一次计数前后的等级与累计尾数。
+// mapProfProgress 是一次计数前后的等级与累计点数。
 type mapProfProgress struct {
 	Before  int
 	After   int
@@ -101,7 +101,7 @@ func mapProfStepList(raw string) []int64 {
 	return out
 }
 
-// mapProfLevelFor 返回累计尾数对应的等级（档位下标，封顶最后一档）。
+// mapProfLevelFor 返回累计点数对应的等级（档位下标，封顶最后一档）。
 func mapProfLevelFor(catches int64, steps []int64) int {
 	if len(steps) < 2 {
 		return 0
@@ -196,11 +196,33 @@ func (s *Server) mapProfForRoll(ctx context.Context, uid int64, loc string) mapP
 	}
 }
 
-// addMapProfCatchTx 在结算事务里给 (uid, loc) 加一尾，并返回跨级前后的等级。
+// mapProfCatchGain 返回这一尾给地图熟练度记多少点：稀有/极其罕见 +5、星标 +5、
+// 蓝冠 +10，可叠加（稀有+星标=10）；都不沾边按 1 点，保证普通鱼也有进度。
+func mapProfCatchGain(rarity, grade int64) int64 {
+	gain := int64(0)
+	if rarity >= 1 {
+		gain += 5
+	}
+	switch grade {
+	case 3:
+		gain += 5
+	case 4:
+		gain += 10
+	}
+	if gain <= 0 {
+		gain = 1
+	}
+	return gain
+}
+
+// addMapProfCatchTx 在结算事务里给 (uid, loc) 累加点数，并返回跨级前后的等级。
 // 与经验、熟练度、图鉴同事务：任一步失败整笔回滚，不会出现「鱼到手了但等级没涨」。
-func (s *Server) addMapProfCatchTx(ctx context.Context, tx *sql.Tx, uid int64, loc string, now float64) (mapProfProgress, error) {
+func (s *Server) addMapProfCatchTx(ctx context.Context, tx *sql.Tx, uid int64, loc string, gain int64, now float64) (mapProfProgress, error) {
 	if s == nil || tx == nil || uid <= 0 || loc == "" || !s.mapProfEnabled() {
 		return mapProfProgress{}, nil
+	}
+	if gain <= 0 {
+		gain = 1
 	}
 	var catches int64
 	err := tx.QueryRowContext(ctx,
@@ -209,7 +231,7 @@ func (s *Server) addMapProfCatchTx(ctx context.Context, tx *sql.Tx, uid int64, l
 		return mapProfProgress{}, err
 	}
 	before := mapProfLevelFor(catches, s.mapProfSteps())
-	catches++
+	catches += gain
 	if _, err := tx.ExecContext(ctx, `INSERT INTO map_proficiency(uid,loc,catches,last_ts) VALUES(?,?,?,?)
 		ON CONFLICT(uid,loc) DO UPDATE SET catches=excluded.catches, last_ts=excluded.last_ts`,
 		uid, loc, catches, now); err != nil {
@@ -220,6 +242,20 @@ func (s *Server) addMapProfCatchTx(ctx context.Context, tx *sql.Tx, uid int64, l
 		After:   mapProfLevelFor(catches, s.mapProfSteps()),
 		Catches: catches,
 	}, nil
+}
+
+// mapProfRarityTx 在结算事务里查物种稀有度（0=普通 1=稀有 2=超稀有）；缺表或缺条目按普通。
+// 放在事务里读静态表，避免在写锁期间另开连接。
+func mapProfRarityTx(ctx context.Context, tx *sql.Tx, fishKey string) int64 {
+	if tx == nil || fishKey == "" {
+		return 0
+	}
+	var rarity int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT rarity FROM species_rarity WHERE fish_key=? LIMIT 1`, fishKey).Scan(&rarity); err != nil {
+		return 0
+	}
+	return rarity
 }
 
 // mapProfLocName 取中文地图名（loc_alias 的 alias→loc）；查不到返回空串。
@@ -259,6 +295,7 @@ func (s *Server) mapProfChatEveryCatch() bool {
 }
 
 // mapProfCatchText 每尾播报文案：升级用「升至」，未升级显示累计与差额，满级不算差额。
+// 累计口径是「点数」（稀有/星标/蓝冠加权后），不是条数。
 func mapProfCatchText(name string, before, after int, catches int64, steps []int64) string {
 	if strings.TrimSpace(name) == "" {
 		name = "未知水域"
@@ -266,23 +303,23 @@ func mapProfCatchText(name string, before, after int, catches int64, steps []int
 	next := mapProfNextNeed(after, steps)
 	if after > before {
 		if next < 0 {
-			return fmt.Sprintf("「%s」钓鱼熟练度升至 Lv.%d（累计 %d 尾，已满级）", name, after, catches)
+			return fmt.Sprintf("「%s」钓鱼熟练度升至 Lv.%d（累计 %d 点，已满级）", name, after, catches)
 		}
-		return fmt.Sprintf("「%s」钓鱼熟练度升至 Lv.%d（累计 %d 尾，下一级 %d 尾）",
+		return fmt.Sprintf("「%s」钓鱼熟练度升至 Lv.%d（累计 %d 点，下一级 %d 点）",
 			name, after, catches, next)
 	}
 	if next < 0 {
-		return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d（累计 %d 尾，已满级）", name, after, catches)
+		return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d（累计 %d 点，已满级）", name, after, catches)
 	}
 	left := next - catches
 	if left < 0 {
 		left = 0
 	}
-	return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d · 累计 %d/%d 尾（还差 %d 尾升 Lv.%d）",
+	return fmt.Sprintf("「%s」钓鱼熟练度 Lv.%d · 累计 %d/%d 点（还差 %d 点升 Lv.%d）",
 		name, after, catches, next, left, after+1)
 }
 
-// mapProfNextNeed 返回升到下一档需要的累计尾数（满级返回 -1）。
+// mapProfNextNeed 返回升到下一档需要的累计点数（满级返回 -1）。
 func mapProfNextNeed(level int, steps []int64) int64 {
 	if len(steps) == 0 || level+1 >= len(steps) {
 		return -1
