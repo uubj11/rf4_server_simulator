@@ -1269,6 +1269,11 @@ func (s *Server) sampleWeightDB(ctx context.Context, key string, modeMult, scale
 	if hi <= lo {
 		return 0
 	}
+	floor := s.spawnFloorG(float64(s.cachedSettleStatics(ctx, c, key)[0]))
+	// 装备承力上限本身够不到保底下限时，保底让位给上限，避免该鱼种被判定成完全钓不到
+	if capG > 0 && floor >= capG {
+		floor = 1
+	}
 	logLo, logHi := math.Log(lo), math.Log(hi)
 	peak := math.Max(logLo, math.Min(logHi, mu))
 	peakZ := (peak - mu) / sd
@@ -1277,6 +1282,9 @@ func (s *Server) sampleWeightDB(ctx context.Context, key string, modeMult, scale
 		z := (x - mu) / sd
 		if rand.Float64() <= math.Exp((peakZ*peakZ-z*z)/2) {
 			scaled := math.Max(1, math.Round(math.Exp(x)*scale))
+			if scaled < floor {
+				continue // 低于发鱼保底：丢弃重抽，宁可空竿也不发鱼苗
+			}
 			if math.IsNaN(scaled) || math.IsInf(scaled, 0) || scaled >= float64(math.MaxInt64) {
 				continue
 			}
@@ -1329,7 +1337,7 @@ func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float
 	if l.blue != nil {
 		supf = float64(*l.blue)
 	}
-	lo := 1.0
+	lo := s.spawnFloorG(vf)
 	bands := make([]gradeRatioBand, 0, 4)
 	if vf > lo {
 		bands = append(bands, gradeRatioBand{1, lo, vf}) // 未达标

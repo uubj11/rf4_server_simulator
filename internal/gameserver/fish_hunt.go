@@ -996,6 +996,10 @@ func (s *Server) sampleHuntBand(ctx context.Context, key string, grade int64, mo
 		w = 1
 	}
 	w = clampHuntBandWeight(w, lo*scale, hi*scale, modeMult, capG)
+	// 发鱼保底：鱼猎链路同样不许低于「达标线 × spawn_min_ratio」
+	if floor := s.spawnFloorG(float64(lines[0])) * scale; w < floor {
+		w = floor
+	}
 	return int64(math.Round(w))
 }
 
