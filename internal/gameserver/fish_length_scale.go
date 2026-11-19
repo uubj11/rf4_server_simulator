@@ -22,7 +22,7 @@ import "math"
 // 未列出的鱼种继续使用静态库里的值。
 var speciesLengthKOverride = map[string]float64{
 	"a.sleeper":           0.045613,
-	"a_catfish":           0.116961,
+	// a_catfish：花鲶 3.5kg 却给 1.78m；不设覆盖，回落默认立方律 0.0355。
 	"a_char":              0.009986,
 	"a_grayling":          0.033930,
 	"a_omul":              0.034668,
@@ -38,7 +38,7 @@ var speciesLengthKOverride = map[string]float64{
 	"atl_herring":         0.043089,
 	"b_bream":             0.082548,
 	"b_carp":              0.042601,
-	"b_gill":              0.023526,
+	// b_gill：蓝鳃太阳鱼 850g 只有 0.22m；不设覆盖，回落默认立方律 0.0355。
 	"b_herring":           0.045050,
 	"b_omul":              0.027516,
 	"b_scabbardfish":      0.043955,
@@ -51,7 +51,7 @@ var speciesLengthKOverride = map[string]float64{
 	"bp_bass":             0.044097,
 	"bream":               0.048821,
 	"buffalo":             0.036493,
-	"bullhead_syb":        0.098400,
+	// bullhead_syb：西伯利亚杜父鱼 27g 却给 0.30m；不设覆盖，回落默认立方律 0.0355。
 	"burbot":              0.057690,
 	"c.carp":              0.045214,
 	"c_anguineus":         0.060554,
@@ -72,7 +72,7 @@ var speciesLengthKOverride = map[string]float64{
 	"chan_m":              0.044288,
 	"chartus_kuoriius":    0.001630,
 	"chavycha":            0.029240,
-	"chimaera":            0.131037,
+	// chimaera：大西洋银鲛 1kg 却给 1.31m（反向：模型被画大）；不设覆盖，回落默认立方律 0.0355。
 	"chir":                0.036593,
 	"chukuchan":           0.044523,
 	"coalfish":            0.044971,
@@ -91,7 +91,7 @@ var speciesLengthKOverride = map[string]float64{
 	"eel":                 0.094494,
 	"fe_lamprey":          0.047333,
 	"fhcatfish":           0.064366,
-	"fwdrum":              0.025198,
+	// fwdrum：淡水石首鱼 9.5kg 只有 0.53m；不设覆盖，回落默认立方律 0.0355。
 	"g_carp":              0.042601,
 	"g_carp_albino":       0.042601,
 	"g_shad":              0.058124,
@@ -141,7 +141,7 @@ var speciesLengthKOverride = map[string]float64{
 	"m_carp_red":          0.042678,
 	"m_goshiki":           0.030780,
 	"m_molva":             0.061958,
-	"m_scorpius":          0.020801,
+	// m_scorpius：短角大杜父鱼 566g 只有 0.17m；不设覆盖，回落默认立方律 0.0355。
 	"m_zubatka":           0.053436,
 	"macrourus_b":         0.069336,
 	"makrel":              0.047622,
@@ -150,7 +150,7 @@ var speciesLengthKOverride = map[string]float64{
 	"menek":               0.042904,
 	"merlang":             0.048535,
 	"merluza":             0.072112,
-	"midori_g":            0.017100,
+	// midori_g：绿鲤 32kg 只有 0.54m（同湖鳟那类：模型被画小）；不设覆盖，回落默认立方律 0.0355。
 	"mikija":              0.041885,
 	"molva":               0.056831,
 	"muksun":              0.038522,

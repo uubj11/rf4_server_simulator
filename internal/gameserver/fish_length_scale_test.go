@@ -12,7 +12,40 @@ type lengthAnchor struct {
 	want   float64
 }
 
-// 湖鳟（gc_smelt）：曾经把校准系数错锚成 k=0.011604（等价于认定最大体长只有 0.29m），
+// 全鱼种体检后的 7 个失真项：系数锚错导致「重鱼模型小 / 轻鱼模型大」。
+// 统一回落到默认立方律，用 FIXME 等价的显式期望值锁住，防止有人再把错锚贴回来。
+func TestSpeciesLengthOutliersUseDefaultCubic(t *testing.T) {
+	cases := []struct {
+		key    string
+		weight int64
+		want   float64 // 默认立方律 0.0355 * w^(1/3)
+		why    string
+	}{
+		{"midori_g", 32000, 1.136, "绿鲤：32kg 曾只有 0.54m"},
+		{"m_scorpius", 566, 0.293, "短角大杜父鱼：566g 曾只有 0.17m"},
+		{"b_gill", 850, 0.336, "蓝鳃太阳鱼：850g 曾只有 0.22m"},
+		{"fwdrum", 9500, 0.752, "淡水石首鱼：9.5kg 曾只有 0.53m"},
+		{"chimaera", 1000, 0.355, "大西洋银鲛：1kg 曾给到 1.31m"},
+		{"a_catfish", 3500, 0.539, "花鲶：3.5kg 曾给到 1.78m"},
+		{"bullhead_syb", 250, 0.224, "西伯利亚杜父鱼：约 250g 曾给到约 1m"},
+	}
+	for _, c := range cases {
+		if k, ok := speciesLengthKOverride[c.key]; ok {
+			t.Fatalf("%s 不该再有覆盖系数 %.6f（%s）", c.key, k, c.why)
+		}
+		got := speciesLengthM(c.key, defaultSpeciesLengthK, defaultSpeciesLengthP, float64(c.weight))
+		if math.Abs(got-c.want) > 0.03 {
+			t.Fatalf("%s 在 %dg 体长 %.3fm，期望约 %.3fm（%s）", c.key, c.weight, got, c.want, c.why)
+		}
+		// 肥满度落在真实鱼类区间，杜绝「比水还重几十倍」的体长
+		kv := float64(c.weight) / math.Pow(got*100, 3) * 100
+		if kv < 1.0 || kv > 4.0 {
+			t.Fatalf("%s 肥满度 K=%.1f 超出 [1,4]：体长与体重仍然不自洽", c.key, kv)
+		}
+	}
+}
+
+// 湖鳟（gc_smelt）：曾经把校准系数错锚成 k=0.011604（等价于认定最大体长只有 0.29m）。
 // 结果 21.45kg 的蓝冠只给 0.32m，客户端按体长缩放模型 → 巨物显示成小鱼。
 // 湖鳟现实最大体长 1.0~1.2m，按默认立方律 k=0.0355 才有 0.98m。
 func TestLakeTroutLengthPlausible(t *testing.T) {
