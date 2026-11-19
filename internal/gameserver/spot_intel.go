@@ -310,9 +310,13 @@ func (s *Server) locFishList(ctx context.Context, locName string) []spotFishEntr
 	rows, err := s.DB.SQL.QueryContext(ctx, `
 		SELECT w.fish_key,
 		       COALESCE(NULLIF(w.fish_zh,''), NULLIF(l.name_zh,''), w.fish_key),
-		       COALESCE(s.min_g,0),
-		       CASE WHEN s.max_g > 0 THEN s.max_g
-		            WHEN s.avg_g > 0 THEN s.avg_g*2
+		       CASE WHEN s.max_g > s.min_g AND s.min_g > 0 THEN s.min_g
+		            WHEN s.trophy_g > 0 THEN CAST(s.trophy_g * 0.15 AS INTEGER)
+		            ELSE 0 END,
+		       CASE WHEN s.max_g > s.min_g AND s.max_g > 0 THEN s.max_g
+		            WHEN s.super_trophy_line_g > 0 THEN CAST(s.super_trophy_line_g * 1.2 AS INTEGER)
+		            WHEN s.trophy_line_g > 0 THEN s.trophy_line_g
+		            WHEN s.avg_g > 0 THEN CAST(s.avg_g * 2 AS INTEGER)
 		            ELSE 0 END
 		FROM loc_wiki_fish w
 		LEFT JOIN loc_fish l ON l.loc = w.loc AND l.fish_key = w.fish_key

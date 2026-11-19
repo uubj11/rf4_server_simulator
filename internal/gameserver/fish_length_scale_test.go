@@ -45,6 +45,24 @@ func TestSpeciesLengthOutliersUseDefaultCubic(t *testing.T) {
 	}
 }
 
+// 白斑角鲨（katran）：官方统计 奖杯 7kg / 蓝冠 10kg / 实测最大 11.998kg、
+// 挪威海平均 5.05kg。原系数 0.104552 会把 3.6kg 撑成 1.6m（1.6m 角鲨实重 20~30kg）。
+// 按「12kg ≈ 1.2m」反推 k≈0.0524。
+func TestKatranLengthPlausible(t *testing.T) {
+	k, p := calibratedLengthKP("katran", defaultSpeciesLengthK, defaultSpeciesLengthP)
+	for _, a := range []lengthAnchor{
+		{1000, 0.524}, {5054, 0.898}, {11998, 1.200},
+	} {
+		got := speciesLengthM("katran", k, p, float64(a.weight))
+		if math.Abs(got-a.want) > 0.06 {
+			t.Fatalf("角鲨 %d g 体长 %.3fm，期望约 %.2fm", a.weight, got, a.want)
+		}
+		if kv := float64(a.weight) / math.Pow(got*100, 3) * 100; kv < 0.30 || kv > 0.70 {
+			t.Fatalf("角鲨 %d g 的肥满度 K=%.2f 超出细长鲨类区间 [0.30,0.70]", a.weight, kv)
+		}
+	}
+}
+
 // 湖鳟（gc_smelt）：曾经把校准系数错锚成 k=0.011604（等价于认定最大体长只有 0.29m）。
 // 结果 21.45kg 的蓝冠只给 0.32m，客户端按体长缩放模型 → 巨物显示成小鱼。
 // 湖鳟现实最大体长 1.0~1.2m，按默认立方律 k=0.0355 才有 0.98m。

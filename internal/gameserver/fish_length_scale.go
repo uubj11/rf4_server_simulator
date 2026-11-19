@@ -113,7 +113,9 @@ var speciesLengthKOverride = map[string]float64{
 	"k_salmon":            0.032183,
 	"kaluga":              0.003901,
 	"karasekarp":          0.041602,
-	"katran":              0.104552,
+	// katran（白斑角鲨）：官方 奖杯 7kg / 蓝冠 10kg / 实测最大 11.998kg。
+	// 原 0.104552 把 3.6kg 撑成 1.6m（1.6m 角鲨实重 20~30kg）；按「12kg ≈ 1.2m」取 0.0524。
+	"katran":              0.052400,
 	"keta":                0.050000,
 	"kijuch":              0.042865,
 	"kohaku":              0.030780,
