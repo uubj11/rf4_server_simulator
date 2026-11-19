@@ -96,7 +96,9 @@ var speciesLengthKOverride = map[string]float64{
 	"g_carp_albino":       0.042601,
 	"g_shad":              0.058124,
 	"g_tench":             0.044097,
-	"gc_smelt":            0.011604,
+	// gc_smelt（湖鳟）原来锚了 0.011604，等于认定最大体长只有 0.29m；
+	// 21.45kg 的蓝冠只有 0.32m，客户端按体长缩放模型，巨物被画成小鱼。
+	// 湖鳟现实最大体长 1.0~1.2m，这里不设覆盖，回落到静态库默认立方律 0.0355。
 	"golets_lev":          0.012925,
 	"golyan":              0.046641,
 	"gorbusha":            0.048535,

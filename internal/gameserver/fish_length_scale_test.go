@@ -12,6 +12,27 @@ type lengthAnchor struct {
 	want   float64
 }
 
+// 湖鳟（gc_smelt）：曾经把校准系数错锚成 k=0.011604（等价于认定最大体长只有 0.29m），
+// 结果 21.45kg 的蓝冠只给 0.32m，客户端按体长缩放模型 → 巨物显示成小鱼。
+// 湖鳟现实最大体长 1.0~1.2m，按默认立方律 k=0.0355 才有 0.98m。
+func TestLakeTroutLengthPlausible(t *testing.T) {
+	if k, ok := speciesLengthKOverride["gc_smelt"]; ok {
+		t.Fatalf("gc_smelt 不应再用错锚系数 %.5f，应按默认立方律 0.0355", k)
+	}
+	for _, a := range []lengthAnchor{
+		{1000, 0.355}, {15000, 0.875}, {21450, 0.986},
+	} {
+		got := speciesLengthM("gc_smelt", defaultSpeciesLengthK, defaultSpeciesLengthP, float64(a.weight))
+		if math.Abs(got-a.want) > 0.06 {
+			t.Fatalf("湖鳟 %d g 体长 %.3fm，期望约 %.2fm（模型会按体长缩放）", a.weight, got, a.want)
+		}
+	}
+	// 下限：1kg 的湖鳟不该缩成十几厘米的“小杂鱼”
+	if got := speciesLengthM("gc_smelt", defaultSpeciesLengthK, defaultSpeciesLengthP, 1000); got < 0.30 {
+		t.Fatalf("湖鳟 1kg 体长 %.3fm 过小", got)
+	}
+}
+
 // 体长系数校准：同一重量下，狗鱼（细长）必须比鲤（短厚）显示得更长；
 // 已有官方标定曲线和未列入校准表的鱼种必须保持原值。
 func TestCalibratedLengthKP(t *testing.T) {
