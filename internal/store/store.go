@@ -84,27 +84,48 @@ func (d *DB) Migrate() error {
 	// 迁移撞号。本地改成 00078~00082，已按旧号建过这些表/列的库按文件名
 	// 重映射新编号，避免重放迁移（CREATE TABLE/ALTER 都会失败）。
 	// 顺序：先于 retireStaleMigrationRows 执行，否则旧行会被当链路分支退役。
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=78, name='migrations/00078_pity_lane_aggregate.sql' WHERE name='migrations/00060_pity_lane_aggregate.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=78, name='migrations/00078_pity_lane_aggregate.sql'
+		WHERE name='migrations/00060_pity_lane_aggregate.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00078_pity_lane_aggregate.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=78)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00060: %w", err)
 	}
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=79, name='migrations/00079_condition_energy_max.sql' WHERE name='migrations/00061_condition_energy_max.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=79, name='migrations/00079_condition_energy_max.sql'
+		WHERE name='migrations/00061_condition_energy_max.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00079_condition_energy_max.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=79)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00061: %w", err)
 	}
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=80, name='migrations/00080_growth_set.sql' WHERE name='migrations/00062_growth_set.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=80, name='migrations/00080_growth_set.sql'
+		WHERE name='migrations/00062_growth_set.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00080_growth_set.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=80)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00062: %w", err)
 	}
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=83, name='migrations/00083_spot_catch_player_hud.sql' WHERE name='migrations/00065_spot_catch_player_hud.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=83, name='migrations/00083_spot_catch_player_hud.sql'
+		WHERE name='migrations/00065_spot_catch_player_hud.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00083_spot_catch_player_hud.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=83)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00065: %w", err)
 	}
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=84, name='migrations/00084_map_proficiency.sql' WHERE name='migrations/00066_map_proficiency.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=84, name='migrations/00084_map_proficiency.sql'
+		WHERE name='migrations/00066_map_proficiency.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00084_map_proficiency.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=84)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00066: %w", err)
 	}
 	// 00063/00064 是上游 fish_zone 族的旧分支号段（今 00065~00069）。上游测试
 	// 明确要求 63/64 留给旧库同号登记行，所以本地这两支也一并挪到 00083/00084。
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=81, name='migrations/00081_spot_catch_player.sql' WHERE name='migrations/00063_spot_catch_player.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=81, name='migrations/00081_spot_catch_player.sql'
+		WHERE name='migrations/00063_spot_catch_player.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00081_spot_catch_player.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=81)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00063: %w", err)
 	}
-	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=82, name='migrations/00082_spot_catch_player_zone.sql' WHERE name='migrations/00064_spot_catch_player_zone.sql'`); err != nil {
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=82, name='migrations/00082_spot_catch_player_zone.sql'
+		WHERE name='migrations/00064_spot_catch_player_zone.sql'
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='migrations/00082_spot_catch_player_zone.sql')
+		  AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=82)`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00064: %w", err)
 	}
 	// 历史合并回退留下的「登记了但对象没建」的幽灵行：先删掉再重放，

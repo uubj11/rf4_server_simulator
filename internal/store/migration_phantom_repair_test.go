@@ -50,3 +50,37 @@ func tableExists(t *testing.T, db *DB, name string) bool {
 	}
 	return n > 0
 }
+
+// 重复登记：库里同时留着一行「旧编号+旧文件名」和一行「新编号+新文件名」
+// （历史合并回退叠加改号后真实出现），旧号重映射会撞 UNIQUE。Migrate 必须容忍。
+func TestMigrateToleratesDuplicateRenumberedRows(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "dup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.SQL.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("首次迁移: %v", err)
+	}
+	// 让 60 空出来，再把 78 那行改成「旧编号 60 + 旧文件名」，形成重复。
+	if _, err := db.SQL.Exec(`UPDATE schema_migrations SET version=9000060 WHERE version=60`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE schema_migrations SET version=60, name='migrations/00060_pity_lane_aggregate.sql'
+		WHERE name='migrations/00078_pity_lane_aggregate.sql'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("重复登记下迁移失败: %v", err)
+	}
+	if !tableExists(t, db, "fish_hunt_pity") {
+		t.Fatal("fish_hunt_pity 丢失")
+	}
+	var dup int
+	if err := db.SQL.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name='migrations/00078_pity_lane_aggregate.sql'`).Scan(&dup); err != nil {
+		t.Fatal(err)
+	}
+	if dup != 1 {
+		t.Fatalf("00078 登记行应只剩 1 行，实得 %d", dup)
+	}
+}
