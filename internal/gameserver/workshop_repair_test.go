@@ -108,9 +108,50 @@ func TestWorkshopSameModelRepairRestoresItemDurability(t *testing.T) {
 	}
 }
 
-func TestWorkshopOrderRejectsLowClientQuote(t *testing.T) {
+func TestWorkshopOrderSettlesAtServerPriceWhenClientQuoteLower(t *testing.T) {
 	srv, db := newStaticRigTestServer(t)
-	rod, partID := seedWornWorkshopRod(t, srv, db, .8, .5)
+	rod, partID := seedWornWorkshopRod(t, srv, db, .4, .5)
+	ctx := t.Context()
+	const uid = int64(1000001)
+	if _, err := db.EnsureProfile(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateBalance(ctx, uid, 1000, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// 竿坯/竿柄这类配件在原版 item_price 里没有货架价，客户端只能报到 1 银币
+	// 下限；旧实现按服务端磨损公式校验，整单拒绝 → 客户端弹"发生内部错误"。
+	c := &Ctx{
+		Sess: newProbeSess(srv), Main: 21, Sub: 3,
+		Tree: snapshotWorkshopRequestPart(rod.GUID, 4, partID, 100),
+		Log:  logging.Discard(),
+	}
+	body, ok := hWorkshopOrder(c)
+	if !ok || len(body) == 0 {
+		t.Fatal("客户端按下限报价时不应拒绝整单")
+	}
+	profile, err := db.GetProfile(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Silver != 700 {
+		t.Fatalf("成交价以服务端为准，应扣 300 分（余额 700），实得 %d", profile.Silver)
+	}
+	fresh := mustItem(t, db, rod.GUID)
+	if fresh.Durability != 1 {
+		t.Fatalf("成交后本体力应回 1，实得 %v", fresh.Durability)
+	}
+	fields := snapshotFields(t, fresh.FieldsJSON)
+	part, _ := snapshotPart(t, srv, fields, 4)
+	if got := snapshotFloat(part.Fields, part.Class, csDurability); got != 1 {
+		t.Fatalf("成交后竿柄耐久应回 1，实得 %v", got)
+	}
+}
+
+func TestWorkshopOrderSettlesAtServerPriceWhenClientQuoteHigher(t *testing.T) {
+	srv, db := newStaticRigTestServer(t)
+	rod, partID := seedWornWorkshopRod(t, srv, db, .4, .5)
 	ctx := t.Context()
 	const uid = int64(1000001)
 	if _, err := db.EnsureProfile(ctx, uid); err != nil {
@@ -122,27 +163,19 @@ func TestWorkshopOrderRejectsLowClientQuote(t *testing.T) {
 
 	c := &Ctx{
 		Sess: newProbeSess(srv), Main: 21, Sub: 3,
-		Tree: snapshotWorkshopRequestPart(rod.GUID, 4, partID, 1),
+		Tree: snapshotWorkshopRequestPart(rod.GUID, 4, partID, 600),
 		Log:  logging.Discard(),
 	}
-	if _, ok := hWorkshopOrder(c); ok {
-		t.Fatal("1 银币伪造报价应被拒绝")
+	if _, ok := hWorkshopOrder(c); !ok {
+		t.Fatal("客户端报价高于服务端推导价时不应拒绝")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Silver != 1000 {
-		t.Fatalf("报价被拒绝后余额应保持 1000，实得 %d", profile.Silver)
-	}
-	fresh := mustItem(t, db, rod.GUID)
-	if fresh.Durability != .5 {
-		t.Fatalf("报价被拒绝后本体耐久应保持 0.5，实得 %v", fresh.Durability)
-	}
-	fields := snapshotFields(t, fresh.FieldsJSON)
-	part, _ := snapshotPart(t, srv, fields, 4)
-	if got := snapshotFloat(part.Fields, part.Class, csDurability); math.Abs(got-.8) > 1e-6 {
-		t.Fatalf("报价被拒绝后竿柄耐久应保持 0.8，实得 %v", got)
+	// 竿柄 0.4 磨损 = max(100, 0.6*500) = 300 分，客户端的 600 不采信。
+	if profile.Silver != 700 {
+		t.Fatalf("应按服务端价扣 300 分（余额 700），实得 %d", profile.Silver)
 	}
 }
 
@@ -552,7 +585,7 @@ func TestWorkshopReelRepairAcceptsAggregatedClientQuote(t *testing.T) {
 	}
 }
 
-func TestWorkshopReelRepairRejectsLowQuote(t *testing.T) {
+func TestWorkshopReelRepairSettlesAtServerPriceOnLowQuote(t *testing.T) {
 	srv, db := newStaticRigTestServer(t)
 	defer db.Close()
 	reel, gearID := seedWornWorkshopReel(t, srv, db, .8, .2, .5, .5)
@@ -570,14 +603,15 @@ func TestWorkshopReelRepairRejectsLowQuote(t *testing.T) {
 		Tree: snapshotWorkshopRequestPart(reel.GUID, uint32(reelPartCatGear), gearID, 1),
 		Log:  logging.Discard(),
 	}
-	if _, ok := hWorkshopOrder(c); ok {
-		t.Fatal("低于所选部件修理价的客户端报价应被拒绝")
+	if _, ok := hWorkshopOrder(c); !ok {
+		t.Fatal("客户端报价低于服务端推导价时不应拒绝整单")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Silver != 10000 {
-		t.Fatalf("低报价被拒绝后余额应保持 10000，实得 %d", profile.Silver)
+	// 齿轮 0.8 磨损 = max(100, 0.2*500) = 100 分：客户端报 1 分不采信。
+	if profile.Silver != 9900 {
+		t.Fatalf("应按服务端价扣 100 分（余额 9900），实得 %d", profile.Silver)
 	}
 }

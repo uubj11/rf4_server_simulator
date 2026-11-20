@@ -1555,10 +1555,17 @@ func workshopOrder(ctx *Ctx, preview bool) ([]byte, bool) {
 			if useGold {
 				quotedCost = costGold
 			}
+			// 报价不一致不阻断成交：客户端面板的价目表只含它自己认识的零件价，
+			// 竿坯(36)/竿柄(4) 这类装配件在原版 item_price 里没有货架价，客户端
+			// 只能报到 1 银币下限（100 分），本服按磨损公式累加则是 450 分/件
+			// （2026-11-20 13:29 该竿 21/4 client=100 server=900）。旧实现直接
+			// return nil,false，客户端把坏包解析失败后弹"发生内部错误"，玩家以为
+			// 修理没做成。成交价始终以服务端为准：既不接受客户端压价，也不跟着
+			// 客户端往上抬。
 			if !workshopQuoteMatches(clientCost, quotedCost) {
-				ctx.Log.Warn("工坊换件：客户端报价异常", "item", shortGUID(itemGUID),
-					"client", clientCost, "server", quotedCost, "gold", useGold)
-				return nil, false
+				ctx.Log.Info("工坊换件：客户端报价与服务端不一致，仍按服务端价成交",
+					"item", shortGUID(itemGUID), "client", clientCost, "server", quotedCost,
+					"gold", useGold, "orders", len(orders), "conds", len(conditions))
 			}
 		}
 		p, perr := srv.DB.EnsureProfile(cctx, ctx.Sess.Userid)
