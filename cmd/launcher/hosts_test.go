@@ -32,6 +32,259 @@ func readHosts(t *testing.T, path string) string {
 
 var testDomains = []string{"api.rf4game.ru", "api.rf4game.com"}
 
+func assertBackupExists(t *testing.T, path string, backups []hostsBackup) {
+	t.Helper()
+	for _, backup := range backups {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), backup.Name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestHostsBackupCleanupCycles(t *testing.T) {
+	path := writeHosts(t, "127.0.0.1 localhost\n")
+	for _, suffix := range []string{"20261114123456", "20261114T123456.000000000", "launcher-unrelated"} {
+		if err := os.WriteFile(path+".rf4s-backup-"+suffix, []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for cycle := 0; cycle < 3; cycle++ {
+		for start := 0; start < 2; start++ {
+			if err := hostsSetLocal(path, testDomains); err != nil {
+				t.Fatal(err)
+			}
+		}
+		st := readHostsState(path)
+		if len(st.Backups) != 2 {
+			t.Fatalf("backup count: %+v", st)
+		}
+		assertBackupExists(t, path, st.Backups)
+		if err := hostsRestore(path); err != nil {
+			t.Fatal(err)
+		}
+		for _, backup := range st.Backups {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), backup.Name)); !os.IsNotExist(err) {
+				t.Fatalf("backup remains: %v", err)
+			}
+		}
+		before := readHosts(t, path)
+		if err := hostsRestore(path); err != nil {
+			t.Fatal(err)
+		}
+		if readHosts(t, path) != before {
+			t.Fatal("restore not idempotent")
+		}
+		entries, err := filepath.Glob(path + ".rf4s-backup-*")
+		if err != nil || len(entries) != 3 {
+			t.Fatalf("unexpected backups: %v %v", entries, err)
+		}
+		for _, name := range entries {
+			if readHosts(t, name) != "keep" {
+				t.Fatal("unrelated backup changed")
+			}
+		}
+	}
+}
+
+func lockHostsAgainstDeletion(t *testing.T, path string) func() {
+	t.Helper()
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func() { _ = windows.CloseHandle(h) }
+}
+
+func TestHostsRestoreFailurePreservesBackups(t *testing.T) {
+	path := writeHosts(t, "127.0.0.1 localhost\n")
+	if err := hostsSetLocal(path, testDomains); err != nil {
+		t.Fatal(err)
+	}
+	unlock := lockHostsAgainstDeletion(t, path)
+	err := hostsRestore(path)
+	unlock()
+	if err == nil {
+		t.Fatal("expected restore failure")
+	}
+	st := readHostsState(path)
+	if len(st.Backups) != 2 || len(st.Owned) != 2 {
+		t.Fatalf("recovery state lost: %+v", st)
+	}
+	assertBackupExists(t, path, st.Backups)
+	if err := hostsRestore(path); err != nil {
+		t.Fatal(err)
+	}
+	if len(readHostsState(path).Backups) != 0 {
+		t.Fatal("recovery did not clean backups")
+	}
+}
+
+func TestHostsSetLocalStateSaveFailureRemovesBackup(t *testing.T) {
+	original := "127.0.0.1 localhost\n"
+	path := writeHosts(t, original)
+	if err := os.Mkdir(hostsStatePath(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := hostsSetLocal(path, testDomains); err == nil {
+		t.Fatal("expected state save failure")
+	}
+	if got := readHosts(t, path); got != original {
+		t.Fatalf("hosts changed after state save failure: %q", got)
+	}
+	backups, err := filepath.Glob(path + ".rf4s-backup-launcher-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("unregistered backups remain: %v", backups)
+	}
+}
+
+func TestHostsRestoreStateSaveFailureRemovesBackup(t *testing.T) {
+	path := writeHosts(t, "127.0.0.1 localhost\n")
+	if err := hostsSetLocal(path, testDomains); err != nil {
+		t.Fatal(err)
+	}
+	before := readHostsState(path)
+	unlock := lockHostsAgainstDeletion(t, hostsStatePath(path))
+	err := hostsRestore(path)
+	unlock()
+	if err == nil {
+		t.Fatal("expected state save failure")
+	}
+	after := readHostsState(path)
+	if len(after.Backups) != len(before.Backups) {
+		t.Fatalf("backup state changed: before=%+v after=%+v", before, after)
+	}
+	backups, globErr := filepath.Glob(path + ".rf4s-backup-launcher-*")
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(backups) != len(before.Backups) {
+		t.Fatalf("unregistered backup remains: %v", backups)
+	}
+	if hostsMode(path) != "local" {
+		t.Fatal("hosts changed before state save succeeded")
+	}
+}
+
+func TestHostsCleanupFailureWarnsAndRetries(t *testing.T) {
+	path := writeHosts(t, "127.0.0.1 localhost\n")
+	if err := hostsSetLocal(path, testDomains); err != nil {
+		t.Fatal(err)
+	}
+	backup := readHostsState(path).Backups[0]
+	unlock := lockHostsAgainstDeletion(t, filepath.Join(filepath.Dir(path), backup.Name))
+	var warnings []string
+	err := hostsRestoreWithWarning(path, func(s string) { warnings = append(warnings, s) })
+	unlock()
+	if err != nil || len(warnings) != 1 || hostsMode(path) != "official" {
+		t.Fatalf("err=%v warnings=%v", err, warnings)
+	}
+	st := readHostsState(path)
+	if len(st.Owned) != 0 || len(st.Backups) != 1 {
+		t.Fatalf("bad retry state: %+v", st)
+	}
+	assertBackupExists(t, path, st.Backups)
+	if err := hostsRestore(path); err != nil {
+		t.Fatal(err)
+	}
+	if len(readHostsState(path).Backups) != 0 {
+		t.Fatal("cleanup retry failed")
+	}
+}
+
+func TestHostsInterruptedRecovery(t *testing.T) {
+	for _, stage := range []string{"before-hosts-write", "after-local", "after-restore-write"} {
+		t.Run(stage, func(t *testing.T) {
+			path := writeHosts(t, "127.0.0.1 localhost\n")
+			original := readHosts(t, path)
+			if err := hostsSetLocal(path, testDomains); err != nil {
+				t.Fatal(err)
+			}
+			if stage != "after-local" {
+				content := original
+				if stage == "after-restore-write" {
+					content += "# rf4s-local 127.0.0.1 api.rf4game.ru\n# rf4s-local 127.0.0.1 api.rf4game.com\n"
+				}
+				// 模拟 hosts 写入前中断，或恢复已写完但清单尚未清理。
+				if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertBackupExists(t, path, readHostsState(path).Backups)
+			if err := hostsRestore(path); err != nil {
+				t.Fatal(err)
+			}
+			if hostsMode(path) != "official" || len(readHostsState(path).Backups) != 0 {
+				t.Fatal("recovery failed")
+			}
+		})
+	}
+}
+
+func TestHostsUnconfirmedBackupsPreserved(t *testing.T) {
+	for _, kind := range []string{"modified", "manual", "traversal", "directory", "invalid-state"} {
+		t.Run(kind, func(t *testing.T) {
+			path := writeHosts(t, "127.0.0.1 localhost\n")
+			if err := hostsSetLocal(path, testDomains); err != nil {
+				t.Fatal(err)
+			}
+			st := readHostsState(path)
+			target := filepath.Join(filepath.Dir(path), st.Backups[0].Name)
+			switch kind {
+			case "modified":
+				if err := os.WriteFile(target, []byte("modified"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			case "manual":
+				st.Backups[0].Name = "hosts.rf4s-backup-20261114123456"
+			case "traversal":
+				st.Backups[0].Name = "../" + st.Backups[0].Name
+			case "directory":
+				if err := os.Remove(target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(target, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := saveHostsState(path, st); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "invalid-state" {
+				if err := os.WriteFile(hostsStatePath(path), []byte(`{"owned":["api.rf4game.ru"],"backups":42}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := hostsRestoreWithWarning(path, func(string) {}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Fatalf("unconfirmed backup removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestHostsCleanupWithoutOwnedRows(t *testing.T) {
+	path := writeHosts(t, "127.0.0.1 api.rf4game.ru\r\n127.0.0.1 api.rf4game.com\r\n")
+	if err := hostsSetLocal(path, testDomains); err != nil {
+		t.Fatal(err)
+	}
+	before := readHosts(t, path)
+	if err := hostsRestore(path); err != nil {
+		t.Fatal(err)
+	}
+	if before != readHosts(t, path) || len(readHostsState(path).Backups) != 0 {
+		t.Fatal("ownership or cleanup failure")
+	}
+}
+
 func TestWriteFileAtomicOverwrites(t *testing.T) {
 	path := writeHosts(t, "old")
 

@@ -26,6 +26,7 @@ func f32At(v *proto.Value, idx int) float64 {
 // tables/spec.md）。
 func TestFish27UsesVerifiedFightFields(t *testing.T) {
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "contract"}}, logging.Discard(), nil)
+	setOfficialF6(srv)
 	f := &RolledFish{FishGUID: "11111111111111111111111111111111", Species: "c.roach", Grade: 1, WeightG: 186, LengthM: 0.1981}
 	tree := srv.buildFish27(f, "22222222222222222222222222222222", "33333333333333333333333333333333", 24)
 	if defaultFishStaminaScale != 1 {
@@ -44,9 +45,10 @@ func TestFish27UsesVerifiedFightFields(t *testing.T) {
 	if got := f32At(tree, 6); math.Abs(got-0.50) > 1e-6 {
 		t.Fatalf("c.roach f6 初始体力=%f，期望官方量化值 0.50", got)
 	}
-	// c.roach K0=16.4：f8 = 0.186kg × (16.4 + 0.35·ln(0.186)) = 2.9404N。
+	// c.roach K0=16.36/slope=0.23（v2 表，3 样本自拟合）：
+	// f8 = 0.186kg × (16.36 + 0.23·ln(0.186)) = 2.9710N。
 	// 官方锚点：150g→2.39N、680g→11.07N、713g→11.61N（同公式 ±2%）。
-	wantPull := 0.186 * (16.4 + fishPullLnSlope*math.Log(0.186))
+	wantPull := 0.186 * (16.36 + 0.23*math.Log(0.186))
 	if got := f32At(tree, 8); math.Abs(got-wantPull) > 0.0001 {
 		t.Fatalf("c.roach f8 拉力=%f，期望%f", got, wantPull)
 	}
@@ -55,27 +57,27 @@ func TestFish27UsesVerifiedFightFields(t *testing.T) {
 // TestFish27UnknownSpeciesFallback 验证未知鱼种使用回退搏鱼参数。
 func TestFish27UnknownSpeciesFallback(t *testing.T) {
 	srv := NewServer(config.Game{Tunnel: config.Tunnel{PSK: "contract"}}, logging.Discard(), nil)
+	setOfficialF6(srv)
 	f := &RolledFish{FishGUID: "55555555555555555555555555555555", Species: "not_in_calib", Grade: 1, WeightG: 100, LengthM: 0.2}
-	profile := srv.fishFightProfileFor(f)
 	tree := srv.buildFish27(f, "", "", 24)
-	wantStamina := verifiedStaminaPerGram * 100 * profile.StaminaScale
+	wantStamina := fishStaminaRateGroup["default"] * 100
 	if got := f32At(tree, 5); math.Abs(got-wantStamina) > 0.001 {
 		t.Fatalf("未知鱼 f5 体力池=%f，期望%f", got, wantStamina)
 	}
-	if got := f32At(tree, 6); math.Abs(got-verifiedInitialStaminaRatio) > 1e-6 {
-		t.Fatalf("未知鱼 f6 初始体力=%f，期望%f", got, verifiedInitialStaminaRatio)
+	if got := f32At(tree, 6); math.Abs(got-fishF6Group["default"]) > 1e-6 {
+		t.Fatalf("未知鱼 f6 初始体力=%f，期望%f", got, fishF6Group["default"])
 	}
-	if got := f32At(tree, 9); got < 1.35 || got > 1.37 {
-		t.Fatalf("未知鱼 f9=%f，期望按94/189g校准约1.3607", got)
+	if got := f32At(tree, 9); math.Abs(got-2.5) > 1e-6 {
+		t.Fatalf("未知鱼 f9=%f，期望 default 组 2.5", got)
 	}
-	if got := f32At(tree, 13); math.Abs(got-0.35) > 1e-6 {
-		t.Fatalf("未知鱼 f13=%f，期望0.35", got)
+	if got := f32At(tree, 13); math.Abs(got-0.30) > 1e-6 {
+		t.Fatalf("未知鱼 f13=%f，期望 default 组 0.30", got)
 	}
-	if got := f32At(tree, 16); math.Abs(got-0.833907) > 1e-5 {
-		t.Fatalf("未知鱼 f16=%f，期望0.833907", got)
+	if got := f32At(tree, 16); math.Abs(got-0.9) > 1e-5 {
+		t.Fatalf("未知鱼 f16=%f，期望 default 组 0.9", got)
 	}
-	if got := f32At(tree, 20); math.Abs(got-0.997804) > 1e-5 {
-		t.Fatalf("未知鱼 f20=%f，期望0.997804", got)
+	if got := f32At(tree, 20); math.Abs(got-0.9995) > 1e-5 {
+		t.Fatalf("未知鱼 f20=%f，期望 default 组 0.9995", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"rf4server/internal/proto"
@@ -149,6 +150,9 @@ func hStoreBuy(goldCol bool) Handler {
 		if len(ints) > 0 {
 			offer = ints[0]
 		}
+		if body, handled := srv.tryBuyWalletAtm(ctx, storeID, itemID, goldCol); handled {
+			return body, true
+		}
 		cctx := ctx.Sess.pushCtx()
 		price, err := srv.storePrice(cctx, storeID, itemID, offer, goldCol)
 		if err != nil {
@@ -191,6 +195,35 @@ func hStoreBuy(goldCol bool) Handler {
 				mergeable[it.ItemID] = craftOutputMerges(def)
 			}
 		}
+		// 预演最终合并行；回滚释放连接后再执行需要普通 DB 查询的投影。
+		previewTx, err := beginEconomyTx(cctx, srv.DB)
+		if err != nil {
+			return fail("购买未完成，请刷新商店后重试")
+		}
+		planned := make([]*store.Item, 0, len(prepared))
+		for _, it := range prepared {
+			row, _, grantErr := grantPreparedItemTx(cctx, previewTx, it, mergeable[it.ItemID])
+			if grantErr != nil {
+				_ = previewTx.Rollback()
+				return fail("购买未完成，请刷新商店后重试")
+			}
+			planned = append(planned, row)
+		}
+		if err := previewTx.Rollback(); err != nil {
+			return fail("购买未完成，请刷新商店后重试")
+		}
+		trees := make([]*proto.Value, 0, len(planned))
+		for _, it := range planned {
+			tree, err := srv.ItemToTree(cctx, it)
+			if err == nil {
+				_, err = proto.EncodeValue(tree, ctx.Sess.Table())
+			}
+			if err != nil {
+				ctx.Log.Warn("商店商品不可下发", "item", it.ItemID, "err", err)
+				return fail("购买未完成，请刷新商店后重试")
+			}
+			trees = append(trees, tree)
+		}
 
 		tx, err := beginEconomyTx(cctx, srv.DB)
 		if err != nil {
@@ -216,11 +249,27 @@ func hStoreBuy(goldCol bool) Handler {
 		}
 
 		granted := make([]*store.Item, 0, len(prepared))
-		for _, it := range prepared {
+		for i, it := range prepared {
 			// 可退批次与逐实例配方产出独立存放，其余计件产出按 item_id 合并。
 			row, _, gerr := grantPreparedItemTx(cctx, tx, it, mergeable[it.ItemID])
 			if gerr != nil {
 				ctx.Log.Warn("商店入库失败", "item", it.ItemID, "err", gerr)
+				return fail("购买未完成，请刷新商店后重试")
+			}
+			// 库存并发变化则拒购回滚；仅版本戳允许不同并同步到投影树。
+			actual := *row
+			fields, ferr := FieldsFromJSON(row.FieldsJSON)
+			plannedFields, perr := FieldsFromJSON(planned[i].FieldsJSON)
+			if ferr != nil || perr != nil {
+				return fail("购买未完成，请刷新商店后重试")
+			}
+			idx := fieldIdxByCS(row.WireClass, csCreated)
+			if idx >= 0 && idx < len(fields) && idx < len(plannedFields) && idx < len(trees[i].Fields) {
+				trees[i].Fields[idx] = fields[idx]
+				fields[idx] = plannedFields[idx]
+			}
+			actual.FieldsJSON, ferr = FieldsToJSON(fields)
+			if ferr != nil || !reflect.DeepEqual(actual, *planned[i]) {
 				return fail("购买未完成，请刷新商店后重试")
 			}
 			granted = append(granted, row)
@@ -250,23 +299,16 @@ func hStoreBuy(goldCol bool) Handler {
 				ctx.Log.Warn("商店购买凭据保存失败", "err", err)
 				return fail("购买未完成，请刷新商店后重试")
 			}
-		}
-		// 纸质地图（category 40）只是可阅读的地图道具，购买它不等于买断地点：
-		// 旧实现会在这里写 place_access(kind='buyout')，导致"买张地图就变成无限访问"。
-		// 地点访问只走 3/37 金币买断这一条路，商店购买不再授予任何访问权。
-		if err := tx.Commit(); err != nil {
-			ctx.Log.Warn("商店事务提交失败", "item", itemID, "err", err)
-			return fail("购买未完成，请刷新商店后重试")
-		}
-
-		trees := make([]*proto.Value, 0, len(granted))
-		for _, row := range granted {
-			tree, terr := srv.ItemToTree(cctx, row)
-			if terr != nil {
-				ctx.Log.Warn("商店物品树构造失败", "item", itemID, "err", terr)
-				continue
+			for i, row := range granted {
+				fields, err := FieldsFromJSON(row.FieldsJSON)
+				if err != nil {
+					return fail("购买未完成，请刷新商店后重试")
+				}
+				idx := fieldIdxByCS(row.WireClass, csOrigin)
+				if idx >= 0 && idx < len(fields) && idx < len(trees[i].Fields) {
+					trees[i].Fields[idx] = fields[idx]
+				}
 			}
-			trees = append(trees, tree)
 		}
 		f1 := proto.Null()
 		f2 := proto.Null()
@@ -284,11 +326,18 @@ func hStoreBuy(goldCol bool) Handler {
 			3: proto.Null(),
 		})
 		if err != nil {
-			return nil, false
+			return fail("购买未完成，请刷新商店后重试")
 		}
 		body, err := proto.EncodeValue(obj804, ctx.Sess.Table())
 		if err != nil {
-			return nil, false
+			return fail("购买未完成，请刷新商店后重试")
+		}
+		if reason := srv.dispatch.checkRegisteredResponse(uint8(ctx.Main), uint8(ctx.Sub), body, ctx.Sess.Table()); reason != "" {
+			return fail("购买未完成，请刷新商店后重试")
+		}
+		if err := tx.Commit(); err != nil {
+			ctx.Log.Warn("商店事务提交失败", "item", itemID, "err", err)
+			return fail("购买未完成，请刷新商店后重试")
 		}
 		ctx.Sess.Push2_1()
 		return body, true

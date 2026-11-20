@@ -1,0 +1,22 @@
+{
+  "11": {
+    "0": [{"item": "premium_3d", "qty": 1}, {"item": "tele_10174_8g", "qty": 1}],
+    "1": [{"item": "pb_m_choc_pack10g", "qty": 1}, {"item": "pb_d_choc_pack10g", "qty": 1}],
+    "2": [{"item": "ang_pack_6g", "qty": 1}],
+    "3": [{"item": "AV_shamp1_pack_6g", "qty": 1}],
+    "4": [{"item": "pm_medovuha_pack_6g", "qty": 1}],
+    "5": [{"item": "camp_lamp_03", "qty": 1}],
+    "6": [{"item": "pom_mono_box", "qty": 1}],
+    "7": [{"item": "spinreel_pelengas_2017", "qty": 1}]
+  },
+  "12": {
+    "0": [{"item": "spin_6020", "qty": 1}],
+    "1": [{"item": "fcb_coffee_can", "qty": 50}],
+    "2": [{"item": "ab_tea_can", "qty": 50}],
+    "3": [{"item": "rd_red_vine_box", "qty": 1}],
+    "4": [{"item": "hm_spoon_box", "qty": 1}],
+    "5": [{"item": "hvz_feeder_bell_box", "qty": 1}],
+    "6": [{"item": "hvz_waggler_box", "qty": 1}],
+    "7": [{"item": "spin_10252_SF70L", "qty": 1}]
+  }
+}

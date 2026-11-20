@@ -12,6 +12,8 @@ import (
 )
 
 func TestFishBaitRuleParsingAndTypes(t *testing.T) {
+	// 252 条：哲罗鱼那份规则只列了本地不存在的「松鼠假饵/老鼠假饵」，但保留它
+	// 是刻意的——「有规则但一款饵都没匹配上」会走证据兜底，行为与删规则不同。
 	if len(fishBaitRules) != 252 {
 		t.Fatalf("rules=%d", len(fishBaitRules))
 	}
@@ -36,7 +38,9 @@ func TestFishBaitRuleParsingAndTypes(t *testing.T) {
 		{"model", ruleBait{name: "Hunter 1-001", category: 17, lureType: 4}, "Hunter 1系列", true},
 		{"different model", ruleBait{name: "Hunter 1000-001", category: 17, lureType: 4}, "Hunter 1系列", false},
 		{"excluded family", ruleBait{name: "Gummi Makk 10-001", category: 17, lureType: 3}, "Gummi Makk", true},
-		{"alias", ruleBait{name: "红蚯蚓", id: "muckworm", category: 27, baitType: 6}, "粪便蠕虫", true},
+		// 粪便蠕虫是三个地区粪蚯蚓变种，不是红蚯蚓（muckworm 的说明是红蚯蚓）。
+		{"red compost worm is not muckworm", ruleBait{name: "红蚯蚓", id: "muckworm", category: 27, baitType: 6}, "粪便蠕虫", false},
+		{"sura brandling", ruleBait{name: "苏尔斯基粪蚯蚓", id: "worm_sur", category: 27, baitType: 6}, "粪便蠕虫", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.bait.matches(tt.term); got != tt.want {
@@ -59,6 +63,14 @@ func seedBaitRuleTest(t *testing.T) (*Server, *store.DB) {
 			t.Fatal(err)
 		}
 	}
+	// 食性分级（bait-evidence-threshold）默认关闭：旧测试验证的是规则匹配与
+	// 替代路径；分级路径由 TestBaitEvidenceThresholdGrading 显式开启覆盖。
+	s.tunMu.Lock()
+	if s.tunCache == nil {
+		s.tunCache = map[string]float64{}
+	}
+	s.tunCache["bait_share_strong"] = 0
+	s.tunMu.Unlock()
 	return s, db
 }
 

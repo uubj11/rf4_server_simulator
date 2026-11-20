@@ -99,9 +99,13 @@ func (s *Server) baitedHookSets(ctx context.Context, rod string) []baitedHookSet
 			}
 			group.baits = append(group.baits, id)
 			group.baitGUIDs = append(group.baitGUIDs, row.GUID)
-			group.hookGUID = assignments[row.GUID]
-			if group.hookGUID == "" && category == catLure {
-				group.hookGUID = s.lureActiveHookGUID(ctx, row.GUID)
+			// 同一钩位可能挂了多个组件（钩 + 软饵/珠子），钩位只认第一个
+			// 分到钩上的那个，不能被后面拟饵自带的钩覆盖。
+			if group.hookGUID == "" {
+				group.hookGUID = assignments[row.GUID]
+				if group.hookGUID == "" && category == catLure {
+					group.hookGUID = s.lureActiveHookGUID(ctx, row.GUID)
+				}
 			}
 		}
 	}
@@ -115,24 +119,115 @@ func (s *Server) baitedHookSets(ctx context.Context, rod string) []baitedHookSet
 	return out
 }
 
-// 组件数组删除后会紧缩，用实例关联保留原钩位；稀疏旧链不按数组猜配对。
+const (
+	// 客户端 RigMarineBase 的钩位子槽：钩位从 1001 起每 4 个索引一组
+	// （1001/1005/1009），组内 1002/1003/1004 是挂在该钩位上的拟饵与珠子。
+	hookSlotBaseIndex = 1001
+	hookSlotStride    = 4
+)
+
+// hookAnchorTable 把钩组件的扩展槽位（extra）映射成钩位，用于把饵归到真实钩位。
+//
+// 只在杆上确实存在海钓钩位子槽（extra ≥ 1001）时可用：钩位 extra 唯一，
+// 饵的 extra 落在哪个钩位的组内就属于哪个钩位。主线上的饵（extra < 1001，
+// 例如 300/325/326）没有子槽结构，区分不了同一层上的多枚钩，继续沿用
+// bait_hook 记录与既有补齐规则。
+type hookAnchorTable struct {
+	byExtra map[int64]string
+}
+
+// hookAnchorsFromComps 在钩位 extra 完整且唯一时构造映射；否则 ok=false。
+func hookAnchorsFromComps(comps map[int64]rigComp, hooks []int64) (hookAnchorTable, bool) {
+	t := hookAnchorTable{byExtra: map[int64]string{}}
+	if len(hooks) < 2 {
+		return t, false
+	}
+	sub := 0
+	for _, key := range hooks {
+		comp := comps[key]
+		if comp.Extra <= 0 {
+			return t, false
+		}
+		if _, dup := t.byExtra[comp.Extra]; dup {
+			return t, false
+		}
+		t.byExtra[comp.Extra] = comp.GUID
+		if comp.Extra >= hookSlotBaseIndex {
+			sub++
+		}
+	}
+	if sub == 0 {
+		return t, false
+	}
+	return t, true
+}
+
+// anchorOf 返回该扩展槽位所属的钩位 GUID；主线槽位（extra < 1001）不在此表内。
+func (t hookAnchorTable) anchorOf(extra int64) (string, bool) {
+	if extra < hookSlotBaseIndex {
+		return "", false
+	}
+	band := hookSlotBaseIndex + (extra-hookSlotBaseIndex)/hookSlotStride*hookSlotStride
+	hook, ok := t.byExtra[band]
+	return hook, ok
+}
+
+// mainHook 返回主线钩位（extra < 1001，实机是 250）的 GUID；没有则返回空。
+func (t hookAnchorTable) mainHook() string {
+	best, hook := int64(-1), ""
+	for extra, guid := range t.byExtra {
+		if extra >= hookSlotBaseIndex {
+			continue
+		}
+		if best < 0 || extra < best {
+			best, hook = extra, guid
+		}
+	}
+	return hook
+}
+
+// baitHookAssignments 把已挂载的饵/拟饵分到钓组钩位上，返回 饵GUID → 钩GUID。
+//
+// 分配优先级：
+//  1. 海钓钩位子槽：钩位 extra ≥ 1001 时按 extra 所属钩位归组（见 hookAnchorTable）；
+//  2. bait_hook 记录：客户端上饵时写下的钩位。组件数组删除后会紧缩，
+//     记录才是原始钩位的可靠来源；
+//  3. 结构配对：记录缺失时，第 N 个饵位对应第 N 个钩位；
+//  4. 拟饵自带的钩：上面都没有时用，且该钩必须属于本钓组的钩组件。
+//
+// 必须处理的坑：装配是逐组件进行的，钩组件通常比饵晚装上。此时
+// hookPositionsIn 只看到模板声明的 1 个钩位（rig 50 模板只有 250），
+// 旧逻辑会把每条饵都兜底绑到第一枚钩并持久化；等钩装到 4 个，4 条记录
+// 仍全指向钩 0，多钩判鱼只看到 1 个有饵的钩位
+// （logs/gameserver.log 2026-11-13 07:17 "钩位=4 已挂饵钩位=1"）。
+// 因此"多钩钓组里记录全指向同一枚钩、而饵位序号跨越多个钩位"判为中间态，
+// 整批作废改用结构配对，并把纠正结果回写。
 func (s *Server) baitHookAssignments(ctx context.Context, rod string, comps map[int64]rigComp, single bool) (map[string]string, error) {
 	assigned := map[string]string{}
 	hooks := rigCompKeysOfCategory(comps, catHook)
-	mounted, validHook := map[string]bool{}, map[string]bool{}
+	mounted, rigHook := map[string]bool{}, map[string]bool{}
 	for _, key := range hooks {
-		validHook[comps[key].GUID] = true
+		rigHook[strings.ToLower(comps[key].GUID)] = true
+	}
+	keysByCat := map[int64][]int64{}
+	validHook := map[string]bool{}
+	for h := range rigHook {
+		validHook[h] = true
 	}
 	for _, cat := range []int64{catBait, catLure} {
-		for _, key := range rigCompKeysOfCategory(comps, cat) {
-			mounted[comps[key].GUID] = true
+		keysByCat[cat] = rigCompKeysOfCategory(comps, cat)
+		for _, key := range keysByCat[cat] {
+			bait := comps[key].GUID
+			mounted[bait] = true
 			if cat == catLure {
-				if hook := s.lureActiveHookGUID(ctx, comps[key].GUID); hook != "" {
-					validHook[hook] = true
+				if hook := s.lureActiveHookGUID(ctx, bait); hook != "" {
+					validHook[strings.ToLower(hook)] = true
 				}
 			}
 		}
 	}
+
+	explicit := map[string]string{}
 	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT key,value FROM rod_setting WHERE guid=? AND key LIKE 'bait_hook:%'`, rod)
 	if err != nil {
 		return nil, err
@@ -145,11 +240,11 @@ func (s *Server) baitHookAssignments(ctx context.Context, rod string, comps map[
 			return nil, err
 		}
 		bait := strings.TrimPrefix(key, "bait_hook:")
-		if !mounted[bait] || !validHook[hook] {
+		if !mounted[bait] || !validHook[strings.ToLower(hook)] {
 			obsolete = append(obsolete, key)
-		} else {
-			assigned[bait] = hook
+			continue
 		}
+		explicit[bait] = hook
 	}
 	err = rows.Err()
 	rows.Close()
@@ -161,50 +256,179 @@ func (s *Server) baitHookAssignments(ctx context.Context, rod string, comps map[
 			return nil, err
 		}
 	}
-	for _, cat := range []int64{catBait, catLure} {
-		keys := rigCompKeysOfCategory(comps, cat)
-		used := map[string]bool{}
-		for _, key := range keys {
-			if hook := assigned[comps[key].GUID]; hook != "" {
-				used[hook] = true
+
+	// 天然钩位：同一序号上的钩组件。
+	natural := func(key int64) string {
+		if row, ok := comps[rigCompKey(catHook, rigCompOrdinal(key))]; ok {
+			return row.GUID
+		}
+		return ""
+	}
+	writeHook := func(bait, hook string) error {
+		if strings.EqualFold(explicit[bait], hook) {
+			return nil
+		}
+		if hook == "" {
+			_, err := s.DB.SQL.ExecContext(ctx, `DELETE FROM rod_setting WHERE guid=? AND key=?`, rod, "bait_hook:"+bait)
+			return err
+		}
+		return s.DB.UpsertRodSetting(ctx, rod, "bait_hook:"+bait, hook)
+	}
+
+	// 单钩钓组：显式记录优先（拟饵自带的钩也走这里），其余并到唯一钩位。
+	if single && len(hooks) > 0 {
+		first := comps[hooks[0]].GUID
+		for _, cat := range []int64{catBait, catLure} {
+			for _, key := range keysByCat[cat] {
+				bait := comps[key].GUID
+				hook := explicit[bait]
+				if hook == "" {
+					hook = first
+				}
+				assigned[bait] = hook
+				if err := writeHook(bait, hook); err != nil {
+					return nil, err
+				}
 			}
 		}
-		for _, key := range keys {
-			bait := comps[key].GUID
-			if assigned[bait] != "" {
-				continue
-			}
-			hook := ""
-			if single && len(hooks) > 0 {
-				hook = comps[hooks[0]].GUID
-			} else if len(keys) == len(hooks) {
-				var free []string
-				for _, hk := range hooks {
-					if !used[comps[hk].GUID] {
-						free = append(free, comps[hk].GUID)
+		return assigned, nil
+	}
+
+	used := map[string]bool{}
+	take := func(bait, hook string) bool {
+		if hook == "" {
+			return false
+		}
+		lh := strings.ToLower(hook)
+		if used[lh] {
+			return false
+		}
+		used[lh] = true
+		assigned[bait] = hook
+		return true
+	}
+
+	// 海钓多钩：钩位在客户端是独立的 1000+ 命名空间（1001/1005/1009，步长 4），
+	// 钩位下的拟饵与珠子用同族子槽（1002/1006/1010 等）。ordinal 只是数组下标，
+	// 增删组件后会紧缩，和真实钩位并不对齐：实机 2026-11-13 07:40 那次装配是
+	// 钩 extra=250/1001/1005/1009、饵 extra=300/325/326/1002…1012，按 ordinal
+	// 配对会退化成 1 组（"钩位=4 已挂饵钩位=1"）。这里改按 extra 所属钩位归组。
+	if anchors, ok := hookAnchorsFromComps(comps, hooks); ok {
+		mainHook := anchors.mainHook()
+		for _, cat := range []int64{catBait, catLure} {
+			for _, key := range keysByCat[cat] {
+				comp := comps[key]
+				hook, found := anchors.anchorOf(comp.Extra)
+				if !found {
+					// 子槽对应钩位还没装上：沿用已记录的位置，不凭空猜。
+					// 但记录必须落在本钓组的钩组件上：实机 2026-11-13 07:40
+					// 主线拟饵被记到它自带的三本钩（内嵌引用 04047060… 早已失效），
+					// 结果主线钩 250 整枚空置，4 个钩位只剩 3 个真钩能用。
+					// 没有记录的主线装饰（亮片/发光管）仍然不分配，不凭空占钩位。
+					hook = explicit[comp.GUID]
+					if hook != "" && !rigHook[strings.ToLower(hook)] {
+						hook = mainHook
 					}
 				}
-				if len(free) == 1 {
-					hook = free[0]
-				} else if hk, exists := comps[rigCompKey(catHook, rigCompOrdinal(key))]; exists && !used[hk.GUID] {
-					hook = hk.GUID
+				if hook == "" {
+					continue
 				}
-			} else if cat == catLure {
-				hook = s.lureActiveHookGUID(ctx, bait)
+				assigned[comp.GUID] = hook
+				used[strings.ToLower(hook)] = true
 			}
-			if hook == "" {
-				continue
+		}
+		for _, cat := range []int64{catBait, catLure} {
+			for _, key := range keysByCat[cat] {
+				if err := writeHook(comps[key].GUID, assigned[comps[key].GUID]); err != nil {
+					return nil, err
+				}
 			}
-			if err := s.DB.UpsertRodSetting(ctx, rod, "bait_hook:"+bait, hook); err != nil {
+		}
+		return assigned, nil
+	}
+
+	// 中间态检测：装配是逐组件进行的，钩组件通常比饵晚装上。此时
+	// hookPositionsIn 只看到模板声明的 1 个钩位（rig 50 模板只有 250），
+	// 旧逻辑会把每条饵都兜底绑到第一枚钩并持久化；钩装到 4 个之后仍是
+	// "钩位=4 已挂饵钩位=1"（logs/gameserver.log 2026-11-13 07:17）。
+	// 判据：落在本钓组钩位上的记录只有一枚钩，而饵位序号跨越了多个钩位。
+	repaired := false
+	if len(hooks) >= 2 {
+		explicitRig, naturalSpan := map[string]bool{}, map[string]bool{}
+		for _, cat := range []int64{catBait, catLure} {
+			for _, key := range keysByCat[cat] {
+				if h := explicit[comps[key].GUID]; h != "" && rigHook[strings.ToLower(h)] {
+					explicitRig[strings.ToLower(h)] = true
+				}
+				if h := natural(key); h != "" {
+					naturalSpan[strings.ToLower(h)] = true
+				}
+			}
+		}
+		repaired = len(explicitRig) == 1 && len(naturalSpan) >= 2
+	}
+
+	if repaired {
+		// 整批作废，按饵位序号重排：第 N 个子线对应第 N 个钩位。
+		for _, cat := range []int64{catBait, catLure} {
+			for _, key := range keysByCat[cat] {
+				take(comps[key].GUID, natural(key))
+			}
+		}
+	} else {
+		// 记录优先：组件数组删除后会紧缩，记录才是原始钩位的可靠来源。
+		for _, cat := range []int64{catBait, catLure} {
+			for _, key := range keysByCat[cat] {
+				bait := comps[key].GUID
+				take(bait, explicit[bait])
+			}
+		}
+		// 没有记录时沿用旧规则补算，稀疏旧链不按数组位置猜配对。
+		for _, cat := range []int64{catBait, catLure} {
+			keys := keysByCat[cat]
+			for _, key := range keys {
+				bait := comps[key].GUID
+				if assigned[bait] != "" {
+					continue
+				}
+				hook := ""
+				if len(keys) == len(hooks) {
+					var free []string
+					for _, hk := range hooks {
+						if !used[strings.ToLower(comps[hk].GUID)] {
+							free = append(free, comps[hk].GUID)
+						}
+					}
+					if len(free) == 1 {
+						hook = free[0]
+					} else if hk, exists := comps[rigCompKey(catHook, rigCompOrdinal(key))]; exists && !used[strings.ToLower(hk.GUID)] {
+						hook = hk.GUID
+					}
+				} else if cat == catLure {
+					hook = s.lureActiveHookGUID(ctx, bait)
+				}
+				take(bait, hook)
+			}
+		}
+	}
+
+	for _, cat := range []int64{catBait, catLure} {
+		for _, key := range keysByCat[cat] {
+			bait := comps[key].GUID
+			if err := writeHook(bait, assigned[bait]); err != nil {
 				return nil, err
 			}
-			assigned[bait], used[hook] = hook, true
 		}
 	}
 	return assigned, nil
 }
 
 // 新装配时已有明确钩位，记录实例关联；旧稀疏数组不据此补猜。
+//
+// 注意：这里不能拿"当前唯一的那枚钩"兜底。装配是逐组件进行的，客户端先挂
+// 饵后挂钩，此时 hookPositionsIn 只看到模板声明的 1 个钩位，兜底会把每条饵
+// 都写成同一个钩，等钩装到 4 个就变成"钩位=4 已挂饵钩位=1"。配不到序号就
+// 不写，交给 baitHookAssignments 在读时按结构配对补算。
 func (s *Server) rememberMountedBaitHook(ctx context.Context, rod, bait, previousHook string, category, ordinal int64) error {
 	comps := s.storedRigComponents(ctx, rod)
 	hook := ""
@@ -216,15 +440,9 @@ func (s *Server) rememberMountedBaitHook(ctx context.Context, rod, bait, previou
 		}
 	}
 	if hook == "" {
-		rigType := s.rigTypeForWrite(ctx, rod)
-		if hookPositionsIn(rigType, comps) <= 1 && len(hooks) > 0 {
-			hook = comps[hooks[0]].GUID
-		} else if row, ok := comps[rigCompKey(catHook, ordinal)]; ok {
+		if row, ok := comps[rigCompKey(catHook, ordinal)]; ok {
 			hook = row.GUID
 		}
-	}
-	if hook == "" && category == catLure {
-		hook = s.lureActiveHookGUID(ctx, bait)
 	}
 	if hook == "" {
 		return nil
@@ -442,23 +660,6 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 			out.Updated = append(out.Updated, guid)
 			continue
 		}
-		// 食笼/PVA 装的窝料：这次抛投会把笼里最后一份掏空时，若背包有同款就顶上一份，
-		// 笼里这份保持不动。喂食器因此不用每抛一次就手动重装。
-		if cast && (def.Category == 46 || def.Category == 30) && baitQuantity(row) <= 1 {
-			backpackGUID, refillErr := s.refillCageFromBackpackTx(ctx, tx, uid, def)
-			if refillErr != nil {
-				return out, refillErr
-			}
-			if backpackGUID != "" {
-				out.Groundbait = append(out.Groundbait, groundbaitUse{ItemID: def.ItemID, Units: 1,
-					Category: def.Category, GUID: row.GUID})
-				if !containsGUID(out.Removed, backpackGUID) {
-					out.Removed = append(out.Removed, backpackGUID)
-				}
-				out.Updated = append(out.Updated, guid, backpackGUID)
-				continue
-			}
-		}
 		// 只消耗已挂载的一份，下一次抛竿前再补饵。
 		if _, err := consumeItemQtyTx(ctx, tx, row, 1); err != nil {
 			return out, err
@@ -473,7 +674,14 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 			out.Updated = append(out.Updated, guid)
 			continue
 		}
-		if !cast && def.Category == 27 {
+		_, rigType, _ := rigIdentity(protoFieldAt(fields, parent.WireClass, csRigObject))
+		refill := cast || def.ItemID == "fish_pieces" && hookPositionsIn(rigType, originalSlots) <= 1
+		if refill {
+			if err := rememberBaitRefillTx(ctx, tx, parent, row, originalSlots); err != nil {
+				return out, err
+			}
+		}
+		if !refill && !cast && def.Category == 27 {
 			if key, _, ok := rigCompKeyForGUID(originalSlots, guid); ok {
 				ordinal, value := rigCompOrdinal(key), def.ItemID
 				var hook string
@@ -524,46 +732,6 @@ func (s *Server) consumeBaitEvent(ctx context.Context, uid int64, rod, event str
 		return baitChange{}, err
 	}
 	return out, nil
-}
-
-// refillCageFromBackpackTx 从背包扣掉一份与笼里同款的窝料，返回被扣那份的 GUID。
-// 背包里没有同款时返回空串，由调用方回到原来的"掏空即摘组件"路径。
-func (s *Server) refillCageFromBackpackTx(ctx context.Context, tx *sql.Tx, uid int64, def *store.ItemDef) (string, error) {
-	if def == nil || def.ItemID == "" {
-		return "", nil
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT guid FROM item WHERE uid=? AND item_id=? AND container='backpack' AND qty>0 ORDER BY created_ts,guid`, uid, def.ItemID)
-	if err != nil {
-		return "", err
-	}
-	var candidates []string
-	for rows.Next() {
-		var guid string
-		if scanErr := rows.Scan(&guid); scanErr != nil {
-			rows.Close()
-			return "", scanErr
-		}
-		candidates = append(candidates, guid)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return "", err
-	}
-	for _, guid := range candidates {
-		back, err := getOwnedItemTx(ctx, tx, uid, guid)
-		if err != nil {
-			return "", err
-		}
-		if back == nil || back.GUID == "" {
-			continue
-		}
-		if _, err := consumeItemQtyTx(ctx, tx, back, 1); err != nil {
-			return "", err
-		}
-		return guid, nil
-	}
-	return "", nil
 }
 
 func removeConsumedRigReferenceTx(ctx context.Context, db *store.DB, tx *sql.Tx, parent *store.Item, guid string) error {
@@ -670,7 +838,10 @@ func (s *Server) consumeCastBait(sess *Session, st *FishState) error {
 
 // reloadBaitForCast 只在下一次抛竿前补同种钩饵，不提前消耗搏鱼中的备用饵。
 func (s *Server) reloadBaitForCast(ctx context.Context, uid int64, rod string) (baitChange, error) {
-	var out baitChange
+	out, err := s.reloadSlotBait(ctx, uid, rod)
+	if err != nil {
+		return baitChange{}, err
+	}
 	parent, err := s.DB.GetItemByGUID(ctx, rod)
 	if err != nil {
 		return out, err
@@ -854,12 +1025,7 @@ func (s *Server) orderBaitsByHook(ctx context.Context, uid int64, rod string) er
 	if err := updateItemFieldsTx(ctx, s.DB, tx, parent, fields); err != nil {
 		return err
 	}
-	components := make([]store.RigComponent, 0, len(comps))
-	for _, comp := range comps {
-		components = append(components, store.RigComponent{
-			Slot: comp.Category, Ordinal: comp.Ordinal, GUID: comp.GUID, Extra: comp.Extra,
-		})
-	}
+	components := rigProjection(parent.WireClass, fields, fields[idx].Val)
 	if err := s.DB.ReplaceRigComponentsTx(ctx, tx, rod, components); err != nil {
 		return err
 	}

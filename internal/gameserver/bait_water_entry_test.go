@@ -62,18 +62,38 @@ func TestGroundbaitAndPvaConsumeOnWaterEntryOnly(t *testing.T) {
 				t.Fatal("未入水时不得消耗窝料/PVA")
 			}
 
-			// 首次入水位出现：笼里这份不再被掏空，改从背包顶一份（自动补料）。
+			// 首次入水位出现：笼里这份被掏空（消耗记入 pending 请求），
+			// 下一次抛竿前的 reloadBaitForCast 再从背包同款堆顶一份回来。
 			tick(0x400)
-			if row, err := db.GetItemByGUID(ctx, mounted); err != nil || row == nil {
-				t.Fatalf("自动补料后笼里应保留 1 份，实得 %+v err=%v", row, err)
+			if row, _ := db.GetItemByGUID(ctx, mounted); row != nil {
+				t.Fatalf("入水后笼里这份应被消耗，实得 %+v", row)
+			}
+			if _, err := s.reloadBaitForCast(ctx, uid, rod); err != nil {
+				t.Fatalf("补料 reload 失败: %v", err)
+			}
+			def, err := db.GetItemDefByItemID(ctx, itemID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refilled := ""
+			for _, c := range s.storedRigComponents(ctx, rod) {
+				if c.Category == def.Category && c.GUID != stack.GUID {
+					refilled = c.GUID
+				}
+			}
+			if refilled == "" {
+				t.Fatal("自动补料后钓组上应重新挂上一份")
 			}
 			if row, err := db.GetItemByGUID(ctx, stack.GUID); err != nil || row == nil || row.Qty != 58 {
 				t.Fatalf("自动补料应从背包扣 1 份，来源堆实得 %+v err=%v", row, err)
 			}
-			// 同一杆持续在水中不会重复补。
+			// 同一杆持续在水中不会重复扣。
 			tick(0x400)
 			if row, err := db.GetItemByGUID(ctx, stack.GUID); err != nil || row == nil || row.Qty != 58 {
 				t.Fatalf("同一杆只应补 1 份，来源堆实得 %+v err=%v", row, err)
+			}
+			if row, _ := db.GetItemByGUID(ctx, refilled); row == nil {
+				t.Fatal("同一杆持续在水中不得再消耗新补的那份")
 			}
 		})
 	}

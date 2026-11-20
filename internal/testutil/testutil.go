@@ -29,11 +29,26 @@ type GatewayHandle struct {
 	LoginURL      string
 	LoginPlainURL string
 	RealAddr      string
-	Store         *gateway.MemStore
+	// Store 是本次装配使用的存储。声明成接口是为了让测试能包一层注入故障
+	// （例如让 LoadHandoff 返回真实错误），而不用改生产代码加测试钩子。
+	Store gateway.Store
+	// RT 暴露 realtime 服务本体，供关闭顺序 / 重连接管相关测试直接驱动。
+	RT *gateway.RealtimeServer
+	// TM 暴露隧道管理器，供关闭链延迟测试单独驱动 tm.Close()。
+	TM *gateway.TunnelManager
 }
 
 // StartGateway 在随机端口装配一个进程内网关（MemStore + 指定隧道地址）。
 func StartGateway(t *testing.T, tunnelAddr, psk string) *GatewayHandle {
+	t.Helper()
+	return StartGatewayWithStore(t, tunnelAddr, psk, gateway.NewMemStore(1000001))
+}
+
+// StartGatewayWithStore 用调用方给定的存储装配网关。
+//
+// 存储声明成接口，是为了让测试能包一层注入故障（例如让 LoadHandoff 返回
+// 真实错误），从而覆盖「读库失败」这类分支，而不用给生产代码加测试钩子。
+func StartGatewayWithStore(t *testing.T, tunnelAddr, psk string, store gateway.Store) *GatewayHandle {
 	t.Helper()
 	cfg := config.Gateway{
 		LoginAddr:             "127.0.0.1:0",
@@ -53,7 +68,6 @@ func StartGateway(t *testing.T, tunnelAddr, psk string) *GatewayHandle {
 	if err := gateway.EnsureCert(cfg.CertFile, cfg.KeyFile, cfg.LoginDomain); err != nil {
 		t.Fatal(err)
 	}
-	store := gateway.NewMemStore(1000001)
 	log := logging.Discard()
 	tm := gateway.NewTunnelManager(tunnelAddr, psk, log, nil, nil)
 	rt := gateway.NewRealtimeServer(cfg, store, log, tm, nil)
@@ -79,6 +93,8 @@ func StartGateway(t *testing.T, tunnelAddr, psk string) *GatewayHandle {
 		LoginPlainURL: "http://" + login.CompatAddr() + "/login.php",
 		RealAddr:      rt.RealAddr(),
 		Store:         store,
+		RT:            rt,
+		TM:            tm,
 	}
 }
 

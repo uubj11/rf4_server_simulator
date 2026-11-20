@@ -86,6 +86,23 @@ func awaitPushEnvelope(t *testing.T, gc *tunnel.Conn) *proto.Envelope {
 	}
 }
 
+func assertNoPush(t *testing.T, gc *tunnel.Conn, timeout time.Duration, message string) {
+	t.Helper()
+	ch := make(chan error, 1)
+	go func() {
+		_, _, _, err := gc.ReadRecord()
+		ch <- err
+	}()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Fatalf("%s，读取出错: %v", message, err)
+		}
+		t.Fatal(message)
+	case <-time.After(timeout):
+	}
+}
+
 // 未上钩离场（14/12 f0=1/2 窗口超时；f0=8 且未中过鱼=刺鱼瞬间钩没挂上）
 // 官方语义静默：客户端模板表无「未上钩」类，客户端自己播游走动画；
 // 服务端不得广播模板 7「鱼脱钩了」（鱼从未上钩，语义不成立）。
@@ -108,25 +125,58 @@ func TestFishUnhookedDepartureIsSilent(t *testing.T) {
 	}
 
 	// 静默断言：短窗口内不得有任何推送。
-	ch := make(chan error, 1)
-	go func() {
-		_, _, _, err := gc.ReadRecord()
-		ch <- err
-	}()
-	select {
-	case err := <-ch:
-		t.Fatalf("f0=1/2/8 未上钩离场不应产生任何推送，实得 %v", err)
-	case <-time.After(400 * time.Millisecond):
-	}
+	assertNoPush(t, gc, 400*time.Millisecond, "f0=1/2/8 未上钩离场不应产生任何推送")
 }
 
-// 已中鱼后跑鱼（14/11 确认中鱼 → 14/12 f0=1/2/8）：客户端搏鱼失钩
-// 经计时器路径上报，f0 不区分「曾上钩」与「未上钩」（线上实证：
-// 14/14 → 14/11 → f0=2，全程无 8/7）。服务端以 st.Hooked 为准，
-// 已中鱼的跑鱼等同 f0=7 真脱钩：默认走蓝色模板 3 播报。
-func TestFishHookedEscapeBroadcasts(t *testing.T) {
+// 已中鱼后的离场按 f0 分流（2026-11-16 客户端两阶段模型收敛，
+// docs/路亚脱钩率分析-2026-11-16.md）：f0=1 = 阶段一「叼住吐出」——
+// 鱼咬了饵但从未真正挂牢，客户端连「上鱼」通知都不出、本地化模板表
+// 无此类载体，即使服务端记了 14/11 中鱼确认也官方静默，不计 escapes、
+// 不触发大鱼脱钩补偿；f0=2/8 = 阶段二搏鱼危险掷骰失败（真脱钩）：
+// 默认蓝色模板 3 播报并计 escapes。
+func TestFishHookedEscapeSplitsByF0(t *testing.T) {
 	srv, db := newRigTestServer(t)
-	for _, f0 := range []uint64{1, 2, 8} {
+
+	// f0=1：已中鱼也静默；用奖杯级鱼和预置非零补偿状态，
+	// 防止 recordHuntEscape 回归时只被 Grade=0 样本掩盖。
+	const (
+		loc  = "hunt-test"
+		spot = uint64(7)
+	)
+	sess, gc := newTunnelProbe(t, srv)
+	seed := &fishHuntState{
+		UID: sess.Userid, Loc: loc, Spot: spot,
+		BigMiss: 2, CompFish: 2, CompGrade: 3,
+		CompUntil: float64(time.Now().Add(time.Hour).Unix()),
+	}
+	srv.saveFishHuntState(context.Background(), seed)
+	st := srv.stateFor(sess.Userid)
+	st.mu.Lock()
+	st.CastActive = true
+	st.Hooked = true
+	st.Loc, st.Spot = loc, spot
+	st.Pending = &RolledFish{
+		Species: "g_tench", WeightG: 6300, Grade: 4,
+		HuntStageKnown: true, HuntStage: fishHuntActive,
+	}
+	st.mu.Unlock()
+	tree := proto.Args524(proto.Obj("lhicjpmglbo", 0,
+		proto.Field{Op: "U32", Num: ptrU64(1)}))
+	if _, ok := hFishingLeft(miscCtx(sess, 14, 12, tree)); !ok {
+		t.Fatal("14/12 f0=1 未处理")
+	}
+	if got := counterValue(t, db, sess.Userid, "escapes"); got != 0 {
+		t.Fatalf("f0=1 叼住吐出不应计 escapes，实得 %d", got)
+	}
+	hunt := srv.loadFishHuntState(context.Background(), sess.Userid, loc, spot)
+	if hunt.BigMiss != 2 || hunt.CompFish != 2 || hunt.CompGrade != 3 {
+		t.Fatalf("f0=1 不应改写鱼猎脱钩补偿，实得 BigMiss=%d CompFish=%d CompGrade=%d",
+			hunt.BigMiss, hunt.CompFish, hunt.CompGrade)
+	}
+	assertNoPush(t, gc, 400*time.Millisecond, "f0=1 叼住吐出不应产生任何推送")
+
+	// f0=2/8：真脱钩，播报 24/27 蓝色模板 3。
+	for _, f0 := range []uint64{2, 8} {
 		sess, gc := newTunnelProbe(t, srv)
 		st := srv.stateFor(sess.Userid)
 		st.mu.Lock()
@@ -134,13 +184,11 @@ func TestFishHookedEscapeBroadcasts(t *testing.T) {
 		st.Hooked = true
 		st.Pending = &RolledFish{Species: "g_tench", WeightG: 547}
 		st.mu.Unlock()
-
 		tree := proto.Args524(proto.Obj("lhicjpmglbo", 0,
 			proto.Field{Op: "U32", Num: ptrU64(f0)}))
 		if _, ok := hFishingLeft(miscCtx(sess, 14, 12, tree)); !ok {
 			t.Fatalf("14/12 f0=%d 未处理", f0)
 		}
-
 		env := awaitPushEnvelope(t, gc)
 		if env.Main != 24 || env.Sub != 27 {
 			t.Fatalf("f0=%d 拉脱播报应走 24/27，实得 %d/%d", f0, env.Main, env.Sub)
@@ -151,27 +199,27 @@ func TestFishHookedEscapeBroadcasts(t *testing.T) {
 		}
 		mf0 := dec.Items[0].Field(0)
 		if got := mf0.Num; got == nil || *got != 3 {
-			t.Fatalf("f0=%d 已中鱼跑鱼应走蓝色模板 3，实得 %v", f0, got)
+			t.Fatalf("f0=%d 真脱钩应走蓝色模板 3，实得 %v", f0, got)
 		}
 		if !bytes.Contains(env.Body, []byte("你的")) {
 			t.Fatalf("f0=%d 推送缺少跑鱼文案: %x", f0, env.Body)
 		}
 	}
 
-	// 关闭嘲讽开关后回退官方模板 7，保证可回滚。
+	// 关闭嘲讽开关后回退官方模板 7（f0=2 真脱钩），保证可回滚。
 	if err := db.TunableSet(context.Background(), "fish_escape_taunt", "0", "test"); err != nil {
 		t.Fatal(err)
 	}
 	srv.execAdminCmd(&AdminCommand{Op: "reload_tunables"})
-	sess, gc := newTunnelProbe(t, srv)
-	st := srv.stateFor(sess.Userid)
+	sess, gc = newTunnelProbe(t, srv)
+	st = srv.stateFor(sess.Userid)
 	st.mu.Lock()
 	st.CastActive = true
 	st.Hooked = true
 	st.Pending = &RolledFish{Species: "g_tench", WeightG: 547}
 	st.mu.Unlock()
-	tree := proto.Args524(proto.Obj("lhicjpmglbo", 0,
-		proto.Field{Op: "U32", Num: ptrU64(1)}))
+	tree = proto.Args524(proto.Obj("lhicjpmglbo", 0,
+		proto.Field{Op: "U32", Num: ptrU64(2)}))
 	if _, ok := hFishingLeft(miscCtx(sess, 14, 12, tree)); !ok {
 		t.Fatal("14/12 未处理")
 	}
@@ -185,15 +233,16 @@ func TestFishHookedEscapeBroadcasts(t *testing.T) {
 	}
 }
 
-// 真脱钩（f0=7，搏鱼中钩引用消失，鱼曾上钩）默认同样播报蓝色模板 3。
-func TestFishTrueEscapeStillBroadcasts(t *testing.T) {
+// 未知 f0 兜底分支（f0=7 =「无钓组」终态语义，非脱钩）在已中鱼时
+// 保持保守播报：无法确认客户端状态机路径时按真脱钩处理，宁播勿漏。
+func TestFishUnknownFrameHookedStillBroadcasts(t *testing.T) {
 	srv, _ := newRigTestServer(t)
 	sess, gc := newTunnelProbe(t, srv)
 
 	st := srv.stateFor(sess.Userid)
 	st.mu.Lock()
 	st.CastActive = true
-	st.Hooked = true // 只有已中鱼（14/11）后的 f0=8 才算真脱钩，未中钩离场官方静默。
+	st.Hooked = true // 已中鱼（14/11）确认；未知 f0 走兜底保守播报。
 	st.Pending = &RolledFish{Species: "g_tench", WeightG: 547}
 	st.mu.Unlock()
 
@@ -216,7 +265,7 @@ func TestFishTrueEscapeStillBroadcasts(t *testing.T) {
 	}
 	mf0 := dec.Items[0].Field(0)
 	if got := mf0.Num; got == nil || *got != 3 {
-		t.Fatalf("真脱钩应走蓝色模板 3，实得 %v", got)
+		t.Fatalf("未知帧已中鱼应走蓝色模板 3，实得 %v", got)
 	}
 	if !bytes.Contains(env.Body, []byte("你的")) {
 		t.Fatalf("推送缺少跑鱼文案: %x", env.Body)

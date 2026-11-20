@@ -50,6 +50,16 @@ func (d *DB) AddItemDamageLog(ctx context.Context, entry ItemDamageLog) error {
 	return AddItemDamageLog(ctx, d.SQL, entry)
 }
 
+// BumpPlayerCounter 向指定执行器把玩家计数器累加 1，行不存在时插入。
+// 传入事务句柄即可与业务变更同事务提交：计数器与耐久必须一起成功或一起回滚，
+// 否则会出现「鱼轮已损坏但计数丢失」且重试因耐久已是 0 无法补记的账实不符。
+func BumpPlayerCounter(ctx context.Context, exec SQLExecer, uid int64, key string) error {
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO player_counters(uid, key, value) VALUES(?,?,1)
+		ON CONFLICT(uid,key) DO UPDATE SET value=value+1`, uid, key)
+	return err
+}
+
 // ListItemDamageLogs 返回玩家最近的损伤历史，limit<=0 时默认 100 条。
 func (d *DB) ListItemDamageLogs(ctx context.Context, uid int64, limit int) ([]ItemDamageLog, error) {
 	if limit <= 0 {

@@ -4,7 +4,7 @@ import "math"
 
 // 体长系数校准表。
 //
-// 静态库 species_weight 里 252 个鱼种的 length_k 绝大多数是同一个默认值 0.0355，
+// 静态库 species_weight 里 253 个鱼种的 length_k 绝大多数是同一个默认值 0.0355，
 // 导致同重量不同体型的鱼种模型尺寸几乎一致（狗鱼不够细长、鳊鱼不够短厚）。
 //
 // 换算（p=1/3 的默认口径）：length_k = 现实最大体长(m) / 站点记录最大重量(g)^(1/3)。
@@ -21,137 +21,137 @@ import "math"
 // speciesLengthKOverride 把 fish_key 映射到校准后的 length_k，
 // 未列出的鱼种继续使用静态库里的值。
 var speciesLengthKOverride = map[string]float64{
-	"a.sleeper":           0.045613,
+	"a.sleeper": 0.045613,
 	// a_catfish：花鲶 3.5kg 却给 1.78m；不设覆盖，回落默认立方律 0.0355。
-	"a_char":              0.009986,
-	"a_grayling":          0.033930,
-	"a_omul":              0.034668,
-	"a_salmon":            0.048274,
-	"a_smelt":             0.046416,
-	"agar":                0.041978,
-	"alb_barbel":          0.043468,
-	"alfonsino":           0.042449,
-	"ambl_h":              0.046520,
-	"ambl_r":              0.052488,
-	"asp":                 0.050000,
-	"atl_cod":             0.046307,
-	"atl_herring":         0.043089,
-	"b_bream":             0.082548,
-	"b_carp":              0.042601,
+	"a_char":      0.009986,
+	"a_grayling":  0.033930,
+	"a_omul":      0.034668,
+	"a_salmon":    0.048274,
+	"a_smelt":     0.046416,
+	"agar":        0.041978,
+	"alb_barbel":  0.043468,
+	"alfonsino":   0.042449,
+	"ambl_h":      0.046520,
+	"ambl_r":      0.052488,
+	"asp":         0.050000,
+	"atl_cod":     0.046307,
+	"atl_herring": 0.043089,
+	"b_bream":     0.082548,
+	"b_carp":      0.042601,
 	// b_gill：蓝鳃太阳鱼 850g 只有 0.22m；不设覆盖，回落默认立方律 0.0355。
-	"b_herring":           0.045050,
-	"b_omul":              0.027516,
-	"b_scabbardfish":      0.043955,
-	"barb_toni":           0.046965,
-	"barsch":              0.044703,
-	"beluga":              0.003876,
-	"bh_carp":             0.042554,
-	"bl_buffalo":          0.040548,
-	"black_crappie":       0.029925,
-	"bp_bass":             0.044097,
-	"bream":               0.048821,
-	"buffalo":             0.036493,
+	"b_herring":      0.045050,
+	"b_omul":         0.033000,
+	"b_scabbardfish": 0.043955,
+	"barb_toni":      0.046965,
+	"barsch":         0.044703,
+	"beluga":         0.003876,
+	"bh_carp":        0.042554,
+	"bl_buffalo":     0.040548,
+	"black_crappie":  0.034000,
+	"bp_bass":        0.044097,
+	"bream":          0.048821,
+	"buffalo":        0.036493,
 	// bullhead_syb：西伯利亚杜父鱼 27g 却给 0.30m；不设覆盖，回落默认立方律 0.0355。
-	"burbot":              0.057690,
-	"c.carp":              0.045214,
-	"c_anguineus":         0.060554,
-	"c_barbel":            0.045000,
-	"c_bleak":             0.041741,
-	"c_herring":           0.063496,
-	"c_lamprey":           0.046338,
-	"c_nase":              0.045107,
-	"carp":                0.044208,
-	"carp_albino":         0.042832,
-	"carp_ghost":          0.042832,
-	"carp_red":            0.042832,
-	"centroloph_n":        0.045006,
-	"cetorhinus_m":        0.004410,
-	"ch_beluga":           0.003821,
-	"ch_catfish":          0.074684,
-	"cha_herring":         0.046177,
-	"chan_m":              0.044288,
-	"chartus_kuoriius":    0.001630,
-	"chavycha":            0.029240,
+	"burbot":           0.057690,
+	"c.carp":           0.045214,
+	"c_anguineus":      0.060554,
+	"c_barbel":         0.045000,
+	"c_bleak":          0.041741,
+	"c_herring":        0.063496,
+	"c_lamprey":        0.046338,
+	"c_nase":           0.045107,
+	"carp":             0.044208,
+	"carp_albino":      0.042832,
+	"carp_ghost":       0.042832,
+	"carp_red":         0.042832,
+	"centroloph_n":     0.045006,
+	"cetorhinus_m":     0.004410,
+	"ch_beluga":        0.003821,
+	"ch_catfish":       0.074684,
+	"cha_herring":      0.046177,
+	"chan_m":           0.044288,
+	"chartus_kuoriius": 0.001630,
+	"chavycha":         0.029240,
 	// chimaera：大西洋银鲛 1kg 却给 1.31m（反向：模型被画大）；不设覆盖，回落默认立方律 0.0355。
-	"chir":                0.036593,
-	"chukuchan":           0.044523,
-	"coalfish":            0.044971,
-	"common_carp":         0.041039,
-	"conger":              0.073938,
-	"d_zubatka":           0.051260,
-	"dace":                0.047622,
-	"din_l_carp":          0.042448,
-	"din_m_carp":          0.042448,
-	"din_n_carp":          0.042448,
-	"dr_char":             0.005803,
-	"e.chub":              0.043955,
-	"e.pikeperch":         0.040000,
-	"e_bream":             0.043888,
-	"e_smelt":             0.046445,
-	"eel":                 0.094494,
-	"fe_lamprey":          0.047333,
-	"fhcatfish":           0.064366,
+	"chir":        0.036593,
+	"chukuchan":   0.044523,
+	"coalfish":    0.044971,
+	"common_carp": 0.041039,
+	"conger":      0.073938,
+	"d_zubatka":   0.051260,
+	"dace":        0.047622,
+	"din_l_carp":  0.042448,
+	"din_m_carp":  0.042448,
+	"din_n_carp":  0.042448,
+	"dr_char":     0.005803,
+	"e.chub":      0.043955,
+	"e.pikeperch": 0.040000,
+	"e_bream":     0.043888,
+	"e_smelt":     0.046445,
+	"eel":         0.094494,
+	"fe_lamprey":  0.047333,
+	"fhcatfish":   0.064366,
 	// fwdrum：淡水石首鱼 9.5kg 只有 0.53m；不设覆盖，回落默认立方律 0.0355。
-	"g_carp":              0.042601,
-	"g_carp_albino":       0.042601,
-	"g_shad":              0.058124,
-	"g_tench":             0.044097,
+	"g_carp":        0.042601,
+	"g_carp_albino": 0.042601,
+	"g_shad":        0.058124,
+	"g_tench":       0.044097,
 	// gc_smelt（湖鳟）原来锚了 0.011604，等于认定最大体长只有 0.29m；
 	// 21.45kg 的蓝冠只有 0.32m，客户端按体长缩放模型，巨物被画成小鱼。
 	// 湖鳟现实最大体长 1.0~1.2m，这里不设覆盖，回落到静态库默认立方律 0.0355。
-	"golets_lev":          0.012925,
-	"golyan":              0.046641,
-	"gorbusha":            0.048535,
-	"gudgeon":             0.043089,
-	"halibut_b":           0.037800,
-	"halibut_w":           0.005335,
-	"hi_utsri":            0.030780,
-	"himant_g":            0.043561,
-	"hippoglos_p":         0.075595,
-	"hs_bass":             0.043468,
-	"k_herring":           0.044814,
-	"k_salmon":            0.032183,
-	"kaluga":              0.003901,
-	"karasekarp":          0.041602,
+	"golets_lev":  0.012925,
+	"golyan":      0.046641,
+	"gorbusha":    0.048535,
+	"gudgeon":     0.043089,
+	"halibut_b":   0.037800,
+	"halibut_w":   0.005335,
+	"hi_utsri":    0.030780,
+	"himant_g":    0.043561,
+	"hippoglos_p": 0.075595,
+	"hs_bass":     0.043468,
+	"k_herring":   0.044814,
+	"k_salmon":    0.032183,
+	"kaluga":      0.003901,
+	"karasekarp":  0.041602,
 	// katran（白斑角鲨）：官方 奖杯 7kg / 蓝冠 10kg / 实测最大 11.998kg。
-	// 原 0.104552 把 3.6kg 撑成 1.6m（1.6m 角鲨实重 20~30kg）；按「12kg ≈ 1.2m」取 0.0524。
-	"katran":              0.052400,
-	"keta":                0.050000,
-	"kijuch":              0.042865,
-	"kohaku":              0.030780,
-	"kunja":               0.00009113,
-	"kutum":               0.043797,
-	"kw_tench":            0.044097,
-	"l_carp":              0.042678,
-	"l_carp_albino":       0.042678,
-	"l_carp_ghost":        0.042678,
-	"l_minnow":            0.025853,
-	"l_salmon":            0.053939,
-	"l_sturgeon":          0.006161,
-	"lamna_n":             0.005660,
-	"lampris_g":           0.002795,
-	"lenok_o":             0.050986,
-	"lenok_t":             0.043336,
-	"lh_kambala":          0.048535,
-	"lm_b_bass":           0.049529,
-	"lophius_p":           0.050937,
-	"lycodes_e":           0.044288,
-	"lycodes_s":           0.044814,
-	"m_carp":              0.042678,
-	"m_carp_albino":       0.042678,
-	"m_carp_ghost":        0.042678,
-	"m_carp_red":          0.042678,
-	"m_goshiki":           0.030780,
-	"m_molva":             0.061958,
+	// katran（白斑角鲨）：改由官服单点锚 3973g/0.736m（fish_length_official.go，
+	// k=0.04646357）决定，本地手调覆盖已撤（原 0.104552 会把 3.6kg 撑成 1.6m）。
+	"keta":          0.050000,
+	"kijuch":        0.042865,
+	"kohaku":        0.030780,
+	"kunja":         0.00009113,
+	"kutum":         0.043797,
+	"kw_tench":      0.044097,
+	"l_carp":        0.042678,
+	"l_carp_albino": 0.042678,
+	"l_carp_ghost":  0.042678,
+	"l_minnow":      0.038800,
+	"l_salmon":      0.053939,
+	"l_sturgeon":    0.006161,
+	"lamna_n":       0.005660,
+	"lampris_g":     0.002795,
+	"lenok_o":       0.050986,
+	"lenok_t":       0.043336,
+	"lh_kambala":    0.048535,
+	"lm_b_bass":     0.049529,
+	"lophius_p":     0.050937,
+	"lycodes_e":     0.044288,
+	"lycodes_s":     0.044814,
+	"m_carp":        0.042678,
+	"m_carp_albino": 0.042678,
+	"m_carp_ghost":  0.042678,
+	"m_carp_red":    0.042678,
+	"m_goshiki":     0.030780,
+	"m_molva":       0.061958,
 	// m_scorpius：短角大杜父鱼 566g 只有 0.17m；不设覆盖，回落默认立方律 0.0355。
-	"m_zubatka":           0.053436,
-	"macrourus_b":         0.069336,
-	"makrel":              0.047622,
-	"malma":               0.012226,
-	"meagre":              0.049336,
-	"menek":               0.042904,
-	"merlang":             0.048535,
-	"merluza":             0.072112,
+	"m_zubatka":   0.053436,
+	"macrourus_b": 0.069336,
+	"makrel":      0.047622,
+	"malma":       0.012226,
+	"meagre":      0.049336,
+	"menek":       0.042904,
+	"merlang":     0.048535,
+	"merluza":     0.072112,
 	// midori_g：绿鲤 32kg 只有 0.54m（同湖鳟那类：模型被画小）；不设覆盖，回落默认立方律 0.0355。
 	"mikija":              0.041885,
 	"molva":               0.056831,
@@ -173,7 +173,7 @@ var speciesLengthKOverride = map[string]float64{
 	"palia_kr":            0.014075,
 	"palia_lud":           0.015791,
 	"piksha":              0.053957,
-	"pinagor":             0.027516,
+	"pinagor":             0.033000,
 	"pollachius":          0.044964,
 	"polyprion":           0.051060,
 	"poutassou":           0.051787,
@@ -187,9 +187,10 @@ var speciesLengthKOverride = map[string]float64{
 	"rk_crab":             0.068525,
 	"rudd":                0.043679,
 	"s.orfe":              0.050397,
-	"s_bass":              0.028965,
+	"s.bream":             0.066818,
+	"s_bass":              0.032000,
 	"s_carp":              0.042678,
-	"s_freaks":            0.025746,
+	"s_freaks":            0.032200,
 	"salvel_l":            0.004837,
 	"sebastes_m":          0.040735,
 	"sebastes_n":          0.043228,
@@ -202,7 +203,7 @@ var speciesLengthKOverride = map[string]float64{
 	"stickleback_threesp": 0.046909,
 	"syb_elets":           0.047622,
 	"syb_sterlet":         0.048000,
-	"syb_vendace":         0.026930,
+	"syb_vendace":         0.037700,
 	"taimen":              0.005594,
 	"taran":               0.044756,
 	"tench":               0.044097,
@@ -256,6 +257,13 @@ var speciesLengthPOverride = map[string]float64{
 	// 廓里湖红点鲑：官服 22.7~35.1kg = 1.13~1.50m，幂律拟合 p=0.6525。
 	// 立方律下 22.2kg 只有 0.60m（旧 k=0.021413），肉眼可见地小一半。
 	"chartus_kuoriius": 0.652510,
+	// 廓里湖湖鳟鱼（gc_smelt）：静态库 max_g 只有 1.648kg，官方站点
+	// 实际最大 17.995kg、平均 6.8kg。旧 k=0.011604 是拿 1.648kg 和
+	// 小鱼体长锚出来的，4.5kg 只有 19cm。按常见湖鳟 1kg≈0.40m、
+	// 10kg≈0.95m、18kg≈1.2m 反推 p≈0.374、k≈0.0304。
+	"gc_smelt": 0.374000,
+	// midori_g：25kg 奖杯线在 0.5m 明显过短；按 25kg≈1.2m 取 p=0.34。
+	"midori_g": 0.340000,
 	// 三种红点鲑：官服实测点的幂律拟合（线性表优先，这里只作回退）
 	"a_char":  0.489400,
 	"dr_char": 0.546200,
@@ -382,6 +390,10 @@ var speciesLengthLinear = map[string]lengthCurve{
 	// 说明它和上面这批一样按「个体大小」线性映射。旧 k=0.029240 立方律在 45kg 只给 1.04m，
 	// 比官服短 45cm，玩家实测反馈「这条鱼明显比模型长」。
 	"chavycha": {1.181990, 0.0068030, 40.875, 65.862},
+
+	// 白鲷（s.bream）：旧静态曲线 p=0.2087 在 1.2kg 只给 0.293m；
+	// 按常见白鲷 0.7kg≈0.325m、1.2kg≈0.45m 补线性段。
+	"s.bream": {0.150000, 0.2500000, 0.05, 1.2},
 }
 
 // speciesLengthM 返回体长（米）。
@@ -405,14 +417,41 @@ func speciesLengthM(key string, k, p, wG float64) float64 {
 }
 
 // calibratedLengthKP 返回校准后的体长参数。
-// 只覆盖静态库仍使用默认 k/p 的鱼种；已有非默认参数代表官方样本标定曲线，必须原样保留。
+// 优先级：本种官服拟合表（n≥3）→ 本种官服单点/两点锚（含单点）→
+// 无本种实测时继承别名宿主的官服表 → 旧 KOverride/POverride（只覆盖静态库默认行；
+// 非默认行=官方标定曲线原样保留）→ 亲缘组锚（仅兜新旧表都不含且静态库为默认行的种）。
+// Linear 表种不入新表（见 fish_length_official.go 头注释），其标定链路原样保留。
 func calibratedLengthKP(key string, k, p float64) (float64, float64) {
-	v, ok := speciesLengthKOverride[key]
-	if !ok || math.Abs(k-defaultSpeciesLengthK) > 1e-9 || math.Abs(p-defaultSpeciesLengthP) > 1e-9 {
-		return k, p
+	if v, ok := fishLengthOfficialKP[key]; ok {
+		return v.k, v.p
 	}
-	if pv, ok := speciesLengthPOverride[key]; ok {
-		return v, pv
+	if v, ok := fishLengthSingleK[key]; ok {
+		return v.k, v.p
 	}
-	return v, defaultSpeciesLengthP
+	if host := fishPullAliasHost(key); host != key {
+		if v, ok := fishLengthOfficialKP[host]; ok {
+			return v.k, v.p
+		}
+		if v, ok := fishLengthSingleK[host]; ok {
+			return v.k, v.p
+		}
+	}
+	if v, ok := speciesLengthKOverride[key]; ok {
+		if math.Abs(k-defaultSpeciesLengthK) > 1e-9 || math.Abs(p-defaultSpeciesLengthP) > 1e-9 {
+			return k, p
+		}
+		if pv, ok := speciesLengthPOverride[key]; ok {
+			return v, pv
+		}
+		return v, defaultSpeciesLengthP
+	}
+	isDefault := math.Abs(k-defaultSpeciesLengthK) <= 1e-9 && math.Abs(p-defaultSpeciesLengthP) <= 1e-9
+	if isDefault {
+		if g, ok := fishPullSpeciesGroup[key]; ok {
+			if a, ok2 := fishLengthGroupAnchor[g]; ok2 {
+				return a.k, a.p
+			}
+		}
+	}
+	return k, p
 }

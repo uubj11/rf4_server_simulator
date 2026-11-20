@@ -295,16 +295,20 @@ func TestFloatSetReelLandsBiggestFishInHalfHour(t *testing.T) {
 // 拉力口径 f8(N) = w_kg × (K0 + fishPullLnSlope×ln w_kg)，K0 走 fishPullK0 / fishPullGroupK0。
 func TestReellessSetsOutpullBiggestFish(t *testing.T) {
 	pullKgf := func(species string, wKg float64) float64 {
-		k0 := 0.0
+		p := fishPullParam{}
 		if k, ok := fishPullK0[species]; ok {
-			k0 = k
+			p = k
 		} else if g, ok := fishPullSpeciesGroup[species]; ok {
-			k0 = fishPullGroupK0[g]
+			p = fishPullGroupK0[g]
 		}
-		if k0 <= 0 {
+		if p.K0 <= 0 {
 			t.Fatalf("%s 缺 K0，无法核算拉力", species)
 		}
-		return wKg * (k0 + fishPullLnSlope*math.Log(wKg)) / newtonPerKgf
+		slope := p.Slope
+		if slope < 0 {
+			slope = fishPullLnSlope
+		}
+		return wKg * (p.K0 + slope*math.Log(wKg)) / newtonPerKgf
 	}
 	cases := []struct {
 		key     string

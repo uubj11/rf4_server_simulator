@@ -97,8 +97,14 @@ func (s *SQLiteStore) LoadHandoff(ctx context.Context, token string) (*Handoff, 
 	var stateJSON string
 	err := s.DB.SQL.QueryRowContext(ctx,
 		`SELECT state_json FROM gw_handoff WHERE token=?`, token).Scan(&stateJSON)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		// 「没有可承接状态」是正常分支，用 nil, nil 表达。
 		return nil, nil
+	}
+	if err != nil {
+		// 读库真出错（库已关闭、锁冲突）必须报出去：把它当成「没有 handoff」
+		// 会让重连静默退回新密码流，日志里只留下满屏「信封解析失败」。
+		return nil, err
 	}
 	var h Handoff
 	if err := json.Unmarshal([]byte(stateJSON), &h); err != nil {

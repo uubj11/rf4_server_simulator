@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const fishEcologyProfileVersion = 3
+const (
+	fishEcologyProfileVersion = 5
+	fishDielCurveMin          = 0.08
+)
 
 //go:embed assets/fish_ecology_defs.json
 var fishEcologyDefsJSON []byte
@@ -31,6 +34,7 @@ type fishEcologyProfile struct {
 	TempPrefC      float64 `json:"temp_pref_c"`
 	TempMaxC       float64 `json:"temp_max_c"`
 	DielMask       int64   `json:"diel_mask"`
+	DielCurve      string  `json:"diel_curve"`
 	SeasonMask     int64   `json:"season_mask"`
 	DietJSON       string  `json:"diet_json"`
 	WeatherJSON    string  `json:"weather_json"`
@@ -75,16 +79,17 @@ func (s *Server) ensureFishEcology(ctx context.Context) (int, error) {
 		res, ierr := s.DB.SQL.ExecContext(ctx, `
 			INSERT INTO fish_ecology(
 				fish_key, layer_min, layer_pref, layer_max,
-				temp_min_c, temp_pref_c, temp_max_c, diel_mask,
+				temp_min_c, temp_pref_c, temp_max_c, diel_mask, diel_curve,
 				season_mask, diet_json, weather_json, action_json, substrate_json,
 				color_json, current_pref, activity, light_pref, clarity_pref,
 				aggression, rarity_tier, enabled, profile_version, source, updated_ts
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(fish_key) DO UPDATE SET
 				layer_min=excluded.layer_min, layer_pref=excluded.layer_pref,
 				layer_max=excluded.layer_max, temp_min_c=excluded.temp_min_c,
 				temp_pref_c=excluded.temp_pref_c, temp_max_c=excluded.temp_max_c,
-				diel_mask=excluded.diel_mask, season_mask=excluded.season_mask,
+				diel_mask=excluded.diel_mask, diel_curve=excluded.diel_curve,
+				season_mask=excluded.season_mask,
 				diet_json=excluded.diet_json, weather_json=excluded.weather_json,
 				action_json=excluded.action_json, substrate_json=excluded.substrate_json,
 				color_json=excluded.color_json, current_pref=excluded.current_pref,
@@ -95,7 +100,7 @@ func (s *Server) ensureFishEcology(ctx context.Context) (int, error) {
 				updated_ts=excluded.updated_ts
 			WHERE fish_ecology.profile_version < excluded.profile_version`,
 			p.FishKey, p.LayerMin, p.LayerPref, p.LayerMax,
-			p.TempMinC, p.TempPrefC, p.TempMaxC, p.DielMask,
+			p.TempMinC, p.TempPrefC, p.TempMaxC, p.DielMask, p.DielCurve,
 			p.SeasonMask, p.DietJSON, p.WeatherJSON, p.ActionJSON, p.SubstrateJSON,
 			p.ColorJSON, p.CurrentPref, p.Activity, p.LightPref, p.ClarityPref,
 			p.Aggression, p.RarityTier, boolInt(p.Enabled), p.ProfileVersion, p.Source, now)
@@ -115,7 +120,7 @@ func (s *Server) reloadFishEcologyCache(ctx context.Context) error {
 	}
 	rows, err := s.DB.SQL.QueryContext(ctx, `
 		SELECT fish_key, layer_min, layer_pref, layer_max,
-		       temp_min_c, temp_pref_c, temp_max_c, diel_mask,
+		       temp_min_c, temp_pref_c, temp_max_c, diel_mask, diel_curve,
 		       season_mask, diet_json, weather_json, action_json, substrate_json,
 		       color_json, current_pref, activity, light_pref, clarity_pref,
 		       aggression, rarity_tier, enabled, profile_version, source
@@ -130,7 +135,7 @@ func (s *Server) reloadFishEcologyCache(ctx context.Context) error {
 		var enabled int
 		if err := rows.Scan(
 			&p.FishKey, &p.LayerMin, &p.LayerPref, &p.LayerMax,
-			&p.TempMinC, &p.TempPrefC, &p.TempMaxC, &p.DielMask,
+			&p.TempMinC, &p.TempPrefC, &p.TempMaxC, &p.DielMask, &p.DielCurve,
 			&p.SeasonMask, &p.DietJSON, &p.WeatherJSON, &p.ActionJSON, &p.SubstrateJSON,
 			&p.ColorJSON, &p.CurrentPref, &p.Activity, &p.LightPref, &p.ClarityPref,
 			&p.Aggression, &p.RarityTier, &enabled, &p.ProfileVersion, &p.Source,
@@ -147,6 +152,9 @@ func (s *Server) reloadFishEcologyCache(ctx context.Context) error {
 	s.fishEcologyCache = cache
 	s.fishEcologyCacheLoaded = true
 	s.fishEcologyMu.Unlock()
+	// 生态全量重载后，节奏通路的名册食性聚合必须同步作废，否则旧聚合
+	// 活过 TTL（PR #531 审查 P2-4）。
+	s.invalidatePaceDietCache()
 	return nil
 }
 
@@ -158,6 +166,7 @@ func (s *Server) invalidateFishEcologyCache() {
 	s.fishEcologyCache = nil
 	s.fishEcologyCacheLoaded = false
 	s.fishEcologyMu.Unlock()
+	s.invalidatePaceDietCache()
 }
 
 func boolInt(v bool) int {
@@ -214,13 +223,13 @@ func (s *Server) fishEcology(ctx context.Context, key string) fishEcologyProfile
 	var enabled, profileVersion int
 	err := s.DB.SQL.QueryRowContext(ctx, `
 		SELECT fish_key, layer_min, layer_pref, layer_max,
-		       temp_min_c, temp_pref_c, temp_max_c, diel_mask,
+		       temp_min_c, temp_pref_c, temp_max_c, diel_mask, diel_curve,
 		       season_mask, diet_json, weather_json, action_json, substrate_json,
 		       color_json, current_pref, activity, light_pref, clarity_pref,
 		       aggression, rarity_tier, enabled, profile_version, source
 		FROM fish_ecology WHERE fish_key=?`, key).Scan(
 		&p.FishKey, &p.LayerMin, &p.LayerPref, &p.LayerMax,
-		&p.TempMinC, &p.TempPrefC, &p.TempMaxC, &p.DielMask,
+		&p.TempMinC, &p.TempPrefC, &p.TempMaxC, &p.DielMask, &p.DielCurve,
 		&p.SeasonMask, &p.DietJSON, &p.WeatherJSON, &p.ActionJSON, &p.SubstrateJSON,
 		&p.ColorJSON, &p.CurrentPref, &p.Activity, &p.LightPref, &p.ClarityPref,
 		&p.Aggression, &p.RarityTier, &enabled, &profileVersion, &p.Source)
@@ -236,17 +245,34 @@ func normalizeWaterLayer(v float64) float64 {
 	return math.Max(0, math.Min(1, v))
 }
 
+// effectiveLureLayer 返回判鱼用的路亚实时水层（评审 P3 统一口径）：
+// 14/7 运动证据优先；无证据按 runtime 拟饵名义泳层兜底；再兜底中层 .5。
+// 三处消费者（rigWaterLayer / effectiveBaitDepthCMLocked / fishLureWeight）
+// 必须同口径，避免 LureLayer=0 的"未知"态被各处解释成不同泳层。
+func effectiveLureLayer(c fishRollContext) float64 {
+	if c.lureLayer > 0 {
+		return normalizeWaterLayer(c.lureLayer)
+	}
+	if c.runtime != nil && c.runtime.lureKnown && c.runtime.lure.DiveDepth > 0 {
+		return normalizeWaterLayer(c.runtime.lure.DiveDepth)
+	}
+	return .5
+}
+
 func (s *Server) rigWaterLayer(c fishRollContext) float64 {
 	if bottomRigTypes[c.rigType] {
 		return .93
 	}
 	if rigTypeLureFamily[c.rigType] {
-		if c.lureLayer > 0 {
-			return normalizeWaterLayer(c.lureLayer)
-		}
-		return .5
+		// 无运动证据时按饵的名义泳层兜底，而不是一律中层 .5——水面系饵
+		// 刚入水还没上报动作时按 .5 判鱼会错过表层掠食鱼。
+		return effectiveLureLayer(c)
 	}
 	if c.depthCM > 0 {
+		// 浮钓保持旧的 5m 满刻度：区域查询的批量/逐点天气权重必须有
+		// 与点位无关的水层口径；按 spotEnv 实际水深归一会让同一张图的
+		// 不同落点算出不同水温/光照，批量捕获无法与逐点生产权重对上
+		// （TestFishQueryRegionCaptureMatchesPointCalculation）。评审 P2-2 回退。
 		return normalizeWaterLayer(float64(c.depthCM) / 500)
 	}
 	return .45
@@ -267,22 +293,22 @@ func (s *Server) fishLayerWeight(ctx context.Context, key string, c fishRollCont
 	return s.fishLayerWeightProfile(p, c)
 }
 
+// fishLayerWeightProfile 按当前钓法水层与鱼种区间计算软匹配权重：
+// 区间（±0.08 容差）内保留 pref 高斯峰（精确命中偏好层 ≈1.0）与 0.75 地板，
+// 区间外对称指数衰减（k=2），下限 0.02 保留杂口。旧版只罚"底钓打表层鱼"
+// 与"路亚比鱼深"两个方向，水面饵打底层鱼只走高斯尾巴（v4 区间收窄后
+// 仍有 ~0.27），是水面系上底鱼的根因之一；对称化后衰减与方向无关。
 func (s *Server) fishLayerWeightProfile(p fishEcologyProfile, c fishRollContext) float64 {
 	target := s.rigWaterLayer(c)
-	mid := p.LayerPref
-	half := math.Max(.08, (p.LayerMax-p.LayerMin)/2)
-	z := (target - mid) / half
-	factor := .12 + .88*math.Exp(-.5*z*z)
-	if target >= p.LayerMin-.08 && target <= p.LayerMax+.08 {
-		factor = math.Max(factor, .75)
+	lo, hi := p.LayerMin, p.LayerMax
+	if target >= lo-.08 && target <= hi+.08 {
+		half := math.Max(.08, (hi-lo)/2)
+		z := (target - p.LayerPref) / half
+		return math.Max(.75, .12+.88*math.Exp(-.5*z*z))
 	}
-	if bottomRigTypes[c.rigType] && p.LayerMax < .55 {
-		factor *= .05
-	}
-	if rigTypeLureFamily[c.rigType] && target > p.LayerMax+.15 {
-		factor *= .2
-	}
-	return math.Max(.005, factor)
+	half := math.Max(.08, (hi-lo)/2)
+	out := math.Max(lo-.08-target, target-hi-.08) / half
+	return math.Max(.02, .75*math.Exp(-2*out))
 }
 
 func (s *Server) fishBiteEnvironmentWeight(ctx context.Context, key string, c fishRollContext) float64 {
@@ -309,7 +335,7 @@ func (s *Server) fishBiteEnvironmentWeight(ctx context.Context, key string, c fi
 		value: s.fishLayerWeightProfile(p, c), tolerance: c.skill.LayerAccuracy,
 	}}
 	_, hour := worldDayAndHour(c.now.Unix())
-	factors = append(factors, weightedFactor{s.fishDielWeight(p, hour), c.skill.EcologyInterest})
+	factors = append(factors, weightedFactor{fishDielWeight(p, hour), c.skill.EcologyInterest})
 	water := fishWaterConditionsFor(p, c)
 	factors = append(factors,
 		weightedFactor{fishSeasonWeight(p, water.Season), c.skill.WeatherAdaptation},
@@ -372,22 +398,36 @@ func fishActivityForHour(hour int64) float64 {
 	}
 }
 
-// fishDielWeight 昼夜权重。命中时段的鱼满权，非命中时段按 fish_diel_bias 打折。
-// 本地服：折扣由硬编码 0.35 改为 tunable（默认 0.35，调到 1 等于昼夜无差别），
-// 保证「任何时间都能钓到本图任意鱼种」，昼夜只改概率高低、不做禁止。
-func (s *Server) fishDielWeight(profile fishEcologyProfile, hour int64) float64 {
-	bit := uint(fishActivityForHour(hour))
-	if profile.DielMask&(1<<bit) != 0 {
+// dielCurveWeights 解析四段权重（夜、晨、昼、昏）。为空表示该鱼只有旧版
+// diel_mask 位图，调用方回退到位图判断。
+func dielCurveWeights(raw string) []float64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var w []float64
+	if err := json.Unmarshal([]byte(raw), &w); err != nil || len(w) != 4 {
+		return nil
+	}
+	for i := range w {
+		w[i] = clampFloat(w[i], 0, 1)
+	}
+	return w
+}
+
+// fishDielWeight 返回当前时段对吃口的影响系数。有曲线时按窗口期加权：
+// 峰值段 1.0、次优段按观测比例衰减、非活跃段最低 0.08（接近不出但不置零）。
+// 无曲线的旧版 diel_mask 鱼种：命中时段满权，非命中时段 0.35（昼夜只改概率、
+// 不做禁止，保证「任何时间都能钓到本图任意鱼种」）。
+func fishDielWeight(profile fishEcologyProfile, hour int64) float64 {
+	bit := int(fishActivityForHour(hour))
+	if curve := dielCurveWeights(profile.DielCurve); curve != nil {
+		return clampFloat(curve[bit], fishDielCurveMin, 1)
+	}
+	if profile.DielMask&(1<<uint(bit)) != 0 {
 		return 1
 	}
-	bias := s.tunableF("fish_diel_bias", .35)
-	if bias <= 0 {
-		bias = .01
-	}
-	if bias > 1 {
-		bias = 1
-	}
-	return bias
+	return .35
 }
 
 func fishEcologyJSONMap(raw string) map[string]float64 {
@@ -544,36 +584,44 @@ func fishEcologyActionWeight(weights map[string]float64, action string) (float64
 	return 0, false
 }
 
-func lureLayerFromMotion(mask uint32, previous float64) float64 {
+// lureLayerFromMotion 由 14/7 运动位推导实时水层。dive 是当前拟饵的名义泳层
+// （loadLureAttributes 的 DiveDepth），>0 时把结果钳进 dive+0.15 以内：运动位
+// 是玩家操作意图，但饵的物理泳层有上限——水面系饵（dive≈0.10）的匀速收线
+// 旧版会按 +0.03 无界漂到中层甚至底层，深潜铁板的跳底位也会越过物理深度。
+// 水面动作位（0x1000/0x100/0x20）不受钳制：把深潜饵快收到水面是真实操作。
+func lureLayerFromMotion(mask uint32, previous, dive float64) float64 {
 	if previous <= 0 {
 		previous = .5
 	}
 	mask &= lureMotionStatusMask
+	layer := previous
 	switch {
 	case mask&0x1000 != 0:
-		return .08
+		layer = .08
 	// 犬步（WalkDog）是水面系的收线动作：没有这个分支时会落到 default，
 	// 水面拟饵被当成中层（previous≈.5）判鱼，只能抽到中层鱼，客户端
 	// 表现为"鱼来了但不咬"。激溅（0x20）同理，只是可能同时带收线位。
 	case mask&0x100 != 0:
-		return .06
+		layer = .06
 	case mask&0x80000 != 0:
-		return normalizeWaterLayer(previous + .08)
+		layer = normalizeWaterLayer(previous + .08)
 	case mask&0x20 != 0:
 		// 激溅是主动作，可能同时带收线位 0x400 或其它水层位；必须优先于
 		// 收线/静止分支，保持与 classifyLureMotion 一致。
-		return .08
+		layer = .08
 	case mask&0x200000 != 0:
-		return normalizeWaterLayer(previous - .08)
+		layer = normalizeWaterLayer(previous - .08)
 	case mask&0x2000 != 0, mask&0x400000 != 0:
-		return .94
+		layer = .94
 	case mask&0x800 != 0:
-		return .92
+		layer = .92
 	case mask&0x200 != 0:
-		return .55
+		layer = .55
 	case mask&0x400 != 0:
-		return normalizeWaterLayer(previous + .03)
-	default:
-		return normalizeWaterLayer(previous)
+		layer = normalizeWaterLayer(previous + .03)
 	}
+	if dive > 0 {
+		layer = math.Min(layer, dive+.15)
+	}
+	return normalizeWaterLayer(layer)
 }

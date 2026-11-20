@@ -69,9 +69,9 @@ var fishModelVariants = map[string]fishModelVariant{
 		female: []string{"burbot", "burbot_2"},
 		male:   []string{"burbot", "burbot_2"},
 	},
-	// bs_salmon：资源包里确有 bs_salmon / bs_salmon_2 两族，但当前 252 个鱼种 key
-	// 里没有任何一个叫 bs_salmon（a_salmon / k_salmon / l_salmon 都另有默认族，
-	// 且没有编号族），保留条目等官方补鱼种时直接命中，现在不会触发。
+	// bs_salmon：资源包里有 bs_salmon / bs_salmon_2 两族。2026-11-15 起物种表
+	// 已收录 bs_salmon（隆头鳟），此前的「key 不存在、永不命中」状态解除，
+	// 该条目开始实际生效。
 	"bs_salmon": {
 		female: []string{"bs_salmon", "bs_salmon_2"},
 		male:   []string{"bs_salmon", "bs_salmon_2"},

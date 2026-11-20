@@ -1,16 +1,23 @@
 package proto
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 // RC4Stream 表示标准 RC4 的 256 字节 S-box 和跨帧连续状态。
 //
 // 客户端和服务端各持两条独立流（TX/RX），密钥是登录 token 的 UTF-8 字节。
 // RC4 只覆盖 13 字节帧头之后的 payload；keystream 跨帧连续，任何错位都会
 // 导致后续帧永久失步，因此发送必须串行化。
+//
+// mu 让 Crypt 与 Export 互斥：Export 要在快照期间拷贝 256 字节 S-box，
+// 若与 Crypt 并发，快照可能拿到「旧 S-box + 新 i/j」，承接后 keystream 永久错位。
 type RC4Stream struct {
-	s [256]byte
-	i byte
-	j byte
+	mu sync.Mutex
+	s  [256]byte
+	i  byte
+	j  byte
 }
 
 // NewRC4 用 key 做 KSA。
@@ -32,6 +39,8 @@ func NewRC4(key []byte) (*RC4Stream, error) {
 
 // Crypt 原地等价地加/解密并推进流状态（RC4 对称）。返回新切片。
 func (st *RC4Stream) Crypt(data []byte) []byte {
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	out := make([]byte, len(data))
 	i, j := st.i, st.j
 	s := &st.s
@@ -52,8 +61,12 @@ type RC4State struct {
 	J byte
 }
 
-// Export 导出当前流状态。
-func (st *RC4Stream) Export() RC4State { return RC4State{S: st.s, I: st.i, J: st.j} }
+// Export 导出当前流状态（与 Crypt 互斥，保证 S-box 与 i/j 是同一时刻）。
+func (st *RC4Stream) Export() RC4State {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return RC4State{S: st.s, I: st.i, J: st.j}
+}
 
 // Restore 以导出的状态重建流（承接既有密码流）。
 func Restore(state RC4State) *RC4Stream {

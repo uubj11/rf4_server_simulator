@@ -9,14 +9,56 @@ import (
 )
 
 // 无轮手竿和缺少装配数据时保留旧协议基线；带轮竿使用综合物理模型。
+// 标称距离是修正器链的 100% 力度乘法基准。官方用户手册把「釣り竿の特性：
+// 長さ、構造、強さ」列为飞距离要素，因此淡水路亚标称必须随竿的 Test 上限
+// 放大，而不是全族共用一个常量（上游 #464 把 45 一刀切成 27.5，UL 与 MH
+// 共用同一个基准，大竿因此被压到 20m 出头）。
+//
+// 曲线的截距与指数由一个确认的外部锚点 + 一条内部回归基线决定：
+//   - Test 4g 竿 + 满熟练满技能 + 未改装低轮廓水滴轮 + 3.5g 载荷 = 27m
+//     （俄服实测；改装 CHYB 轴承与增距润滑油后 30m+，改装是额外距离，
+//     不并入技能乘数）——这是目前**唯一确认的官服锚点**。
+//   - Test 49g 竿 + 63g 载荷 + 6000 线杯 ≈ 50m。这个 50m **不是官服实测**：
+//     它来自对「49g 竿封顶 50」的误读，那句话指的是竿的 Test 上限约 50g，
+//     不是抛投米数。这里只当内部回归基线用，挡住曲线中段漂移。
+//
+// 由此反解得截距 23.06、路亚指数 0.41（见 specs/changes/cast-rod-test-scaling）。
+// 指数同时受「同族内距离必须随 Test 单调、且两端不失控」约束；中重装档的官服
+// 实测值补齐后，必须用真实锚点重解指数并同步回归基线。
+//
+// 非路亚族（手竿/浮钓/底钓/鲤鱼竿）同样必须随竿 Test 放大：德语官服论坛
+// topic 2219 的实测里，3.9m 鲤鱼竿配 140g 铅坠能打出 135-146m，而上游的
+// 固定 60 基准把同一配置压到 49m（差近 3 倍）。该族用同一锚点档，指数
+// 由同帖四条重装实测（95 / 105-110 / 115 / 135 / 146m）逐条反解、取中位
+// 0.29（区间 0.265~0.326），证据等级低于路亚两锚点，见同 spec 的风险项。
+// 海钓路亚（50-54，远投场景）暂留旧值 45 待补锚点。
 const (
 	castBaseFloatM   float32 = 7.5461488
 	castBaseLureM    float32 = 7.1598907
 	castBaseDefaultM float32 = castBaseFloatM
 
-	castNominalDefaultM = 60.0
-	castNominalLureM    = 45.0
-	castMinPoweredM     = 8.0
+	castNominalDefaultM    = 60.0
+	castNominalMarineLureM = 45.0
+	castMinPoweredM        = 8.0
+
+	// castNominalTestAnchorG 是标称曲线的锚点 Test 上限：该档对应官服 UL
+	// 实测 27m（满技能）。
+	castNominalTestAnchorG = 4.0
+)
+
+// 标称曲线的截距与指数。用 var 而非 const，便于测试按锚点重定标
+// 后回填；生产代码只读。
+var (
+	// castNominalLureM 是锚点档（castNominalTestAnchorG）的标称距离。
+	castNominalLureM = 23.06
+	// castNominalTestExp 是路亚族标称随 Test 上限放大的指数，由 Test 49g
+	// 锚点反解。
+	castNominalTestExp = 0.41
+	// castNominalDefaultTestExp 是非路亚族（手竿/浮钓/底钓/鲤鱼竿）的指数。
+	// 德语官服论坛 topic 2219 同帖有四条重装实测（95 / 105-110 / 115 / 135 /
+	// 146m，配置差异主要在竿与轮），逐条反解得到 0.265~0.326 的区间；取中位
+	// 0.29 而不是最高配那条的 0.326，避免把整族都按顶配推到上限。
+	castNominalDefaultTestExp = 0.29
 )
 
 // CastDistanceContext 是抛投模型的一次只读输入。后续加入风力、抛投姿势、
@@ -49,7 +91,7 @@ type CastDistanceContext struct {
 	PlayerSecondary      float64
 	SkillCategory        int64
 	SkillMastery         float64
-	SkillNodeEffect      float64
+	SkillCastPct         float64
 }
 
 // CastDistanceModifier 是可扩展的抛投距离变量接口。Factor 返回乘数；
@@ -115,7 +157,7 @@ var builtInCastModifiers = []CastDistanceModifier{
 		return castMasteryFactor(c.SkillMastery)
 	}},
 	castDistanceModifierFunc{name: "special_skill", fn: func(c CastDistanceContext) float64 {
-		return castSpecialSkillFactor(c.SkillNodeEffect)
+		return castSpecialSkillFactor(c.SkillCastPct)
 	}},
 	castDistanceModifierFunc{name: "line_diameter", fn: func(c CastDistanceContext) float64 {
 		return castLineDiameterFactor(c.LineDiameterMM)
@@ -139,7 +181,7 @@ var builtInCastModifiers = []CastDistanceModifier{
 		return castReelTypeFactor(c.ReelType)
 	}},
 	castDistanceModifierFunc{name: "player_state", fn: func(c CastDistanceContext) float64 {
-		return castPlayerStateFactor(c.PlayerPrimary, c.PlayerSecondary)
+		return castPlayerStateFactor(c.PlayerPrimary)
 	}},
 	castDistanceModifierFunc{name: "reel_friction", fn: func(c CastDistanceContext) float64 {
 		return clampFloat(c.ReelEfficiency, 0.25, 1)
@@ -187,7 +229,7 @@ type castDistanceProfile struct {
 	WeightFactor       float64
 	SkillCategory      int64
 	SkillMastery       float64
-	SkillNodeEffect    float64
+	SkillCastPct       float64
 	SkillFactor        float64
 	SpecialSkillFactor float64
 	LengthFactor       float64
@@ -351,13 +393,12 @@ func castReelTypeFactor(reelType int64) float64 {
 	}
 }
 
-// castPlayerStateFactor 玩家状态修正器：精力/饱食度越低抛得越近。
-// 0 值是真实空状态，按 0 参与加权、落到 0.70 下限；
-// 不再把 <=0 重置为默认值（旧边界会把真·空状态当成满状态）。
-func castPlayerStateFactor(primary, secondary float64) float64 {
-	state := 0.55*(primary/defaultPlayerConditionPrimary) +
-		0.45*(secondary/defaultPlayerConditionSecondary)
-	return clampFloat(state, 0.70, 1.03)
+// castPlayerStateFactor 玩家状态修正器：只按主状态（精力）比例缩放抛距。
+// 饱食度影响恢复与健康，不进抛投（2026-11 用户裁决：抛距由体力决定；
+// 0.55/0.45 加权是本地自造标定，无官服依据）。0 值是真实空状态，
+// 按 0 计、落到 0.70 下限；不再把 <=0 重置为默认值。
+func castPlayerStateFactor(primary float64) float64 {
+	return clampFloat(primary/defaultPlayerConditionPrimary, 0.70, 1.03)
 }
 
 func clampFloat(v, lo, hi float64) float64 {
@@ -382,10 +423,33 @@ func castBaseDistanceBits(rigType int64) uint32 {
 }
 
 func castNominalDistanceM(rigType int64) float64 {
-	if rigTypeLureFamily[rigType] {
-		return castNominalLureM
+	return castNominalDistanceForRod(rigType, 0)
+}
+
+// castNominalDistanceForRod 按竿的 Test 上限给出标称距离。
+// 官方手册「飛距離は以下の要素で決まります」第 3 条是「釣り竿の特性：
+// 長さ、構造、強さ」，所以标称必须随竿变化。Test 缺失（<=0）回落到族
+// 常量，避免未登记 Test 的竿凭空拿到大竿的标称。
+func castNominalDistanceForRod(rigType int64, testMaxG float64) float64 {
+	if marineRigType(rigType) {
+		// 海钓路亚 50-54 远投场景，锚点未取到前保留旧标称。
+		return castNominalMarineLureM
 	}
-	return castNominalDefaultM
+	if math.IsNaN(testMaxG) || testMaxG <= 0 {
+		if rigTypeLureFamily[rigType] {
+			return castNominalLureM
+		}
+		return castNominalDefaultM
+	}
+	t := testMaxG
+	if t < castNominalTestAnchorG {
+		t = castNominalTestAnchorG
+	}
+	exp := castNominalTestExp
+	if !rigTypeLureFamily[rigType] {
+		exp = castNominalDefaultTestExp
+	}
+	return castNominalLureM * math.Pow(t/castNominalTestAnchorG, exp)
 }
 
 // rodTestWeightFactor 把线组载荷换算为抛投重量系数。
@@ -398,9 +462,13 @@ func castNominalDistanceM(rigType int64) float64 {
 // 衰减只在 payload > testMax 时生效，Test 区间内的标定保持原曲线，
 // 因此既有距离区间不受影响。该系数只影响抛投，不参与断线或炸杆；
 // 炸杆仍由搏鱼张力决定（见 gear_damage.go）。
+//
+// 静态竿库中约两成竿未登记 Test 区间（testMax 缺失）。未登记不等于无限
+// 承重：缺数据时按偏保守的固定折减 0.85 处理，避免这类竿抛得比登记了
+// 合适 Test 区间的竿更远。
 func rodTestWeightFactor(payloadG, testMinG, testMaxG float64) float64 {
 	if testMaxG <= 0 {
-		return 1
+		return 0.85
 	}
 	if testMinG < 0 {
 		testMinG = 0
@@ -456,12 +524,15 @@ func castMasteryFactor(mastery float64) float64 {
 }
 
 // 已学习技能节点作为独立的特殊技能变量，避免与大类熟练度重复计算。
-func castSpecialSkillFactor(nodeEffect float64) float64 {
-	return 1 + clampFloat(nodeEffect*0.002, 0, 0.08)
+// castPct 是官方加成百分比的和（投距类 +5%/级，见
+// docs/cast-skill-official-effects.md），直接换算成乘数；
+// 极端值由 calculateCastDistance 的因子钳位兜底。
+func castSpecialSkillFactor(castPct float64) float64 {
+	return 1 + castPct/100
 }
 
-func castSkillFactor(mastery, nodeEffect float64) float64 {
-	return castMasteryFactor(mastery) * castSpecialSkillFactor(nodeEffect)
+func castSkillFactor(mastery, castPct float64) float64 {
+	return castMasteryFactor(mastery) * castSpecialSkillFactor(castPct)
 }
 
 func castModifiersSnapshot() []CastDistanceModifier {
@@ -474,7 +545,7 @@ func castModifiersSnapshot() []CastDistanceModifier {
 }
 
 func calculateCastDistance(c CastDistanceContext) (float64, map[string]float64) {
-	distance := castNominalDistanceM(c.RigType)
+	distance := castNominalDistanceForRod(c.RigType, c.RodTestMaxG)
 	factors := make(map[string]float64)
 	for _, modifier := range castModifiersSnapshot() {
 		if modifier == nil {
@@ -507,7 +578,28 @@ func (s *Server) castDistanceForRig(ctx context.Context, uid int64, rodGUID stri
 	}
 
 	ids := s.rigGearIDs(ctx, uid, rodGUID)
+	rodType := int64(0)
+	if rod, rerr := s.DB.GetItemByGUID(ctx, rodGUID); rerr == nil && rod != nil {
+		if def, derr := s.itemDefForRow(ctx, rod); derr == nil {
+			// 竿型（fopbhlmkcpe）是投距技能的竿侧 gate 输入；无轮手竿也要用。
+			if v, ok := defAttrF64(def, "fopbhlmkcpe"); ok {
+				rodType = int64(v)
+			}
+			p.RodLengthM = rodLengthM(def)
+			p.RodAction = rodAction(def)
+			p.RodStiffness = rodStiffness(def)
+			p.RodSensitivity = rodSensitivity(def)
+			p.RodTestMinG, p.RodTestMaxG = rodTestG(def)
+		}
+	}
 	if ids.ReelGUID == "" {
+		// 无轮手竿没有 reel 性能/线杯/主线修正，但仍吃竿侧投距技能
+		// （501 手竿、503 博洛尼亚、507 比赛竿等 gate 按竿型匹配）。
+		// 旧协议距离是该分支的基数，技能只做乘数，不改变无技能时的行为。
+		p.SkillCategory, p.SkillMastery, p.SkillCastPct =
+			s.castSkillStats(ctx, uid, rigType, rodType, 0, rodGUID)
+		p.SpecialSkillFactor = castSpecialSkillFactor(p.SkillCastPct)
+		p.DistanceM = p.BaseM * p.SpecialSkillFactor
 		return p
 	}
 	reel, err := s.DB.GetItemByGUID(ctx, ids.ReelGUID)
@@ -517,16 +609,6 @@ func (s *Server) castDistanceForRig(ctx context.Context, uid int64, rodGUID stri
 	perf, err := s.syncReelPerformance(ctx, reel)
 	if err != nil || perf == nil {
 		return p
-	}
-
-	if rod, rerr := s.DB.GetItemByGUID(ctx, rodGUID); rerr == nil && rod != nil {
-		if def, derr := s.itemDefForRow(ctx, rod); derr == nil {
-			p.RodLengthM = rodLengthM(def)
-			p.RodAction = rodAction(def)
-			p.RodStiffness = rodStiffness(def)
-			p.RodSensitivity = rodSensitivity(def)
-			p.RodTestMinG, p.RodTestMaxG = rodTestG(def)
-		}
 	}
 
 	line := s.castLineStats(ctx, rodGUID, ids.Line)
@@ -551,9 +633,10 @@ func (s *Server) castDistanceForRig(ctx context.Context, uid int64, rodGUID stri
 	// “重量饵”是否来自同一个 f5 装配。饵 ID 本身不做距离乘数，真正
 	// 进入物理计算的是上方汇总出的真实重量。
 	p.BaitItemID = s.currentBait(ctx, rodGUID)
-	p.SkillCategory, p.SkillMastery, p.SkillNodeEffect = s.castSkillStats(ctx, uid, rigType, rodGUID)
-	p.PlayerPrimary, p.PlayerSecondary = s.castPlayerCondition(ctx, uid)
+	// 轮型先于技能统计加载：投距技能按竿/轮的 fopbhlmkcpe 匹配 gate。
 	p.ReelType, p.SpoolSize, p.SpoolCapacityM = s.castReelSpoolStats(ctx, reel, ids.Line)
+	p.SkillCategory, p.SkillMastery, p.SkillCastPct = s.castSkillStats(ctx, uid, rigType, rodType, p.ReelType, rodGUID)
+	p.PlayerPrimary, p.PlayerSecondary = s.castPlayerCondition(ctx, uid)
 	if p.SpoolCapacityM > 0 && p.LineLengthM > 0 {
 		// 线长是整盘标称长度；超过杯容量时按容量计，避免 600m 线盘被当成
 		// 25 倍超装。
@@ -572,9 +655,9 @@ func (s *Server) castDistanceForRig(ctx context.Context, uid int64, rodGUID stri
 		LineStretch: p.LineStretch, LineMaterial: p.LineMaterial,
 		LineLinearDensityGPM: p.LineLinearDensityGPM, LineRunningWeightG: p.LineRunningWeightG,
 		PlayerPrimary: p.PlayerPrimary, PlayerSecondary: p.PlayerSecondary,
-		SkillCategory: p.SkillCategory, SkillMastery: p.SkillMastery, SkillNodeEffect: p.SkillNodeEffect,
+		SkillCategory: p.SkillCategory, SkillMastery: p.SkillMastery, SkillCastPct: p.SkillCastPct,
 	}
-	p.BaseM = castNominalDistanceM(rigType)
+	p.BaseM = castNominalDistanceForRod(rigType, p.RodTestMaxG)
 	p.Friction = perf.CastFriction
 	p.Efficiency = perf.CastEfficiency
 	p.BearingQuality = perf.BearingQuality
@@ -595,8 +678,12 @@ func (s *Server) castDistanceForRig(ctx context.Context, uid int64, rodGUID stri
 		p.DistanceM = math.Min(p.DistanceM, p.LineLimitM)
 	}
 	if clip, ok := s.savedReelClipM(ctx, rodGUID); ok && clip > 0 {
+		// 卡线不折进 DistanceM：158.f1 是客户端力度条量程，必须保持全量程，
+		// 贴卡由客户端按竿树 153.f5 截停（官方语义：满格=物理满距，卡线是
+		// 机械止线）。折进量程会把力度条缩成 0..卡米，小于卡米的力度永远
+		// 贴不到卡米数（2026-11-19 实机实证：卡 8 时 requested 5.88~7.64
+		// 全部按比例缩水）。只作为 ClipLimitM 元数据供 hCast 收口与日志。
 		p.ClipLimitM = float64(clip)
-		p.DistanceM = math.Min(p.DistanceM, p.ClipLimitM)
 	}
 	if p.DistanceM < 0.5 {
 		p.DistanceM = 0.5

@@ -26,8 +26,8 @@ func TestFishGradeLinesCoverEverySpecies(t *testing.T) {
 	if err := db.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM fish_grade_lines`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 252 {
-		t.Fatalf("三色标记录=%d，期望252", count)
+	if count != 253 {
+		t.Fatalf("三色标记录=%d，期望253", count)
 	}
 	var missing int
 	if err := db.SQL.QueryRowContext(ctx, `

@@ -78,11 +78,12 @@ func (s *Server) resolveBaitRule(ctx context.Context, fishZh string) (fishBaitRu
 	if ov, ok := s.baitOverrides(ctx)[key]; ok {
 		return ov.rule, ov.rot
 	}
-	r, ok := fishBaitRules[key]
-	if !ok {
-		return fishBaitRule{}, baitRotation{}
+	// 库里的鱼名并不统一（泥鳅鱼/泥鳅、大西洋鲑/大西洋鲑鱼），必须走归一查找，
+	// 否则同一条鱼会因为名字取到哪一版而时有时无地丢掉整条规则。
+	if r, ok := lookupFishBaitRule(fishZh); ok {
+		return r, baitRotation{}
 	}
-	return r, baitRotation{}
+	return fishBaitRule{}, baitRotation{}
 }
 
 // baitOverrides 读取后台覆盖并缓存；写操作会主动清缓存，这里再兜一层 TTL。

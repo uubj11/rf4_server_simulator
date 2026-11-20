@@ -234,7 +234,7 @@ func TestWorkshopReelRepairRejectsGoldPayment(t *testing.T) {
 	}
 }
 
-func TestWorkshopReelRepairFullPartDoesNotFreeWholeService(t *testing.T) {
+func TestWorkshopReelRepairFullPartLeavesOtherWearUnchanged(t *testing.T) {
 	srv, db := newStaticRigTestServer(t)
 	reel, gearID := seedWornWorkshopReel(t, srv, db, 1, .2, .5, .5)
 	ctx := t.Context()
@@ -252,27 +252,27 @@ func TestWorkshopReelRepairFullPartDoesNotFreeWholeService(t *testing.T) {
 		Log:  logging.Discard(),
 	}
 	if body, ok := hWorkshopOrder(c); !ok || len(body) == 0 {
-		t.Fatal("满耐久齿轮不应阻止其他磨损件正常计费修理")
+		t.Fatal("满耐久齿轮应返回当前装备")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Silver >= 10000 {
-		t.Fatalf("整机保养必须按实际磨损收费，余额仍为 %d", profile.Silver)
+	if profile.Silver != 10000 {
+		t.Fatalf("满耐久齿轮不应扣费，余额为 %d", profile.Silver)
 	}
 	fresh := mustItem(t, db, reel.GUID)
-	if fresh.Durability != 1 {
-		t.Fatalf("整机保养后本体耐久应为 1，实得 %v", fresh.Durability)
+	if fresh.Durability != .5 {
+		t.Fatalf("无操作本体耐久应保持 .5，实得 %v", fresh.Durability)
 	}
 	fields := snapshotFields(t, fresh.FieldsJSON)
 	washer, _ := snapshotPart(t, srv, fields, reelPartCatWasher)
-	if got := snapshotFloat(washer.Fields, washer.Class, csDurability); math.Abs(got-1) > 1e-6 {
-		t.Fatalf("整机保养后摩擦片耐久应为 1，实得 %v", got)
+	if got := snapshotFloat(washer.Fields, washer.Class, csDurability); math.Abs(got-.2) > 1e-6 {
+		t.Fatalf("未选择的摩擦片耐久应保持 .2，实得 %v", got)
 	}
 }
 
-func TestWorkshopReelRepairRejectsZeroCost(t *testing.T) {
+func TestWorkshopReelRepairZeroCostReturnsCurrentItem(t *testing.T) {
 	srv, db := newStaticRigTestServer(t)
 	reel, gearID := seedWornWorkshopReel(t, srv, db, 1, 1, 1, 1)
 	ctx := t.Context()
@@ -289,12 +289,27 @@ func TestWorkshopReelRepairRejectsZeroCost(t *testing.T) {
 		Tree: snapshotWorkshopRequestPart(reel.GUID, uint32(reelPartCatGear), gearID, 0),
 		Log:  logging.Discard(),
 	}
-	// 官方客户端会把一次改造拆成两包 21/3 连发（换件 + 收尾确认）。第一包已把
-	// 耐久修满并扣费，第二包必然落在“同型号修理、零磨损、0 元”上。若这里拒绝，
-	// 客户端会把坏包解析成 InvalidCastException 并弹“发生内部错误”，而改造其实
-	// 已经生效。所以零金额改动必须回成功（幂等），但绝不能写流水、不能扣费。
-	if body, ok := hWorkshopOrder(c); !ok || len(body) == 0 {
-		t.Fatal("零金额改动应幂等回当前物品树，而不是报错")
+	for _, sub := range []int{3, 4} {
+		c.Sub = sub
+		body, ok := hWorkshopOrder(c)
+		if !ok {
+			t.Fatalf("21/%d 无磨损请求应返回当前装备，不能落入空列表兜底", sub)
+		}
+		tree, _, err := proto.DecodeValue(body, 0, srv.Table())
+		if err != nil || tree == nil || tree.Kind != proto.KindObj || tree.Class != reel.WireClass {
+			t.Fatalf("21/%d 响应不是当前装备: tree=%v err=%v", sub, tree, err)
+		}
+		fresh := mustItem(t, db, reel.GUID)
+		if fresh.FieldsJSON != reel.FieldsJSON || fresh.Durability != reel.Durability {
+			t.Fatal("无磨损请求不得修改装备")
+		}
+		profile, err := db.GetProfile(ctx, uid)
+		if err != nil || profile.Silver != 1000 || profile.Gold != 0 {
+			t.Fatalf("无磨损请求不得扣费: profile=%v err=%v", profile, err)
+		}
+		if len(c.afterResponse) != 0 {
+			t.Fatal("无磨损请求不应发送装备更新推送")
+		}
 	}
 	var txnCount int
 	if err := db.SQL.QueryRowContext(ctx,
@@ -306,7 +321,7 @@ func TestWorkshopReelRepairRejectsZeroCost(t *testing.T) {
 	}
 }
 
-func TestWorkshopReelRepairChargesAllRestoredWear(t *testing.T) {
+func TestWorkshopReelRepairChargesSelectedWear(t *testing.T) {
 	srv, db := newStaticRigTestServer(t)
 	reel, gearID := seedWornWorkshopReel(t, srv, db, .8, .2, .5, .5)
 	ctx := t.Context()
@@ -324,20 +339,99 @@ func TestWorkshopReelRepairChargesAllRestoredWear(t *testing.T) {
 		Log:  logging.Discard(),
 	}
 	if body, ok := hWorkshopOrder(c); !ok || len(body) == 0 {
-		t.Fatal("整机保养订单失败")
+		t.Fatal("所选部件修理订单失败")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 齿轮 0.2 + 摩擦片 0.8 + 轴承 0.5 = 1.5 个满磨损单位。
-	wantCost := int64(math.Round(1.5 * 500))
+	// 仅修齿轮：20% 磨损 * 500 = 100。
+	wantCost := int64(100)
 	if got := int64(10000) - profile.Silver; got != wantCost {
-		t.Fatalf("整机保养费用=%d，期望覆盖全部磨损=%d", got, wantCost)
+		t.Fatalf("所选部件修理费=%d，期望 %d", got, wantCost)
 	}
 }
 
-func TestWorkshopDiagReelRepairQuoteMatchesWholeService(t *testing.T) {
+func TestWorkshopWornReelDirectReplaceSequence(t *testing.T) {
+	srv, db := newStaticRigTestServer(t)
+	reel, gearID := seedWornWorkshopReel(t, srv, db, .8, .2, .5, .5)
+	ctx := t.Context()
+	const uid = int64(1000001)
+	if _, err := db.EnsureProfile(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateBalance(ctx, uid, 10000, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	// 直接更换仍提交已装型号：21/3 可重复，21/4 随后携带确认价格。
+	d := NewDispatch(srv)
+	registerEconMarket(d)
+	for i, sub := range []int{3, 3, 4} {
+		quote := uint64(0)
+		if sub == 4 {
+			quote = 100
+		}
+		c := &Ctx{Sess: newProbeSess(srv), Main: 21, Sub: sub,
+			Tree: snapshotWorkshopRequestPart(reel.GUID, uint32(reelPartCatGear), gearID, quote),
+			Log:  logging.Discard()}
+		body, ok := d.lookup(21, uint8(sub))(c)
+		if !ok {
+			t.Fatalf("步骤 %d 的 21/%d 落入兜底", i, sub)
+		}
+		tree, _, err := proto.DecodeValue(body, 0, srv.Table())
+		if err != nil || tree == nil || tree.Kind != proto.KindObj || tree.Class != reel.WireClass {
+			t.Fatalf("步骤 %d 响应不是渔轮: err=%v", i, err)
+		}
+		if got := tree.Fields[fieldIdxByCS(tree.Class, csGUID)].Hex; got != reel.GUID {
+			t.Fatalf("步骤 %d 渔轮 GUID 改变", i)
+		}
+		fresh := mustItem(t, db, reel.GUID)
+		if fresh.Durability >= 1 {
+			t.Fatalf("步骤 %d 不能把仍有磨损的轮体回满", i)
+		}
+		for _, part := range srv.repairPartsOf(ctx, fresh) {
+			want := 1.0
+			if part.Cat == uint32(reelPartCatGear) && sub == 3 {
+				want = .8
+			}
+			if part.Cat == uint32(reelPartCatWasher) {
+				want = .2
+			}
+			if part.Cat == uint32(reelPartCatBearing) {
+				want = .5
+			}
+			if math.Abs(part.Cond-want) > 1e-6 {
+				t.Fatalf("步骤 %d 部件 %d 完好度=%v", i, part.Cat, part.Cond)
+			}
+		}
+		fields := snapshotFields(t, fresh.FieldsJSON)
+		_, installed := snapshotPart(t, srv, fields, reelPartCatGear)
+		if installed.ItemID != gearID {
+			t.Fatal("直接更换不应换成替代型号")
+		}
+		p, err := db.GetProfile(ctx, uid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 预览无副作用，仅最终确认扣除齿轮修理费 100。
+		wantSilver, wantTxns := int64(10000), 0
+		if sub == 4 {
+			wantSilver, wantTxns = 9900, 1
+		}
+		if p.Silver != wantSilver || p.Gold != 0 {
+			t.Fatalf("步骤 %d 余额不正确: silver=%d gold=%d", i, p.Silver, p.Gold)
+		}
+		var count int
+		if err := db.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM txn WHERE uid=? AND kind='workshop_part'`, uid).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != wantTxns {
+			t.Fatalf("步骤 %d 交易流水=%d，期望 %d", i, count, wantTxns)
+		}
+	}
+}
+
+func TestWorkshopDiagReelRepairQuoteMatchesSelectedPart(t *testing.T) {
 	srv, db := newStaticRigTestServer(t)
 	defer db.Close()
 	reel, gearID := seedWornWorkshopReel(t, srv, db, .8, .2, .5, .5)
@@ -366,16 +460,23 @@ func TestWorkshopDiagReelRepairQuoteMatchesWholeService(t *testing.T) {
 	if comps == nil || comps.ArgCount() == 0 {
 		t.Fatal("21/2 缺少内件报价")
 	}
-	price := comps.ArgItem(0).Field(3).Val
+	gear, _ := snapshotPart(t, srv, snapshotFields(t, reel.FieldsJSON), reelPartCatGear)
+	gearGUID := gear.Fields[fieldIdxByCS(gear.Class, csGUID)].Hex
+	var price *proto.Value
+	for _, entry := range comps.Items {
+		if entry.Fields[0].Hex == gearGUID {
+			price = entry.Fields[3].Val
+		}
+	}
 	if price == nil {
 		t.Fatal("21/2 缺少价格对象")
 	}
 	quoteField := price.Field(0)
 	quote := int64(quoteField.U64())
-	// 齿轮 0.2 + 摩擦片 0.8 + 轴承 0.5 = 1.5 个满磨损单位。
-	want := int64(math.Round(1.5 * 500))
+	// 只选择磨损 20% 的齿轮。
+	want := int64(100)
 	if quote != want {
-		t.Fatalf("21/2 整机保养报价=%d，期望 %d", quote, want)
+		t.Fatalf("21/2 所选部件修理报价=%d，期望 %d", quote, want)
 	}
 
 	c := &Ctx{
@@ -384,14 +485,14 @@ func TestWorkshopDiagReelRepairQuoteMatchesWholeService(t *testing.T) {
 		Log:  logging.Discard(),
 	}
 	if body, ok := hWorkshopOrder(c); !ok || len(body) == 0 {
-		t.Fatal("客户端按 21/2 整机报价提交同型号修理应成功")
+		t.Fatal("客户端按 21/2 所选部件报价提交同型号修理应成功")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := int64(10000) - profile.Silver; got != want {
-		t.Fatalf("整机保养扣费=%d，期望 %d", got, want)
+		t.Fatalf("所选部件修理扣费=%d，期望 %d", got, want)
 	}
 }
 
@@ -408,11 +509,12 @@ func TestWorkshopReelRepairAcceptsAggregatedClientQuote(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	quote := int64(math.Round(1.5 * 500))
+	quote := int64(350) // 齿轮 100 + 轴承 250。
+	_, bearingDef := snapshotPart(t, srv, snapshotFields(t, reel.FieldsJSON), reelPartCatBearing)
 	orders := proto.Args(proto.S("503"),
 		wiregen.MustMakeObj("gcllbdkgkna", map[int]*proto.Value{
-			0: proto.U32(uint32(reelPartCatGear)),
-			1: proto.StrVal(gearID),
+			0: proto.U32(uint32(reelPartCatBearing)),
+			1: proto.StrVal(bearingDef.ItemID),
 		}),
 		wiregen.MustMakeObj("gcllbdkgkna", map[int]*proto.Value{
 			0: proto.U32(uint32(reelPartCatGear)),
@@ -423,18 +525,30 @@ func TestWorkshopReelRepairAcceptsAggregatedClientQuote(t *testing.T) {
 		0: proto.Guid(reel.GUID),
 		1: orders,
 		2: proto.U32(0),
-		3: proto.U64(uint64(quote * 2)),
+		3: proto.U64(uint64(quote)),
 	}))
 	c := &Ctx{Sess: newProbeSess(srv), Main: 21, Sub: 3, Tree: req, Log: logging.Discard()}
 	if body, ok := hWorkshopOrder(c); !ok || len(body) == 0 {
-		t.Fatal("客户端多选累加后的整机报价应被接受")
+		t.Fatal("客户端多选累加后的所选部件报价应被接受")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := int64(10000) - profile.Silver; got != quote {
-		t.Fatalf("整机保养应只扣一次 %d，实扣 %d", quote, got)
+		t.Fatalf("所选部件修理应只扣一次 %d，实扣 %d", quote, got)
+	}
+	fresh := mustItem(t, db, reel.GUID)
+	fields := snapshotFields(t, fresh.FieldsJSON)
+	for _, category := range []int64{reelPartCatGear, reelPartCatBearing} {
+		part, _ := snapshotPart(t, srv, fields, category)
+		if reelChildDurability(part) != 1 {
+			t.Fatal("多选部件未修好")
+		}
+	}
+	washer, _ := snapshotPart(t, srv, fields, reelPartCatWasher)
+	if math.Abs(reelChildDurability(washer)-.2) > 1e-6 {
+		t.Fatal("多选修理修改了未选择的摩擦片")
 	}
 }
 
@@ -457,7 +571,7 @@ func TestWorkshopReelRepairRejectsLowQuote(t *testing.T) {
 		Log:  logging.Discard(),
 	}
 	if _, ok := hWorkshopOrder(c); ok {
-		t.Fatal("低于整机保养价的客户端报价应被拒绝")
+		t.Fatal("低于所选部件修理价的客户端报价应被拒绝")
 	}
 	profile, err := db.GetProfile(ctx, uid)
 	if err != nil {

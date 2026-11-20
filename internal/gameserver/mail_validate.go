@@ -33,6 +33,11 @@ func ValidateMailAttachment(ctx context.Context, db *store.DB, att store.MailIte
 	if err != nil || def == nil {
 		return fmt.Errorf("附件 %s 物品不存在", itemID)
 	}
+	// 梦鱼券按张建行，领取侧 prepareCouponRows 有单次上限。发件侧必须先挡住，
+	// 否则后台能发出「领取必然失败」的券邮件；与后台直接发放共用同一判据。
+	if err := couponGrantQtyError(def, itemID, att.Qty); err != nil {
+		return err
+	}
 	if def.Category != bundleCategory {
 		return nil
 	}
@@ -53,6 +58,30 @@ func ValidateMailAttachment(ctx context.Context, db *store.DB, att store.MailIte
 		return fmt.Errorf("附件 %s 无法展开: %w", itemID, err)
 	}
 	return nil
+}
+
+// couponGrantQtyError 校验单次发放的券张数；非券类恒返回 nil。
+// 邮件附件与后台 grant_item 共用，避免发件侧/领取侧口径漂移。
+func couponGrantQtyError(def *store.ItemDef, itemID string, qty int64) error {
+	if def.Category == couponCategory && qty > maxBundlePreparedItems {
+		return fmt.Errorf("附件 %s 数量 %d 超过单次领取上限 %d，玩家无法领取",
+			itemID, qty, maxBundlePreparedItems)
+	}
+	return nil
+}
+
+// ValidateCouponGrantQty 校验后台直接发放（grant_item）的券张数。
+// 物品定义缺失时交给领取侧处理，这里只挡「券张数越界」这一件事。
+func ValidateCouponGrantQty(ctx context.Context, db *store.DB, itemID string, qty int64) error {
+	if db == nil {
+		return fmt.Errorf("数据库不可用")
+	}
+	itemID = strings.TrimSpace(itemID)
+	def, err := db.GetItemDefByItemID(ctx, itemID)
+	if err != nil || def == nil {
+		return nil
+	}
+	return couponGrantQtyError(def, itemID, qty)
 }
 
 // validateBundleExpandable 按 prepareBundleItems 的判据做只读校验：

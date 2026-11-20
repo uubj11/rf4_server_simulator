@@ -337,15 +337,84 @@ func formatCastWeightParts(parts []castWeightPart, lineRunningG float64) string 
 	return b.String()
 }
 
-// castSkillStats 合成当前钓法熟练度；未知节点不按通用投距加成计算。
-func (s *Server) castSkillStats(ctx context.Context, uid, rigType int64, gears ...string) (category int64, mastery, nodeEffect float64) {
+// castSkillStats 合成当前钓法熟练度与已学投距技能百分比。
+// 投距百分比来自 skill_cast_effect_def（官方文案逐字提取，见
+// docs/cast-skill-official-effects.md），按当前竿/轮的 fopbhlmkcpe 匹配 gate；
+// 不匹配的节点一律不计入（castPct=0）。
+func (s *Server) castSkillStats(ctx context.Context, uid, rigType, rodType, reelType int64, gears ...string) (category int64, mastery, castPct float64) {
 	category = fishingSkillCatForRig(rigType)
 	effects, err := s.effectiveFishingSkills(ctx, uid, gears...)
 	if err != nil {
 		return category, 0, 0
 	}
-	return category, effects.mastery(category), 0
+	return category, effects.mastery(category), s.learnedCastSkillPct(ctx, effects, rodType, reelType)
+}
 
+// castSkillGate 是一个 gate 槽位（竿或轮 × fopbhlmkcpe 类型）。
+type castSkillGate struct {
+	Kind string
+	Type int64
+}
+
+// learnedCastSkillPct 按装备类型汇总已学投距技能的官方加成百分比。
+// 轮侧行跨钓法大类生效（官方「只需学一次」，等级共享由 skill_link 投影处理）。
+// 同一 gate 槽位只取最高一行的贡献：轻型/重型传统轮（718/721）这类兄弟行在
+// fopbhlmkcpe 里同型不可区分，官服同时只会激活与当前轮对应的那一行。
+func (s *Server) learnedCastSkillPct(ctx context.Context, effects effectiveFishingEffects, rodType, reelType int64) float64 {
+	if s == nil || s.DB == nil {
+		return 0
+	}
+	ident, err := s.DB.LoadSkillIdentity(ctx)
+	if err != nil {
+		return 0
+	}
+	learned := ident.Project(effects.Learned)
+	gear := ident.Project(effects.GearNodes)
+	rows, err := s.DB.SQL.QueryContext(ctx, `
+		SELECT d.node_id, d.per_level_pct, d.gate_kind, d.gate_type,
+		       COALESCE(sd.max_level, 0)
+		FROM skill_cast_effect_def d
+		LEFT JOIN skill_def sd ON sd.cat_id = d.cat_id AND sd.node_id = d.node_id`)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	best := map[castSkillGate]float64{}
+	for rows.Next() {
+		var nodeID, gateType, maxLevel int64
+		var perLevelPct float64
+		var gateKind string
+		if err := rows.Scan(&nodeID, &perLevelPct, &gateKind, &gateType, &maxLevel); err != nil {
+			return 0
+		}
+		switch gateKind {
+		case "rod":
+			if rodType != gateType {
+				continue
+			}
+		case "reel":
+			if reelType != gateType {
+				continue
+			}
+		default:
+			continue
+		}
+		level := max64(0, learned[nodeID]+gear[nodeID])
+		if maxLevel > 0 && level > maxLevel {
+			level = maxLevel
+		}
+		if contribution := perLevelPct * float64(level); contribution > best[castSkillGate{gateKind, gateType}] {
+			best[castSkillGate{gateKind, gateType}] = contribution
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0
+	}
+	total := 0.0
+	for _, contribution := range best {
+		total += contribution
+	}
+	return total
 }
 
 // castReelSpoolStats 从当前轮子实例优先读取工作坊安装的线杯；老轮子没有内嵌
@@ -387,20 +456,38 @@ func (s *Server) castReelSpoolStats(ctx context.Context, reel *store.Item, lineI
 	if diameter <= 0 {
 		return reelType, spoolSize, 0
 	}
-	// 客户端容量表标定：2000 杯（系数 100）0.14mm≈234m、0.18mm≈154m、
-	// 0.22mm≈111m；4000 杯（系数 180）0.20mm≈245m。
-	// 拟合式 C ≈ 0.093 × 系数 / 线径^1.65，误差 ≤8%。
+	// 容量公式见 reelSpoolCapacityM；旧的 0.093 拟合式仅适用于部分细线。
 	capacityM = reelSpoolCapacityM(coef, diameter)
 	return reelType, spoolSize, capacityM
 }
 
-// reelSpoolCapacityM 按线径估算线杯容量（米）。
-// 数据来源：游戏内“线轴容量”读数（2000/4000 杯各三个线径）。
+// reelSpoolCapacityM 复刻客户端 lkgakdhinig.jnidmcfnkgp 的线杯容量公式：
+//
+//	d <= 0.25      C = coef * 0.10153155 / d^1.65
+//	0.25 < d < 0.8 C = coef * 0.10153155 / d^(1.65+2.2*t)
+//	d >= 0.8       C = coef * 0.16588345 / d^1.65
+//	t = clamp((d-0.25)/0.55, 0, 1)
+//
+// 客户端最终向下取整并至少 5m。0.7mm/系数100 = 34m，
+// 0.42mm/系数120 = 91m，和游戏内线轴容量读数一致。
 func reelSpoolCapacityM(coef, diameterMM float64) float64 {
 	if coef <= 0 || diameterMM <= 0 {
 		return 0
 	}
-	return math.Max(0.093*coef/math.Pow(diameterMM, 1.65), 5)
+	factor := 0.10153155
+	exponent := 1.65
+	switch {
+	case diameterMM >= 0.8:
+		factor = 0.16588345
+	case diameterMM > 0.25:
+		t := clampFloat((diameterMM-0.25)/0.55, 0, 1)
+		exponent = 1.65 + 2.2*t
+	}
+	capacity := coef * factor / math.Pow(diameterMM, exponent)
+	if capacity < 5 {
+		return 5
+	}
+	return math.Floor(capacity)
 }
 
 // spoolFillRatio 计算线杯上杯率。线长是整盘标称长度，超过杯容量时按容量

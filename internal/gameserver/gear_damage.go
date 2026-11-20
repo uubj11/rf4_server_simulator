@@ -199,7 +199,7 @@ func itemLengthField(row *store.Item, fields []proto.Field) int64 {
 	if row == nil {
 		return 0
 	}
-	if idx := fieldIdxByCS(row.WireClass, csQty); idx >= 0 && idx < len(fields) {
+	if idx := stackQtyFieldIdx(row.WireClass); idx >= 0 && idx < len(fields) {
 		return int64(u64Of(fields[idx].Num))
 	}
 	if row.Qty > 0 {
@@ -213,7 +213,7 @@ func (s *Server) itemLength(ctx context.Context, row *store.Item) int64 {
 		return 0
 	}
 	if fields, err := FieldsFromJSON(row.FieldsJSON); err == nil {
-		if idx := fieldIdxByCS(row.WireClass, csQty); idx >= 0 && idx < len(fields) {
+		if idx := stackQtyFieldIdx(row.WireClass); idx >= 0 && idx < len(fields) {
 			return int64(u64Of(fields[idx].Num))
 		}
 	}
@@ -227,7 +227,7 @@ func setItemLengthField(row *store.Item, fields []proto.Field, length int64) boo
 	if row == nil || length < 0 {
 		return false
 	}
-	idx := fieldIdxByCS(row.WireClass, csQty)
+	idx := stackQtyFieldIdx(row.WireClass)
 	if idx < 0 || idx >= len(fields) {
 		return false
 	}
@@ -967,11 +967,11 @@ func (s *Server) damageReelSlipWear(ctx context.Context, uid int64, rodGUID, ree
 		return nil, sql.ErrNoRows
 	}
 	before := reel.Durability
-
-	wornOut, found, derr := s.degradeFrictionWasherBy(ctx, reel, wear)
-	if derr != nil {
-		return nil, derr
+	fields, err := FieldsFromJSON(reel.FieldsJSON)
+	if err != nil {
+		return nil, err
 	}
+	wornOut, found := s.degradeFrictionWasherFields(ctx, reel, fields, wear)
 	if !found {
 		// 旧档回退：没有独立摩擦片子件，磨本体耐久。
 		return s.damageReelLockOverload(ctx, uid, rodGUID, reelGUID)
@@ -979,25 +979,56 @@ func (s *Server) damageReelSlipWear(ctx context.Context, uid int64, rodGUID, ree
 
 	// 本体那一格是轮内零件的综合：摩擦片被磨薄了，外面必须跟着降（只降不升，
 	// 换件与修理才允许把它抬回去）。
-	if fresh, ferr := s.DB.GetItemByGUID(ctx, reel.GUID); ferr == nil && fresh != nil {
-		if fields, ferr := FieldsFromJSON(fresh.FieldsJSON); ferr == nil {
-			if body, ok := s.reelBodyDurabilityInFields(ctx, fresh, fields); ok && body < fresh.Durability {
-				if derr := s.DB.SetItemDurability(ctx, fresh.GUID, body); derr == nil {
-					fresh.Durability = body
-				}
-			}
-		}
-		reel = fresh
+	if body, ok := s.reelBodyDurabilityInFields(ctx, reel, fields); ok && body < reel.Durability {
+		reel.Durability = body
 	}
-	perf, perr := s.syncReelPerformance(ctx, reel)
+	// 先把需要查静态定义的派生值全部算完，事务内只做写操作，避免单连接
+	// SQLite 在持有事务时再查同一数据库造成自锁。
+	fj, err := FieldsToJSON(fields)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := *reel
+	snapshot.FieldsJSON = fj
+	if s.canonicalizeReelStrength(ctx, &snapshot, fields) {
+		fj, err = FieldsToJSON(fields)
+		if err != nil {
+			return nil, err
+		}
+	}
+	reel.FieldsJSON = fj
+	perf, perr := s.buildReelPerformance(ctx, reel)
 	if perr != nil {
 		return nil, perr
 	}
-	if err := s.DB.AddItemDamageLog(ctx, store.ItemDamageLog{
+
+	tx, err := s.DB.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := updateItemFieldsTx(ctx, s.DB, tx, reel, fields); err != nil {
+		return nil, err
+	}
+	if err := s.DB.UpsertReelPerformanceTx(ctx, tx, *perf); err != nil {
+		return nil, err
+	}
+	if err := store.AddItemDamageLog(ctx, tx, store.ItemDamageLog{
 		UID: uid, ItemGUID: reel.GUID, ItemID: reel.ItemID, Event: damageEventReelOverload,
 		BeforeDurability: ptrFloat64(before), AfterDurability: ptrFloat64(reel.Durability),
 		DetailJSON: frictionWearDetail(rodGUID, perf, reel.Durability, wornOut, extra),
 	}); err != nil {
+		return nil, err
+	}
+	// 轮体耐久从正数跌到 0 就是「这一次坏了」：摩擦片是熔断件，磨穿后本体聚合值
+	// 必然归零，这条通道不算 ReelBroken（片换了就能用），但轮子确实是坏的，
+	// 不按耐久状态转换计数就会漏掉「磨穿摩擦片」这一类损坏。
+	if before > 0 && reel.Durability == 0 {
+		if err := store.BumpPlayerCounter(ctx, tx, uid, "reel_breaks"); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	updated := s.loadUpdatedTrees(ctx, []string{rodGUID, reelGUID})
@@ -1028,7 +1059,15 @@ func (s *Server) damageReelLockOverload(ctx context.Context, uid int64, rodGUID,
 	if err != nil || reel == nil || reel.UID != uid {
 		return nil, sql.ErrNoRows
 	}
+	// 幂等守卫：耐久已是 0 说明这尾轮子此前就被打坏过，本次是重复/迟到的
+	// 17/9 帧。ReelBroken 的语义是「本次把耐久打到 0」，重复帧不满足该语义，
+	// 直接返回错误让上层放弃损伤日志与计数，避免 reel_breaks 被重传多记。
+	// 不加守卫时这里靠 setWireFloat 写相同值返回 false 而偶然失败，属实现细节
+	// 而非契约，改动 setWireFloat 就会静默破坏幂等。
 	before := reel.Durability
+	if before <= 0 {
+		return nil, errReelAlreadyBroken
+	}
 	reelFields, err := FieldsFromJSON(reel.FieldsJSON)
 	if err != nil {
 		return nil, err
@@ -1053,6 +1092,12 @@ func (s *Server) damageReelLockOverload(ctx context.Context, uid int64, rodGUID,
 			"wear_progress": 0, "reel_broken": true,
 		}),
 	}); err != nil {
+		return nil, err
+	}
+	// 计数与耐久、损伤日志同事务：计数写失败必须连耐久一起回滚，否则会出现
+	// 「轮子已损坏但 reel_breaks 没涨」，而重试又因耐久已是 0 被上面的幂等
+	// 守卫挡住，永久补不回来。
+	if err := store.BumpPlayerCounter(ctx, tx, uid, "reel_breaks"); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1843,6 +1888,9 @@ func buildGearBreakResult(outcome *gearBreakOutcome) (*proto.Value, error) {
 var (
 	errLineLengthField = errors.New("鱼线长度字段不存在")
 	errDurabilityField = errors.New("耐久字段不存在")
+	// errReelAlreadyBroken 表示上报的渔轮在本次之前就已经损坏，属于重复上报
+	// （TCP 重传、客户端重试的 17/9 帧），本次不再产生耐久变更或损伤日志。
+	errReelAlreadyBroken = errors.New("渔轮已损坏")
 )
 
 // frictionWearDetail 组装渔轮磨损日志的 detail。extra 是本次结算的补充诊断字段，

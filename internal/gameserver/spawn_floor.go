@@ -8,7 +8,8 @@ import "math"
 // 虹鳟 22g/10cm、湖鳟 26g 这种"鱼苗"。这里给一个可调下限：
 // 任何个体都不低于 Record（达标线）的 spawn_min_ratio 倍。
 //
-// ratio=0 关闭下限（回到旧的 1g 口径）；ratio=1 表示未达标档整体消失。
+// ratio=0 关闭本服加严，下界回到官服口径（min_g 优先，缺失时 15% 钳 [1,50] g）；
+// ratio=1 表示未达标档整体消失。
 // 只影响重量采样，不改档位判定与上鱼率手感。
 const (
 	tunableSpawnMinRatio = "spawn_min_ratio"

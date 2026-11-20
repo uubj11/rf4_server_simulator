@@ -732,7 +732,8 @@ func TestDipFactoryAndStackKeepQuantityFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertDipQtyFields(t, fresh, 200)
+	// units 语义为「件数」：再来 1 件 = 100 + 1，不再叠加一份定义单位量。
+	assertDipQtyFields(t, fresh, 101)
 }
 
 func TestDipExactCountKeepsQuantityFields(t *testing.T) {

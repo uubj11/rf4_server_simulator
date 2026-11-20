@@ -81,7 +81,7 @@ jobs:
       - name: Write back version.json (stable)
         env:
           VERSION_WRITEBACK_DEPLOY_KEY: ${{ secrets.VERSION_WRITEBACK_DEPLOY_KEY }}
-          VERSION_WRITEBACK_REMOTE: git@ssh.github.com:glance522/rf4_server_simulator.git
+          VERSION_WRITEBACK_REMOTE: git@ssh.github.com:${{ github.repository }}.git
         run: |
           key_file="$RUNNER_TEMP/rf4-version-writeback"
           printf '%s\n' "$VERSION_WRITEBACK_DEPLOY_KEY" > "$key_file"
@@ -96,5 +96,5 @@ jobs:
         run: |
           curl -sf -X POST https://purge.jsdelivr.net/ \
             -H 'Content-Type: application/json' \
-            -d '{"path":["/gh/glance522/rf4_server_simulator@main/version.json"]}' \
+            -d '{"path":["/gh/${{ github.repository }}@main/version.json"]}' \
             || echo "purge 失败（缓存最多 12h 后自动过期）"

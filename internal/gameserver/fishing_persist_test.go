@@ -79,8 +79,8 @@ func TestFishingStateRestorePendingNoReroll(t *testing.T) {
 		Name:     "Silver",
 		// 咬钩快照在搏鱼期间重启后必须原样恢复，资格判定不能退化为默认值。
 		DepthCM: 275, OnBoat: true, Drift: true,
-		QualBait: qualificationBait{ID: "worm_01", Cat: 27, Class: 6, Flavor: 25, LenCM: 3.5, SizeMM: 35},
-		CastM:    28.5, IsNight: true,
+		QualBait: qualificationBait{ID: "worm_01", Cat: 27, Class: 6, Flavor: 25, LureType: 5, LenCM: 3.5, SizeMM: 35},
+		CastM:    28.5, IsNight: true, BiteUnix: 1794800000,
 	}
 
 	first := newFishingRecoveryServer(t, db)

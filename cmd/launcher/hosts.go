@@ -8,6 +8,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -56,8 +58,17 @@ func localHost(cfg *config.Config) string {
 // hostsState 记录 launcher 实际启用的域名。状态写在 hosts 文件旁，随退出
 // 或下一次启动恢复，崩溃后也能识别归属。
 type hostsState struct {
-	Owned []string `json:"owned,omitempty"`
+	Owned   []string      `json:"owned,omitempty"`
+	Backups []hostsBackup `json:"backups,omitempty"`
 }
+
+type hostsBackup struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
+// 面板切换与退出恢复共用状态文件，必须串行更新归属和备份清单。
+var hostsMu sync.Mutex
 
 // 归属行/注释行的正则按目标地址生成：本机可能把登录监听放在 127.0.0.2，
 // 认死 127.0.0.1 会让面板把「已经指向本地」误报成官方服务器。
@@ -95,7 +106,9 @@ func readHostsState(path string) hostsState {
 	var st hostsState
 	data, err := os.ReadFile(hostsStatePath(path))
 	if err == nil {
-		_ = json.Unmarshal(data, &st)
+		if json.Unmarshal(data, &st) != nil {
+			return hostsState{}
+		}
 	}
 	return st
 }
@@ -108,17 +121,51 @@ func saveHostsState(path string, st hostsState) error {
 	return writeFileAtomic(hostsStatePath(path), data, 0o600)
 }
 
-func backupHosts(path string) error {
+func backupHosts(path string) (hostsBackup, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return hostsBackup{}, err
 	}
 	mode := fs.FileMode(0o644)
 	if info, statErr := os.Stat(path); statErr == nil {
 		mode = info.Mode().Perm()
 	}
-	backup := fmt.Sprintf("%s.rf4s-backup-%s", path, time.Now().UTC().Format("20060102T150405.000000000"))
-	return os.WriteFile(backup, data, mode)
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".rf4s-backup-launcher-"+time.Now().UTC().Format("20060102T150405.000000000")+"-*")
+	if err != nil {
+		return hostsBackup{}, err
+	}
+	complete := false
+	defer func() {
+		_ = f.Close()
+		if !complete {
+			_ = os.Remove(f.Name())
+		}
+	}()
+	if err := f.Chmod(mode); err != nil {
+		return hostsBackup{}, err
+	}
+	if _, err := f.Write(data); err != nil {
+		return hostsBackup{}, err
+	}
+	if err := f.Sync(); err != nil {
+		return hostsBackup{}, err
+	}
+	if err := f.Close(); err != nil {
+		return hostsBackup{}, err
+	}
+	complete = true
+	return hostsBackup{Name: filepath.Base(f.Name()), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}, nil
+}
+
+// saveHostsStateAfterBackup 保存状态；失败时删除尚未登记的备份，避免永久残留。
+func saveHostsStateAfterBackup(path string, st hostsState, backup hostsBackup) error {
+	if err := saveHostsState(path, st); err != nil {
+		if cleanupErr := removeHostsBackup(path, backup); cleanupErr != nil {
+			return fmt.Errorf("保存 hosts 状态失败: %w；删除未登记备份失败: %v", err, cleanupErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // writeFileAtomic 先写同目录临时文件，再通过 Windows MoveFileEx 替换目标。
@@ -206,6 +253,8 @@ func hostsSetLocalHost(path string, domains []string, host string) error {
 	activeRe := hostsActiveRe(host)
 	commentRe := hostsCommentRe(host)
 	row := host + " "
+	hostsMu.Lock()
+	defer hostsMu.Unlock()
 	text, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -272,7 +321,7 @@ func hostsSetLocalHost(path string, domains []string, host string) error {
 		active[d] = true
 		owned[d] = true
 	}
-	state := hostsState{Owned: make([]string, 0, len(owned))}
+	state := hostsState{Owned: make([]string, 0, len(owned)), Backups: oldState.Backups}
 	for _, d := range domains {
 		if owned[d] {
 			state.Owned = append(state.Owned, d)
@@ -283,11 +332,13 @@ func hostsSetLocalHost(path string, domains []string, host string) error {
 		state.Owned = append(state.Owned, d)
 	}
 
-	if err := backupHosts(path); err != nil {
+	backup, err := backupHosts(path)
+	if err != nil {
 		return err
 	}
+	state.Backups = append(state.Backups, backup)
 	// 先保存归属，再改 hosts；即使随后写 hosts 失败，下次启动也不会误认用户行。
-	if err := saveHostsState(path, state); err != nil {
+	if err := saveHostsStateAfterBackup(path, state, backup); err != nil {
 		return err
 	}
 	return writeFileAtomic(path, []byte(strings.Join(out, "\r\n")), 0o644)
@@ -320,17 +371,27 @@ func hostsModeFor(path, host string) string {
 
 // hostsRestore 只注释 launcher 归属状态中记录的行，恢复官方解析。幂等。
 func hostsRestore(path string) error {
-	return hostsRestoreHost(path, "127.0.0.1")
+	return hostsRestoreWithWarning(path, panelLogger{}.Warn)
 }
 
 // hostsRestoreHost 同 hostsRestore，但按调用方指定的本机地址识别归属行。
 func hostsRestoreHost(path, host string) error {
+	return hostsRestoreHostWithWarning(path, host, panelLogger{}.Warn)
+}
+
+func hostsRestoreWithWarning(path string, warn func(string)) error {
+	return hostsRestoreHostWithWarning(path, "127.0.0.1", warn)
+}
+
+func hostsRestoreHostWithWarning(path, host string, warn func(string)) error {
 	if host == "" {
 		host = "127.0.0.1"
 	}
 	activeRe := hostsActiveRe(host)
+	hostsMu.Lock()
+	defer hostsMu.Unlock()
 	st := readHostsState(path)
-	if len(st.Owned) == 0 {
+	if len(st.Owned) == 0 && len(st.Backups) == 0 {
 		return nil
 	}
 	owned := make(map[string]bool, len(st.Owned))
@@ -350,14 +411,63 @@ func hostsRestoreHost(path, host string) error {
 			changed = true
 		}
 	}
-	if !changed {
-		return saveHostsState(path, hostsState{})
+	if changed {
+		backup, err := backupHosts(path)
+		if err != nil {
+			return err
+		}
+		st.Backups = append(st.Backups, backup)
+		// 恢复前登记备份，进程中断后仍可继续恢复和清理。
+		if err := saveHostsStateAfterBackup(path, st, backup); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(path, []byte(strings.Join(lines, "\r\n")), 0o644); err != nil {
+			return err
+		}
 	}
-	if err := backupHosts(path); err != nil {
+	st.Owned = nil
+	if err := saveHostsState(path, st); err != nil {
+		warn("hosts 已还原，但归属状态保存失败，保留备份: " + err.Error())
+		return nil
+	}
+	remaining := st.Backups[:0]
+	for _, backup := range st.Backups {
+		if err := removeHostsBackup(path, backup); err != nil {
+			warn("hosts 已还原，但备份清理失败: " + err.Error())
+			remaining = append(remaining, backup)
+		}
+	}
+	st.Backups = remaining
+	if err := saveHostsState(path, st); err != nil {
+		warn("hosts 已还原，但备份清理状态保存失败: " + err.Error())
+	}
+	return nil
+}
+
+// 只删除清单中位于同目录、名称及内容均匹配的 launcher 普通文件。
+// 旧版本或手动脚本生成的备份没有这份归属证据，始终保留。
+func removeHostsBackup(path string, backup hostsBackup) error {
+	if filepath.Base(backup.Name) != backup.Name || strings.ContainsAny(backup.Name, `/\:`) ||
+		!strings.HasPrefix(backup.Name, filepath.Base(path)+".rf4s-backup-launcher-") {
+		return fmt.Errorf("无法确认备份归属: %q", backup.Name)
+	}
+	target := filepath.Join(filepath.Dir(path), backup.Name)
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, []byte(strings.Join(lines, "\r\n")), 0o644); err != nil {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("备份不是普通文件: %s", target)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
 		return err
 	}
-	return saveHostsState(path, hostsState{})
+	if backup.SHA256 != fmt.Sprintf("%x", sha256.Sum256(data)) {
+		return fmt.Errorf("备份内容已改变: %s", target)
+	}
+	return os.Remove(target)
 }

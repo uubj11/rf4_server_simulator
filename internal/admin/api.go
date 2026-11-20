@@ -47,6 +47,9 @@ type Server struct {
 
 	// 发布包根目录的「发布说明.md」；为空时按工作目录 / 可执行文件位置查找。
 	releaseNotesPath string
+
+	// 可选图标包按 Server 实例缓存；缺包或坏包保持 404 降级。
+	icons iconArchive
 }
 
 type plog struct{ l logger }
@@ -90,6 +93,7 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("POST /api/players/kick", auth(s.handleKick))
 	mux.HandleFunc("POST /api/players/ban", auth(s.handleBan))
 	mux.HandleFunc("GET /api/catalog/items", auth(s.handleCatalogItems))
+	mux.HandleFunc("GET /api/catalog/groups", auth(s.handleCatalogGroups))
 	mux.HandleFunc("GET /api/stores", auth(s.handleStores))
 	mux.HandleFunc("GET /api/stores/items", auth(s.handleStoreItems))
 	mux.HandleFunc("POST /api/stores/items/update", auth(s.handleStoreItemUpdate))
@@ -101,6 +105,8 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("GET /api/fish/pool", auth(s.handleFishPool))
 	mux.HandleFunc("GET /api/fish/spawn_mode", auth(s.handleSpawnModeGet))
 	mux.HandleFunc("POST /api/fish/spawn_mode", auth(s.handleSpawnModeSet))
+	mux.HandleFunc("GET /api/fish/bite_mode", auth(s.handleBiteModeGet))
+	mux.HandleFunc("POST /api/fish/bite_mode", auth(s.handleBiteModeSet))
 	mux.HandleFunc("GET /api/hooks/profiles", auth(s.handleHookProfiles))
 	mux.HandleFunc("POST /api/hooks/profiles", auth(s.handleHookProfileSave))
 	mux.HandleFunc("GET /api/bait/prefs", auth(s.handleBaitPrefs))
@@ -108,11 +114,22 @@ func NewServer(cfg config.Admin, db *store.DB, log logger, webFS fs.FS) *Server 
 	mux.HandleFunc("GET /api/bait/categories", auth(s.handleBaitCategories))
 	mux.HandleFunc("PUT /api/bait/rules", auth(s.handleBaitRuleSave))
 	mux.HandleFunc("POST /api/bait/rules/reset", auth(s.handleBaitRuleReset))
+	mux.HandleFunc("GET /api/fish/sea-now", auth(s.handleFishSeaNow))
+	mux.HandleFunc("GET /api/fish/sea-zone-latest", auth(s.handleFishSeaZoneLatest))
+	mux.HandleFunc("GET /api/fish/sea-zones", auth(s.handleFishSeaZones))
+	mux.HandleFunc("GET /api/fish/zones", auth(s.handleFishZones))
+	mux.HandleFunc("POST /api/fish/zones", auth(s.handleFishZoneSave))
+	mux.HandleFunc("POST /api/fish/zones/delete", auth(s.handleFishZoneDelete))
 	mux.HandleFunc("POST /api/mail/send", auth(s.handleMailSend))
 	mux.HandleFunc("GET /api/audit", auth(s.handleAudit))
 	mux.HandleFunc("GET /api/about", auth(s.handleAbout))
 	mux.HandleFunc("GET /api/release-notes", auth(s.handleReleaseNotes))
 
+	// 纸地图贴图运行时加载（素材不入仓库，见 paper_maps.go）：
+	// 先于 SPA FileServer 注册，web/ 内已不再内嵌 maps 目录。
+	mux.Handle("GET /maps/", http.HandlerFunc(s.handleMapTextures))
+	// 物品与鱼种图标同理由 ref/ 运行时加载（见 item_icons.go）。
+	mux.Handle("GET /icons/", http.HandlerFunc(s.handleIcons))
 	if webFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(webFS)))
 	}
@@ -310,6 +327,81 @@ func validateEventBranches(value string) error {
 	return nil
 }
 
+// validateEventStageGifts 校验活动阶段奖励的 JSON 形状。
+// 阶段范围使用 gameserver 的实际活动任务表，数量上限与 gameserver
+// 的运行时钳制一致。空字符串用于清空整份配置。
+func validateEventStageGifts(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var parsed map[string]map[string][]struct {
+		Item string `json:"item"`
+		Qty  int64  `json:"qty"`
+	}
+	if err := json.Unmarshal([]byte(value), &parsed); err != nil {
+		return fmt.Errorf("阶段奖励必须是有效 JSON")
+	}
+	for branch, stages := range parsed {
+		n, err := strconv.Atoi(branch)
+		if err != nil || n < 9 || n > 20 {
+			return fmt.Errorf("阶段奖励分支只能是 9~20 的 ID")
+		}
+		for stage, gifts := range stages {
+			s, err := strconv.Atoi(stage)
+			if err != nil || s < 0 || s > gameserver.EventStageCount(int64(n)) {
+				return fmt.Errorf("活动分支 %d 的阶段只能是 0~%d（0 表示全部完成）", n, gameserver.EventStageCount(int64(n)))
+			}
+			if len(gifts) == 0 {
+				return fmt.Errorf("阶段奖励 %s/%s 至少要有一件物品", branch, stage)
+			}
+			for _, gift := range gifts {
+				if strings.TrimSpace(gift.Item) == "" {
+					return fmt.Errorf("阶段奖励 %s/%s 的物品 ID 不能为空", branch, stage)
+				}
+				if gift.Qty < 1 || gift.Qty > 99 {
+					return fmt.Errorf("阶段奖励 %s/%s 的数量必须在 1~99", branch, stage)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) validateEventStageGiftItems(ctx context.Context, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var parsed map[string]map[string][]struct {
+		Item string `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(value), &parsed); err != nil {
+		return err
+	}
+	checked := make(map[string]bool)
+	for _, stages := range parsed {
+		for _, gifts := range stages {
+			for _, gift := range gifts {
+				if checked[gift.Item] {
+					continue
+				}
+				var exists bool
+				query := `SELECT EXISTS(
+					SELECT 1 FROM item_def d
+					LEFT JOIN item_catalog c ON c.item_id=d.item_id
+					WHERE d.item_id=? AND ` + completeCatalogCondition() + `)`
+				if err := s.db.SQL.QueryRowContext(ctx, query, gift.Item).Scan(&exists); err != nil {
+					return fmt.Errorf("奖励物品目录读取失败: %w", err)
+				}
+				if !exists {
+					return fmt.Errorf("奖励物品不存在或不是完整商品: %s", gift.Item)
+				}
+				checked[gift.Item] = true
+			}
+		}
+	}
+	return nil
+}
+
 // tunableRange 是数值型 tunable 的合法区间 [min, max]。
 // 下限不是随手取的：它要保证「这个值在数字层面真的有意义」，而不只是「>0 合法」。
 type tunableRange struct {
@@ -358,7 +450,7 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "参数错误")
 		return
 	}
-	if (req.Key == "fish_ecology_enabled" || req.Key == "fish_bait_rules_enabled" || req.Key == "fish_distribution_enabled" || req.Key == "fish_weather_enabled" || req.Key == "happy_hour_enabled" || req.Key == "grade_ratio_enabled" || req.Key == "fish_hunt_enabled" || req.Key == "two_stage_hunt_enabled" || req.Key == "hook_nibble_enabled" || req.Key == "event_anniversary_enabled" || req.Key == "event_newyear_enabled") && req.Value != "0" && req.Value != "1" {
+	if (req.Key == "fish_ecology_enabled" || req.Key == "fish_bait_rules_enabled" || req.Key == "fish_distribution_enabled" || req.Key == "fish_weather_enabled" || req.Key == "happy_hour_enabled" || req.Key == "grade_ratio_enabled" || req.Key == "fish_hunt_enabled" || req.Key == "two_stage_hunt_enabled" || req.Key == "hook_nibble_enabled" || req.Key == "event_anniversary_enabled" || req.Key == "event_newyear_enabled" || req.Key == "condition_health_enabled" || req.Key == "condition_fishing_pause_enabled") && req.Value != "0" && req.Value != "1" {
 		httpError(w, 400, "开关只能为 0 或 1")
 		return
 	}
@@ -385,6 +477,16 @@ func (s *Server) handleTunableSet(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Key == "event_branches" {
 		if err := validateEventBranches(req.Value); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+	}
+	if req.Key == "event_stage_gifts" {
+		if err := validateEventStageGifts(req.Value); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+		if err := s.validateEventStageGiftItems(r.Context(), req.Value); err != nil {
 			httpError(w, 400, err.Error())
 			return
 		}
@@ -437,6 +539,38 @@ func spawnModeFor(t map[string]string) string {
 		return "fish_hunt"
 	}
 	return "legacy"
+}
+
+// handleBiteModeGet/Set 鱼汛模式二选一（legacy/realistic），
+// 原子统管硬性门/生态/天气/吃饵/分布五个开关；mixed 表示手动改过单个开关。
+func (s *Server) handleBiteModeGet(w http.ResponseWriter, r *http.Request) {
+	t, err := s.db.TunableList(r.Context())
+	if err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"mode": store.BiteModeFor(t)})
+}
+
+func (s *Server) handleBiteModeSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, 400, "参数错误")
+		return
+	}
+	if req.Mode != "legacy" && req.Mode != "realistic" {
+		httpError(w, 400, "鱼汛模式只能是 legacy 或 realistic")
+		return
+	}
+	if err := s.db.BiteModeSet(r.Context(), req.Mode, adminOf(r)); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	_ = s.db.AuditLogWrite(r.Context(), adminOf(r), "bite_mode", "mode", req.Mode)
+	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{"op": "reload_tunables"}))
+	writeJSON(w, map[string]any{"ok": true, "mode": req.Mode})
 }
 
 func (s *Server) handleSpawnModeGet(w http.ResponseWriter, r *http.Request) {
@@ -675,6 +809,10 @@ func (s *Server) handleGrantItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Qty <= 0 {
 		req.Qty = 1
+	}
+	if err := gameserver.ValidateCouponGrantQty(r.Context(), s.db, req.ItemID, req.Qty); err != nil {
+		httpError(w, 400, err.Error())
+		return
 	}
 	_ = s.db.QueuePush(r.Context(), mustJSON(map[string]any{
 		"op": "grant_item", "uid": req.UID, "item_id": req.ItemID, "qty": req.Qty,

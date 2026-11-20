@@ -1,0 +1,22 @@
+# Git 和本地运行数据不进入构建上下文。
+.git
+.github
+.idea
+.vscode
+ref
+bin
+dist
+data
+certs
+logs
+*.exe
+*.crt
+*.key
+*.log
+config.yaml
+config.*.yaml
+!config.example.yaml
+update_state.json
+docker/.env
+internal/wiregen/testdata/corpus.jsonl.gz
+testdata/fixtures/

@@ -83,7 +83,7 @@ func TestDrinkSettlementSumsDecayedRatesAndOnlyActualUpgrade(t *testing.T) {
 	seedDrinkEffect(t, s, "mead", 75*time.Second, newFishGUID())
 	source := newFishGUID()
 	seedDrinkEffect(t, s, "wine", 10*time.Minute, source)
-	if _, err := db.SQL.Exec(`UPDATE profile SET level=1,xp=294,membership=0 WHERE uid=?`, uid); err != nil {
+	if _, err := db.SQL.Exec(`UPDATE profile SET level=1,xp=295,membership=0 WHERE uid=?`, uid); err != nil {
 		t.Fatal(err)
 	}
 	fish := &RolledFish{FishGUID: newFishGUID(), Species: "perch", Grade: 1, WeightG: 32}

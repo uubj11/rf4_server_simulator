@@ -16,7 +16,7 @@ import (
 )
 
 func TestHandleStatusIncludesUpdate(t *testing.T) {
-	manifest := `{"schema":1,"stable":{"version":"v1.2.0","build_ts":"20261107120000","notes_url":"https://github.com/glance522/rf4_server_simulator/releases/tag/v1.2.0","download_url":"https://github.com/glance522/rf4_server_simulator/releases/latest","download_mirror_url":"https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/v1.2.0/a.zip"},"preview":{"version":"preview-20261107T110000Z-abc1234","build_ts":"20261107110000","download_mirror_url":"https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/preview-20261107T110000Z-abc1234/b.zip"}}`
+	manifest := `{"schema":1,"stable":{"version":"v1.2.0","build_ts":"20261107120000","notes_url":"https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/tag/v1.2.0","download_url":"https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/latest","download_mirror_url":"https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/v1.2.0/a.zip"},"preview":{"version":"preview-20261107T110000Z-abc1234","build_ts":"20261107110000","download_mirror_url":"https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/preview-20261107T110000Z-abc1234/b.zip"}}`
 	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(manifest))
 	}))

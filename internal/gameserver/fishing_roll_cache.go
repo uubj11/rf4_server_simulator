@@ -9,11 +9,25 @@ import (
 
 type cachedGradeLines struct {
 	val, trophy, blue *int64
+	// minG 是该鱼种的自然最小体重（species_weight.min_g），用于给「未达标」
+	// 档定下界。nil 表示没有可用的 min_g。
+	minG *int64
 }
 
 type cachedBaitDef struct {
 	bait ruleBait
 	ok   bool
+}
+
+// legacyBaitIDs 把 item_catalog 里的新 id 映射回 companion_bait_fish 快照中的
+// 旧 id。两张表同名不同 id 并存（craft_bait_dough_cottage 等），只认新 id 会
+// 让这批证据永远查不到。
+var legacyBaitIDs = map[string]string{
+	"dough_cottage": "craft_bait_dough_cottage",
+	"dough_garlic":  "craft_bait_dough_garlic",
+	"porridge_corn": "craft_bait_kukuruz_kasha",
+	"dough_honey":   "craft_bait_med_testo",
+	"c_bleak_lf":    "c_bleak",
 }
 
 type localBaitEvidenceKey struct {
@@ -54,6 +68,8 @@ type fishingRollCache struct {
 	fishEcologyLoaded    map[string]bool
 	gbAff                map[groundbaitAffKey]cachedGroundbaitAff
 	gbFishDiet           map[string]map[string]float64
+	speciesMinG          map[string]int64
+	speciesMinGLoaded    map[string]bool
 }
 
 func newFishingRollCache() *fishingRollCache {
@@ -73,10 +89,42 @@ func newFishingRollCache() *fishingRollCache {
 		fishEcologyLoaded:  map[string]bool{},
 		gbAff:              map[groundbaitAffKey]cachedGroundbaitAff{},
 		gbFishDiet:         map[string]map[string]float64{},
+		speciesMinG:        map[string]int64{},
+		speciesMinGLoaded:  map[string]bool{},
 	}
 }
 
 func rollCache(c fishRollContext) *fishingRollCache { return c.cache }
+
+// cachedSpeciesMinG 取该鱼种的自然最小体重（species_weight.min_g），
+// 供「未达标」档计算下界。找不到数据或值非正时返回 ok=false。
+func (s *Server) cachedSpeciesMinG(ctx context.Context, c fishRollContext, key string) (int64, bool) {
+	if s == nil || s.DB == nil || key == "" {
+		return 0, false
+	}
+	cache := rollCache(c)
+	if cache != nil {
+		cache.mu.Lock()
+		if cache.speciesMinGLoaded[key] {
+			v := cache.speciesMinG[key]
+			cache.mu.Unlock()
+			return v, v > 0
+		}
+		cache.mu.Unlock()
+	}
+	var v int64
+	if err := s.DB.SQL.QueryRowContext(ctx,
+		`SELECT COALESCE(min_g,0) FROM species_weight WHERE fish_key=?`, key).Scan(&v); err != nil {
+		v = 0
+	}
+	if cache != nil {
+		cache.mu.Lock()
+		cache.speciesMinG[key] = v
+		cache.speciesMinGLoaded[key] = true
+		cache.mu.Unlock()
+	}
+	return v, v > 0
+}
 
 func (s *Server) cachedResolveStatLoc(ctx context.Context, c fishRollContext, loc string) string {
 	if s.DB == nil {
@@ -185,6 +233,13 @@ func (s *Server) cachedBaitTiers(ctx context.Context, c fishRollContext, bait st
 	}
 	cache.mu.Unlock()
 	tiers := s.DB.BaitTiers(ctx, bait)
+	if len(tiers) == 0 {
+		// companion_bait_fish 预置快照用的是旧 item_id（craft_bait_* / c_bleak），
+		// 这些 id 在当前 item_def 里已不存在；不改名会让 264 行证据永久失效。
+		if old, ok := legacyBaitIDs[bait]; ok {
+			tiers = s.DB.BaitTiers(ctx, old)
+		}
+	}
 	cache.mu.Lock()
 	cache.baitTiers[bait] = tiers
 	cache.baitTierLoaded[bait] = true

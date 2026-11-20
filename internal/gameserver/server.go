@@ -9,6 +9,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -63,6 +64,31 @@ type Server struct {
 	fishEcologyMu          sync.RWMutex
 	fishEcologyCache       map[string]fishEcologyProfile
 	fishEcologyCacheLoaded bool
+
+	// 海图鱼种集合：唯一海图（loc_alias 把 level_012_north_sea 解析到
+	// 「挪威海」）在 loc_fish 里的全部鱼种。启动时一次加载、之后只读；
+	// nil 表示静态库不可用/无海图数据，海水组回退词表判定。
+	marineFishMu   sync.RWMutex
+	marineFishKeys map[string]bool
+
+	// rf4records 饵占比缓存（食性分级提案 bait-evidence-threshold 的占比判据）。
+	// 键 fish_key -> bait_id -> 占比百分比（0~100）；异步预热，TTL 30 分钟。
+	rf4ShareMu      sync.RWMutex
+	rf4ShareCache   map[string]map[string]float64
+	rf4ShareAt      time.Time
+	rf4ShareLoaded  bool
+	rf4ShareLoading atomic.Bool
+
+	// 区域固定鱼种名册缓存（后台可写，TTL 30 秒对齐 tunables 热更节奏）
+	fishZoneMu    sync.RWMutex
+	fishZoneCache map[string][]store.FishZone
+	fishZoneAt    time.Time
+
+	// 饵效控速：名册级食性聚合缓存（statLoc -> 拟饵/天然饵食性最大权重），
+	// 每条目独立 30 秒 TTL（对齐 tunables 热更节奏）；reload/invalidate 时
+	// 整体清空。零值可用，首用时建表。
+	paceDietMu    sync.Mutex
+	paceDietByLoc map[string]paceDietCacheEntry
 
 	// 运行参数缓存
 	tunMu    sync.Mutex

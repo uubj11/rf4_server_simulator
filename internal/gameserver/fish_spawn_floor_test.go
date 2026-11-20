@@ -20,7 +20,7 @@ func TestSpawnMinRatioLiftsBelowBand(t *testing.T) {
 		note      string
 	}{
 		{0.6, 88, 4, "默认 60%：未达标档从 88g 起（约 16cm）"},
-		{0, 1, 4, "0=关闭下限，回到旧的 1g 口径"},
+		{0, 22, 4, "0=关闭本服加严，回到官服兜底（达标线 15% 钳 [1,50]）"},
 		{1, 0, 3, "100%：未达标档直接消失，最差的鱼也达标"},
 	}
 	for _, c := range cases {
@@ -76,5 +76,3 @@ func TestHuntBandRespectsSpawnFloor(t *testing.T) {
 		t.Fatalf("鱼猎链路出现 %dg，低于下限 %.0fg", minSeen, floor)
 	}
 }
-
-

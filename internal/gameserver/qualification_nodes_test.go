@@ -70,10 +70,11 @@ func TestEnvironmentEmitsQualificationTree(t *testing.T) {
 				if got := *rule.Fields[0].Num; got != want {
 					t.Fatalf("规则类型应为 %d，实得 %d", want, got)
 				}
-				// 进度分母必须等于静态目标值且 > 0，否则进度除零。
-				if got := *rule.Fields[3].Num; got != uint64(qualificationTarget(want)) || got == 0 {
+				// 进度分母必须等于官服静态规则值且 > 0，否则进度除零。
+				wantTarget := qualificationRuleWireByID[want].F3
+				if got := *rule.Fields[3].Num; got != uint64(wantTarget) || got == 0 {
 					t.Fatalf("分支 %d 阶段 %d 任务 %d 进度分母应为 %d，实得 %d",
-						branch, stageNo, ti+1, qualificationTarget(want), got)
+						branch, stageNo, ti+1, wantTarget, got)
 				}
 			}
 		}

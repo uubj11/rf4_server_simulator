@@ -1718,7 +1718,7 @@ var ClassMeta = map[string]ClassInfo{
 	"cgllfjgoilo": {DTO: "fihklmgldio", Fields: []FieldInfo{
 		{Idx: 0, Name: "gkfbafmbpam", Label: "", Enum: "lpndpbbbejh", Zh: "线杯规格 SpoolSize：值→尺寸类(pdcalfjaigf)映射 {1..7,23,24}→类1 {8}→类2 {9..14,21,22}→类3 {15..20}→类4；1≈1000/3≈3000/4≈4000/7≈10000/8=LP/21≈3000"},
 		{Idx: 1, Name: "dhlkahnodoo", Label: "", Enum: "", Zh: "线杯自重 Mass（kg；面板 kItemDesc_Mass 单位 gpmpkbfeeab=kg）。典型值：0/0.032/0.295"},
-		{Idx: 2, Name: "djcepbpigpe", Label: "", Enum: "", Zh: "线容量容量系数：参与线容量公式 cap = max(k*djcepbpigpe/dia_mm, 5)，k∈{0.10153155(细),0.16588345(粗)}；面板 kItemDesc_SpoolCapacity 显示 \"{线径} / {容量m}\"。典型值：0/160/1940"},
+		{Idx: 2, Name: "djcepbpigpe", Label: "", Enum: "", Zh: "线容量容量系数：参与线容量公式 C=floor(max(coef*f/d^e,5))；d≤.25: f=.10153155,e=1.65；.25<d<.8: f=.10153155,e=1.65+2.2t；d≥.8: f=.16588345,e=1.65；t=clamp((d-.25)/.55,0,1)；面板 kItemDesc_SpoolCapacity 显示 \"{线径} / {容量m}\"。典型值：0/160/1940"},
 		{Idx: 3, Name: "ciichedlnjh", Label: "", Enum: "", Zh: ""},
 		{Idx: 4, Name: "boejfeemeej", Label: "", Enum: "", Zh: ""},
 		{Idx: 5, Name: "mgkfaekpnoj", Label: "", Enum: "oinpmjophkh", Zh: "物品品类枚举；2=鱼护，3=鱼竿，4=竿柄，5=导环，6=卷线器，7=卷线器轴承，8=卷线器线杯。"},

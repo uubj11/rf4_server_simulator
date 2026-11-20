@@ -131,18 +131,18 @@ func TestSettleWithoutXPBonusSources(t *testing.T) {
 	mk(1000001, 0)
 	f := fish(1000001)
 	res := srv.settleCatchXP(ctx, 1000001, f, 1)
-	if res.baseXP != 229 {
-		t.Fatalf("基础经验=%d, want 229（perch 642g grade2）", res.baseXP)
+	if res.baseXP != 261 {
+		t.Fatalf("基础经验=%d, want 261（perch 642g grade2，官服锚外推速率）", res.baseXP)
 	}
-	if res.totalXP != 229 {
-		t.Fatalf("无加成总经验=%d, want 229", res.totalXP)
+	if res.totalXP != 261 {
+		t.Fatalf("无加成总经验=%d, want 261", res.totalXP)
 	}
-	if f.XP != 229 {
-		t.Fatalf("25 条目 XP=%d, want 229", f.XP)
+	if f.XP != 261 {
+		t.Fatalf("25 条目 XP=%d, want 261", f.XP)
 	}
 	p, _ := srv.DB.GetProfile(ctx, 1000001)
-	if p.XP != 229 {
-		t.Fatalf("入账累计 xp=%d, want 229", p.XP)
+	if p.XP != 261 {
+		t.Fatalf("入账累计 xp=%d, want 261", p.XP)
 	}
 
 	// 813 内嵌 310：f0=229、f5=0、f6 必须为空列表。
@@ -151,14 +151,14 @@ func TestSettleWithoutXPBonusSources(t *testing.T) {
 	if obj310 == nil || obj310.Class != "kegeppimjbm" {
 		t.Fatalf("813.f8 不是 310 块: %v", obj813.Field(8).Val)
 	}
-	if got := u64Of(obj310.Field(0).Num); got != 229 {
-		t.Fatalf("310.f0=%d, want 229（本条鱼总经验）", got)
+	if got := u64Of(obj310.Field(0).Num); got != 261 {
+		t.Fatalf("310.f0=%d, want 261（本条鱼总经验）", got)
 	}
 	if got := u32Of(obj310.Field(1).Num); got != 0 {
-		t.Fatalf("310.f1=%d, want 0（229 XP 尚未达到升级门槛）", got)
+		t.Fatalf("310.f1=%d, want 0（261 XP 尚未达到升级门槛）", got)
 	}
 	if got := u32Of(obj310.Field(5).Num); got != 0 {
-		t.Fatalf("310.f5=%d, want 0（229 XP 不足以升 2 级）", got)
+		t.Fatalf("310.f5=%d, want 0（261 XP 不足以升 2 级）", got)
 	}
 	bonusList := obj310.Field(6).Val
 	if bonusList == nil || len(bonusList.Items) != 0 {
@@ -169,8 +169,8 @@ func TestSettleWithoutXPBonusSources(t *testing.T) {
 	mk(1000002, 0)
 	f2 := fish(1000002)
 	res2 := srv.settleCatchXP(ctx, 1000002, f2, 1)
-	if res2.totalXP != 229 {
-		t.Fatalf("非会员总经验=%d, want 229", res2.totalXP)
+	if res2.totalXP != 261 {
+		t.Fatalf("非会员总经验=%d, want 261", res2.totalXP)
 	}
 	obj813b := srv.buildSettle813(ctx, 1000002, f2, res2)
 	b2 := obj813b.Field(8).Val.Field(6).Val

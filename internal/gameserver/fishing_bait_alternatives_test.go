@@ -18,7 +18,9 @@ func TestBaitRuleConditionsAndLegalAlternateDiet(t *testing.T) {
 		t.Fatalf("parsed prerequisites = %d", conditional)
 	}
 	pike := fishBaitRules[ruleName("常见狗鱼")]
-	if len(pike.bottomOnly) != 2 || len(pike.deny) != 7 {
+	// deny 只剩 Gummi Makk：另外六个词（维基虫/吸引成分/硅胶海虫/八爪鱼/
+	// 巨大软饵/柳叶亮片）在客户端与静态库里都没有对应商品，属规则文本笔误，已删。
+	if len(pike.bottomOnly) != 2 || len(pike.deny) != 1 {
 		t.Fatalf("pike restrictions = %+v", pike)
 	}
 	for _, tc := range []struct {

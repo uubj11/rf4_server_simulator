@@ -37,10 +37,21 @@ func (s *Server) attachDB(db *store.DB, log *slog.Logger) {
 	if err := s.reloadFishEcologyCache(context.Background()); err != nil {
 		s.log.Warn("鱼种生态缓存加载失败", "err", err)
 	}
+	if n, err := s.reloadMarineFishKeys(context.Background()); err != nil {
+		s.log.Warn("海图鱼种集合加载失败，海水组回退词表判定", "err", err)
+	} else if n > 0 {
+		s.log.Info("海图鱼种集合已加载", "species", n)
+	}
 	if n, err := s.ensureFishSkillEffects(context.Background()); err != nil {
 		s.log.Warn("鱼口技能效果初始化失败", "err", err)
 	} else if n > 0 {
 		s.log.Info("鱼口技能效果初始化", "inserted", n)
+	}
+	// 必须在 ensureFishSkillEffects 之后：先种鱼侧行再删，DELETE 才能站稳。
+	if n, err := s.ensureCastSkillEffects(context.Background()); err != nil {
+		s.log.Warn("抛投技能效果初始化失败", "err", err)
+	} else if n > 0 {
+		s.log.Info("抛投技能效果初始化", "inserted", n)
 	}
 	if err := s.reloadHookBiteProfiles(context.Background()); err != nil {
 		s.log.Warn("鱼钩型号咬口缓存加载失败", "err", err)
@@ -93,10 +104,24 @@ func (s *Server) loadFightCurves() {
 // buildFightCurves 构造 27.f21 曲线池：鱼种池缺省借同习性池，张力列按
 // pull/池基准 uniform 缩放，其余列保持池原值（官方口径，见 spec）。
 func (s *Server) buildFightCurves(species string, pull float64) *proto.Value {
+	return s.buildFightCurvesWithProfile(species, pull,
+		s.fishFightProfileFor(&RolledFish{Species: species}))
+}
+
+// buildFightCurvesForFish 用实际鱼的档位/体重生成 profile，legacy 模式下
+// 需要 profile.DurationScale/RestScale 恢复旧节奏。
+func (s *Server) buildFightCurvesForFish(f *RolledFish, pull float64) *proto.Value {
+	if f == nil {
+		return s.buildFightCurves("", pull)
+	}
+	return s.buildFightCurvesWithProfile(f.Species, pull, s.fishFightProfileFor(f))
+}
+
+func (s *Server) buildFightCurvesWithProfile(species string, pull float64, profile fishFightProfile) *proto.Value {
 	s.curveMu.Lock()
 	rows := s.curves[species]
 	if len(rows) == 0 {
-		rows = s.curves[fishFightArchetypeFor(species).CurvePool]
+		rows = s.curves[fishCurveArchetypeFor(species, s.fishMarineGroupHit(species)).CurvePool]
 		if len(rows) == 0 {
 			rows = s.curves["crucian"]
 		}
@@ -122,12 +147,39 @@ func (s *Server) buildFightCurves(species string, pull float64) *proto.Value {
 	if baseTension > 0 {
 		scale = pull / baseTension
 	}
+	legacy := s.fightLegacyModel()
+	phaseScales := legacy || s.tunableF("fight_phase_scales", 0) != 0
+	curveTensionScale := s.tunableF("fight_curve_tension_scale", 1)
+	if curveTensionScale <= 0 {
+		curveTensionScale = 1
+	}
 	for _, r := range selected {
 		items := map[int]*proto.Value{0: proto.U32(uint32(r[0]))}
+		stage := uint32(r[0])
+		phaseTension, phaseDuration := 1.0, 1.0
+		if phaseScales {
+			phaseTension = fightPhaseTensionScale(stage)
+			phaseDuration = fightPhaseDurationScale(stage)
+		}
+		durationScale := 1.0
+		if legacy {
+			durationScale = profile.DurationScale
+			if fightIsRestPhase(stage) {
+				durationScale = profile.RestScale
+			}
+		}
 		for i := 1; i <= 14; i++ {
 			v := r[i]
 			if i == 8 || i == 9 {
-				v *= scale
+				v *= scale * phaseTension * curveTensionScale
+			}
+			if (i == 2 || i == 3) && v > 0 {
+				if phaseScales {
+					v *= phaseDuration
+				}
+				if legacy {
+					v = math.Max(0.1, v*durationScale)
+				}
 			}
 			items[i] = proto.F32(float32(v))
 		}
@@ -151,12 +203,17 @@ func knownRealFightCurveRows() [][19]float64 {
 // buildFightItems 构造 4/22 物品同步元素：full 返回竿和线，非 full 返回钩。
 // 14/11 以钩强 f0 作为负载比基准，因此非 full 分支不能返回竿树。
 func (s *Server) buildFightItems(ctx context.Context, uid int64, full bool, gears ...string) ([]*proto.Value, error) {
-	st := s.stateFor(uid)
-	st.mu.Lock()
-	gear := st.GearGuid
-	st.mu.Unlock()
+	var gear string
 	if len(gears) > 0 {
 		gear = gears[0]
+	}
+	if gear == "" {
+		// 缺省兜底路径才取钓鱼状态；这里保留 stateFor 的 resume 语义
+		// （登录恢复/重连后借钓鱼请求重排 timer）。
+		st := s.stateFor(uid)
+		st.mu.Lock()
+		gear = st.GearGuid
+		st.mu.Unlock()
 	}
 	if gear == "" {
 		// 无手持竿：取背包第一件竿
@@ -169,6 +226,16 @@ func (s *Server) buildFightItems(ctx context.Context, uid int64, full bool, gear
 			}
 		}
 	}
+	if gear == "" {
+		return nil, nil
+	}
+	return s.buildFightItemsForGear(ctx, uid, gear, full)
+}
+
+// buildFightItemsForGear 按指定竿构建 4/22 元素，不触碰钓鱼状态
+// （无 stateFor/resume 副作用）——结算、推送等非钓鱼请求上下文专用。
+// 多竿场景调用方必须传本次结算/中鱼的那根竿，不能用"手持竿"兜底。
+func (s *Server) buildFightItemsForGear(ctx context.Context, uid int64, gear string, full bool) ([]*proto.Value, error) {
 	if gear == "" {
 		return nil, nil
 	}
@@ -200,10 +267,31 @@ func (s *Server) buildFightItems(ctx context.Context, uid int64, full bool, gear
 	return out, nil
 }
 
-// buildMountedHookTree 返回线末端钩的完整实例树。
-// 优先使用钩物品行；拟饵出厂钩没有独立行时，从拟饵子对象中取同 GUID 的树。
+// buildMountedHookTree 返回线末端钩的完整实例树（4/22 推送形状）。
+// 路亚：钩为拟饵内置（出厂钩或实装钩）时返回拟饵整树——官方 429B 路亚中鱼帧
+// 是拟饵容器形状（拟饵本体+钩），客户端路亚钩组实例按拟饵容器构造，发裸钩会
+// 让钩组实例缺失、保持力 ×0.05 秒脱。独立钩行（海钓串钩单钩等）保持裸钩形状。
+// 注意：钩物理/强度链路走 mountedHookSubTree，不要用本函数读钩定义。
 func (s *Server) buildMountedHookTree(ctx context.Context, gearGUID string) *proto.Value {
 	hookGUID := s.mountedHookGuid(ctx, gearGUID)
+	if hookGUID == "" {
+		return nil
+	}
+	if lureGUID := s.mountedLureGUID(ctx, gearGUID); lureGUID != "" &&
+		s.lureContainsHook(ctx, lureGUID, hookGUID) {
+		if lureRow, err := s.DB.GetItemByGUID(ctx, lureGUID); err == nil && lureRow != nil {
+			if tree, terr := s.ItemToTree(ctx, lureRow); terr == nil && tree != nil {
+				return tree
+			}
+		}
+	}
+	return s.mountedHookSubTree(ctx, gearGUID, hookGUID)
+}
+
+// mountedHookSubTree 返回线末端钩的单钩树：优先使用钩物品行；
+// 拟饵出厂钩没有独立行时，从拟饵子对象中取同 GUID 的钩对象。
+// 钩物理（mountedHookDef 强度/钩号）依赖这里的顶层是钩本体，不是拟饵容器。
+func (s *Server) mountedHookSubTree(ctx context.Context, gearGUID, hookGUID string) *proto.Value {
 	if hookGUID == "" {
 		return nil
 	}
@@ -235,6 +323,45 @@ func (s *Server) buildMountedHookTree(ctx context.Context, gearGUID string) *pro
 		}
 	}
 	return nil
+}
+
+// buildHookTreeByGUID 返回指定钩实例的物品树（裸钩形状）。
+// 多钩钓组按钩位逐枚挂鱼时用，与 buildMountedHookTree 取“线末端钩”不同。
+func (s *Server) buildHookTreeByGUID(ctx context.Context, hookGUID string) *proto.Value {
+	if s == nil || s.DB == nil || hookGUID == "" {
+		return nil
+	}
+	row, err := s.DB.GetItemByGUID(ctx, hookGUID)
+	if err != nil || row == nil {
+		return nil
+	}
+	tree, terr := s.ItemToTree(ctx, row)
+	if terr != nil {
+		return nil
+	}
+	return tree
+}
+
+// lureContainsHook 判断钩 GUID 是否为拟饵 gpoaffnjbdo 数组中的内置钩
+// （出厂钩与实装钩同判）。
+func (s *Server) lureContainsHook(ctx context.Context, lureGUID, hookGUID string) bool {
+	if lureGUID == "" || hookGUID == "" {
+		return false
+	}
+	row, err := s.DB.GetItemByGUID(ctx, lureGUID)
+	if err != nil || row == nil {
+		return false
+	}
+	fields, err := FieldsFromJSON(row.FieldsJSON)
+	if err != nil || len(fields) == 0 || fields[0].Val == nil || fields[0].Val.Kind != proto.KindArgs {
+		return false
+	}
+	for _, g := range lureHookItemGUIDs(fields[0].Val.Items) {
+		if strings.EqualFold(g, hookGUID) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- 新玩家初始化 ----

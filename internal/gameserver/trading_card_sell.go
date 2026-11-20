@@ -5,7 +5,7 @@ package gameserver
 // 未入册的散卡——已入册卡（container=card_deck）必须先 27/3 取回，与客户
 // 端入口一致。请求参数 [GuidArr 卡实例, U64 客户端报价]；报价只作对账
 // 日志，成交价以服务端 def 属性 obcephkkfhi 为准（防作弊口径）。
-// 响应 obj-800：f2=已售 guid 列表，客户端按 guid 从本地库存移除。
+// 响应 obj-800：f2=已售 guid 列表，作为客户端唯一的库存删除事件。
 // 幂等：同 call 重放返回缓存 ACK，不重复删除入账。
 
 import (
@@ -124,10 +124,11 @@ func hTradingCardSell(ctx *Ctx) ([]byte, bool) {
 		ctx.ReplyFailure("System.IO.IOException", "卡片出售失败，请重试")
 		return nil, true
 	}
-	// 会话内刷新：已售卡 4/21 移除（客户端删除通道可靠），列表/余额随后同步
-	ctx.Sess.Push4_21(sold)
-	s.resyncTradingCardsTwice(ctx.Sess, uid)
-	ctx.Sess.Push2_1()
+	// 800.f2 已经会让客户端删除成交卡；不再追加 4/21 或全量卡片
+	// 重同步，避免同一张卡的重复库存事件重建列表/选中项。余额在响应后更新。
+	ctx.AfterResponse(func() {
+		ctx.Sess.Push2_1()
+	})
 	ctx.Log.Info("卡片出售完成", "uid", uid, "cards", len(sold), "silver", total)
 	return body, true
 }

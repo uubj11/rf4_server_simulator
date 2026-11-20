@@ -95,7 +95,7 @@ var eventRigClass = map[int64]int64{
 	9003: 1, 9102: 1, 9601: 1, 10002: 1, 10102: 1, 10403: 1, 10501: 1,
 	9602: 3, 10003: 3, 10302: 3, 10402: 3,
 	9502: 2, 10001: 2, 10101: 2, 10201: 2, 11102: 2, 11202: 2, 11303: 2,
-	12501: 3, 12601: 2, 13401: 3, 13503: 2, 14003: 3, 14203: 3,
+	12501: 2, 12601: 2, 13401: 3, 13503: 2, 14003: 3, 14203: 3,
 	14501: 2, 14701: 2, 15103: 2, 15202: 2, 15203: 3, 15303: 2,
 	16501: 3, 17102: 1, 17401: 3, 17503: 1, 18002: 1, 18003: 3,
 	18102: 1, 18702: 3, 19001: 1, 19202: 2, 19203: 3, 19303: 2,
@@ -188,8 +188,8 @@ var eventQualificationRules = []qualificationRuleDef{
 	{ID: 12201, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocVolkhov), qSpeciesIn("bream"), qWeightAtLeast(2501))},
 	{ID: 12202, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocSevDon), qSpeciesIn("taran"), qWeightAtLeast(800))},
 	{ID: 12203, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocKomarino, evLocVyunok, evLocOstrog), qGradeAtLeast(3))},
-	// 12301 文案夜晚 23:00-04:00，事件仅携带 19:00-06:00 夜间位，按 qIsNight 近似（待实机核对）。
-	{ID: 12301, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocSevDon), qIsNight(), qWeightAtLeast(3001))},
+	// 12301 的时间范围比普通夜间窄，使用持久化的咬钩时间精确判断。
+	{ID: 12301, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocSevDon), qBiteHours(23, 4), qWeightAtLeast(3001))},
 	{ID: 12302, Event: qevFishLanded, Counted: qCountSpecies(qLocLevelIn(evLocSura), qSpeciesIn("bh_carp", "s_carp"))},
 	{ID: 12303, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocSura, evLocSevDon), qLight(), qSpeciesIn("rudd"), qWeightAtLeast(1000))},
 	// 12401 缺口：「下列鱼种之一」名单未知。
@@ -445,10 +445,9 @@ var eventQualificationRules = []qualificationRuleDef{
 	{ID: 20502, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocKuori, evLocLadoga, evLocLadogaIs), qSpeciesIn("salvel_l", "palia_lud", "palia_kr"), qWeightAtLeast(3000))},
 	{ID: 20503, Event: qevFishLanded, Counted: qCountSpecies(qLocLevelIn(evLocLadoga, evLocLadogaIs))},
 	{ID: 20601, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocSura, evLocLadoga, evLocLadogaIs), qSpeciesIn("e.pikeperch"), qWeightAtLeast(7000))},
-	// 20602 「2 条稀有鱼或两种罕见鱼种」语义模糊，按 2 尾奖杯档（Grade>=3）统计（待实机核对）。
-	{ID: 20602, Event: qevFishLanded, Counted: qCountSingle(qUltralight(), qGradeAtLeast(3))},
-	// 20603 同 20602。
-	{ID: 20603, Event: qevFishLanded, Counted: qCountSingle(qUltralight(), qGradeAtLeast(3))},
+	// 文案提供两条独立完成路径：两尾星鱼，或两种罕见鱼种，不能各取一条凑数。
+	{ID: 20602, Event: qevFishLanded, Counted: qCountSingle(qUltralight(), qGradeAtLeast(3)), AlternateCounted: qCountSpecies(qUltralight(), qRarityAtLeast(1))},
+	{ID: 20603, Event: qevFishLanded, Counted: qCountSingle(qUltralight(), qGradeAtLeast(3)), AlternateCounted: qCountSpecies(qUltralight(), qRarityAtLeast(1))},
 	{ID: 20604, Event: qevFishLanded, Counted: qCountSpecies(qLocLevelIn(evLocAmber, evLocCopper, evLocElk), qRarityAtLeast(1))},
 }
 

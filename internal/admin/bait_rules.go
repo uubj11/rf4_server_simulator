@@ -344,3 +344,18 @@ func cleanGroups(in [][]string) [][]string {
 	}
 	return out
 }
+
+// baitShareMinCount 与 gameserver.loadRf4Share 使用同一口径：官方纪录里
+// 单饵样本量低于该值的比例不计入（默认 5，可用 tunable 覆盖）。
+func (s *Server) baitShareMinCount(ctx context.Context) int {
+	var v string
+	if err := s.db.SQL.QueryRowContext(ctx,
+		`SELECT value FROM tunables WHERE key='bait_share_min_count'`).Scan(&v); err != nil {
+		return 5
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 1 {
+		return 5
+	}
+	return n
+}

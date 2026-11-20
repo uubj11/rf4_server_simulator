@@ -37,7 +37,7 @@ func TestMigrationConditionEnergyMax(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := db.SQL.ExecContext(ctx,
-				`DELETE FROM schema_migrations WHERE name='migrations/00061_condition_energy_max.sql'`); err != nil {
+				`DELETE FROM schema_migrations WHERE name='migrations/00079_condition_energy_max.sql'`); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.SQL.ExecContext(ctx, `DELETE FROM tunables WHERE key='condition_energy_max'`); err != nil {

@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         请用“【功能/界面】+ 操作 + 错误结果”概括标题，并尽量一次只反馈一个问题。
-        提交前请查看 [已有 Issues](https://github.com/glance522/rf4_server_simulator/issues?q=is%3Aissue) 和 [BUG 反馈表](https://docs.qq.com/sheet/DVnpaU0JoUmxnWk1N?tab=6cahat)。已有同一问题时，请补充到原记录，避免重复提交。
+        提交前请查看 [已有 Issues](https://github.com/OpenFisherCommunity/rf4_server_simulator/issues?q=is%3Aissue) 和 [BUG 反馈表](https://docs.qq.com/sheet/DVnpaU0JoUmxnWk1N?tab=6cahat)。已有同一问题时，请补充到原记录，避免重复提交。
         安装和登录问题可先参考 [新手教程](https://docs.qq.com/aio/DVmVyc0p0SEZUU3Bw)；版本差异以所用发布包内的“快速开始.txt”为准。
   - type: dropdown
     id: category

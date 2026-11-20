@@ -40,6 +40,10 @@ var categoryWireClass = map[int64]wireClassEntry{
 	15: {"cjigljdikhe", 138}, // 钢丝/编织前导
 	17: {"ioombppcnlh", 141}, // 拟饵（f0 gpoaffnjbdo=args(60) 出厂钩数组）
 	18: {"bigdipenecj", 124},
+	// 手套：ny_mitts 的六个服装属性对应定义 peomolgjoeh/12017，
+	// 实例为 bdbcnhkogcc/113（同一组六属性 + 物品实例公共字段）。
+	// 协议字段已用 proto.ps1 核对；MMXXVI 领取/穿戴仍需客户端实机回归。
+	21: {"bdbcnhkogcc", 113},
 	22: {"hcahlnccaek", 114},
 	23: {"blpddffbgjg", 115},
 	25: {"nffjdjfkjem", 118},
@@ -117,6 +121,12 @@ var categoryWireClass = map[int64]wireClassEntry{
 	70: {"lligmmmgllg", 12703}, // case 68 ddhcineacka
 	71: {"focdogajjcc", 13001}, // case 69 lcadlijehco
 	72: {"enikeammfen", 2015},  // case 70 iidloljandl
+	// 梦鱼优惠券（cat 74）此前没有映射，prepareNewItem 回落到钓线兜底类
+	// ohciikgjghe/140，客户端按钓线 DTO 强转，标本制作商店的材料列表里
+	// 找不到这张券，制作无法进行。定义类 fpcfjngdcho/13015 的域字段
+	// fopbhlmkcpe/ppiooalfgii/eiofdcjlaai 与 coupon_chuchelo.attrs_json
+	// 完全吻合，其配对实例类为 ahgeldclmdj/13018（同族锚点：cat76→13041）。
+	74: {"ahgeldclmdj", 13018}, // case 72 mpjcnoimibo：梦鱼优惠券
 	76: {"fdnngkgnmon", 13041}, // case 74 ghikepgmojg
 	78: {"dapkdcghfmg", 11301}, // case 76 ipdpoaiekem
 	82: {"ckfmndabaei", 11304}, // imdcjllgdcn 卡册
@@ -134,6 +144,19 @@ func resolveWireClass(def *store.ItemDef) (wireClassEntry, bool) {
 	cls, ok := categoryWireClass[def.Category]
 	return cls, ok
 }
+
+// couponCategory 梦鱼优惠券（标本制作商店的免单券，一次制作消耗一张）。
+//
+// 券**不入** countableCategories：它的实例类 ahgeldclmdj 只有 dnmfciolgep
+// （剩余数量），没有客户端 UI 数量槽 ljnnpokapig，整个票券族（cat 39/55/74/76）
+// 都没有该槽，所以一张券堆成一行永远显示不出「还剩几张」。改为「一张券一个
+// 实例」：每行 dnmfciolgep 恒为 1，发放 N 张就建 N 行，制作一次删一行——客户端
+// 按 GUID 逐件渲染，玩家看到的就是 N 张卡（实机两行=两张卡已验证）。
+const couponCategory = 74
+
+// couponWireClass 券的实例类：13 字段 meta 基类，只有剩余数量槽 dnmfciolgep，
+// 没有可堆叠件用的 ljnnpokapig。
+const couponWireClass = "ahgeldclmdj"
 
 // 客户端计件类别（可堆叠合并）；钓线(11)/前导(15) 同名字段是长度 m；浮漂(28) 显式非计件。
 var countableCategories = map[int64]bool{
@@ -168,7 +191,8 @@ func fieldOpAt(class string, idx int) string {
 // PVA pcngolccead/bebejlknhka。
 func metaQtyFamily(class string) bool {
 	return class == "abmokghdbhf" || class == "bpmmimcmpof" || class == "deckldefiap" ||
-		class == "dpghngjmnap" || class == "pcngolccead"
+		class == "dpghngjmnap" || class == "pcngolccead" ||
+		class == "ahgeldclmdj" // 梦鱼优惠券：13 字段 meta 基类，权威数量槽 dnmfciolgep
 }
 
 // itemQtyFieldIdx 可堆叠数量槽 idx。多数实例类的数量字段就叫 ljnnpokapig；
@@ -182,6 +206,56 @@ func itemQtyFieldIdx(class string) int {
 	return fieldIdxByCS(class, csQty)
 }
 
+// stackQtyFieldIdx 通用库存的「剩余数量」槽：只有券 ahgeldclmdj 用
+// dnmfciolgep（券类没有 csQty 槽），其余所有类别（含 metaQtyFamily 家族）
+// 一律以 csQty（ljnnpokapig）为准。家族类的 dnmfciolgep 是定义里的常量
+// （如 cat58 的 100），代表不了玩家真实剩余量；用它读写会把 95 当成 100。
+// 与 itemQtyFieldIdx 的区别：后者是上游既有定义，服务新建物品/组合包/堆叠
+// 整理等路径，本函数只用于通用库存的读余量/写扣减，两者互不改写。
+func stackQtyFieldIdx(class string) int {
+	if class == couponWireClass {
+		return fieldIdxByCS(class, "dnmfciolgep")
+	}
+	return fieldIdxByCS(class, csQty)
+}
+
+// setStackCountFields 把计件物品的剩余件数写进字段：csQty 是通用库存的权威槽，
+// metaQtyFamily 家族类同时还要写 meta 主槽（dnmfciolgep）——setItemQty 是双写的，
+// setStackCount/setStackCountTx 若只写单槽，家族行的两槽会脱节，堆叠整理的
+// 一致性断言（item_stack_consolidation 要求 itemQtyValue == item.qty）就会把
+// 正常行判成「数量字段不一致」。写不进去返回 false。
+func setStackCountFields(class string, fields []proto.Field, count int64) bool {
+	if count < 0 {
+		count = 0
+	}
+	idx := stackQtyFieldIdx(class)
+	if idx < 0 || idx >= len(fields) {
+		return false
+	}
+	fields[idx].Num = ptrU64(uint64(count))
+	if metaQtyFamily(class) {
+		if m := itemQtyFieldIdx(class); m >= 0 && m < len(fields) && m != idx {
+			fields[m].Num = ptrU64(uint64(count))
+		}
+	}
+	return true
+}
+
+// itemStackQtyValue 与 stackQtyFieldIdx 配套的「剩余件数」读取：券读 dnmfciolgep，
+// 其余类别（含 metaQtyFamily 家族）读 ljnnpokapig。itemQtyValue 走 itemQtyFieldIdx
+// 读 meta 槽，保留给新建物品/组合包/堆叠整理等上游语义；库存扣减与堆合并必须走
+// 本函数，否则 cat58 这类家族行会把 attrs 常量当剩余量，造成材料虚增或扣减不动。
+func itemStackQtyValue(class string, fields []proto.Field) (uint64, bool) {
+	idx := stackQtyFieldIdx(class)
+	if idx < 0 || idx >= len(fields) || fields[idx].Num == nil {
+		return 0, false
+	}
+	return u64Of(fields[idx].Num), true
+}
+
+// feedMixWireClass 成品窝料（背包 cat46）实例类。
+const feedMixWireClass = "cilmgoaoofg"
+
 // qtyMirrorIdx 家族类的 UI 计数镜像槽：abmokghdbhf=f0 miecmmbpolk
 // （lillemolakn.medpgjlibog 读），bpmmimcmpof=f1 ljnnpokapig（总数槽），
 // deckldefiap=f2 ljnnpokapig（总数槽），dpghngjmnap/pcngolccead=f0
@@ -192,8 +266,25 @@ func qtyMirrorIdx(class string) int {
 		return fieldIdxByCS(class, "miecmmbpolk")
 	case "bpmmimcmpof", "deckldefiap", "dpghngjmnap", "pcngolccead":
 		return fieldIdxByCS(class, csQty)
+	case feedMixWireClass:
+		// cat46 与上述家族相反：ljnnpokapig(f10) 是权威槽（csQty），
+		// dnmfciolgep(f22) 是 UI 镜像——镜像朝权威对齐，方向别写反。
+		return fieldIdxByCS(class, "dnmfciolgep")
 	}
 	return -1
+}
+
+// ensureFeedMixQty 把成品窝料的数量槽对齐行数量：setItemQty 双写权威槽
+// ljnnpokapig（csQty）与 UI 镜像 dnmfciolgep。只动 wire 不落库——合成路径
+// setStackCountFields 对非 metaQtyFamily 家族只单写 stackQty 槽，镜像槽
+// 落库为 null（存量毒行甚至两槽皆 null），树层补齐即可，存量行自动治愈。
+// f0..f2 成分数组槽的 null 物化不在本函数——那是 #537 projectFeedRecipe
+// 的职责（注册表码 50/52/51），此处不重复。
+func ensureFeedMixQty(it *store.Item, fields []proto.Field) {
+	if it == nil || it.WireClass != feedMixWireClass {
+		return
+	}
+	_ = setItemQty(feedMixWireClass, fields, uint64(it.Qty))
 }
 
 // itemQtyValue 读取实例数量槽；没有数量字段时返回 false。
@@ -309,6 +400,9 @@ func (s *Server) ItemToTree(ctx context.Context, it *store.Item) (*proto.Value, 
 		ensureRodPodSlots(it, fields)
 	}
 	obj := proto.Obj(it.WireClass, uint32(it.TypeID), fields...)
+	if err := s.projectFeedRecipe(ctx, s.DB.SQL, obj, it.GUID); err != nil {
+		return nil, err
+	}
 
 	class := it.WireClass
 	if class == deckClass {
@@ -343,6 +437,12 @@ func (s *Server) ItemToTree(ctx context.Context, it *store.Item) (*proto.Value, 
 	// 损坏态投影：耐久耗尽的装备点亮客户端红框/折断渲染（只动 wire，不落库）。
 	// 必须放在 rebuildRod 之后——竿的 hgaijieklek 会按定义基值重建，之前写入会被抹掉。
 	applyBrokenItemState(class, obj, it.Durability)
+	if isLureRow(it) {
+		if err := s.projectLureHookSlots(ctx, it, obj); err != nil {
+			return nil, err
+		}
+	}
+	ensureFeedMixQty(it, obj.Fields)
 	return obj, nil
 }
 
@@ -738,6 +838,10 @@ func (s *Server) rebuildRod(ctx context.Context, it *store.Item, obj *proto.Valu
 			break
 		}
 		sysID, ok := rodPartSystemID(def, attr)
+		old := obj.Fields[i].Val
+		if installed := s.childSystemID(ctx, old); installed != "" {
+			sysID, ok = installed, true
+		}
 		if !ok || sysID == "" {
 			continue
 		}
@@ -750,10 +854,16 @@ func (s *Server) rebuildRod(ctx context.Context, it *store.Item, obj *proto.Valu
 		}
 		// 竿侧受力磨损把子件耐久持久化在 DB 字段树里（applyRodStressWear）：
 		// 现建子件前先把已持久化的耐久合并回来，否则每次快照都会把磨损抹回满值。
-		// 状态位/其余字段仍以现建为准，只合并耐久一项。
-		if old := obj.Fields[i].Val; old != nil && old.Kind == proto.KindObj {
-			if dur := reelChildDurability(old); dur < 1 {
-				setReelChildDurability(child, dur)
+		// 状态位仍按竿槽重建；已安装件保留实例 GUID 和耐久。
+		if old != nil && old.Kind == proto.KindObj {
+			if idx := fieldIdxByCS(old.Class, csGUID); idx >= 0 && idx < old.FieldCount() && old.Fields[idx].Hex != "" {
+				child.Fields[fieldIdxByCS(child.Class, csGUID)].Hex = old.Fields[idx].Hex
+			}
+			if idx := fieldIdxByCS(old.Class, csDurability); idx >= 0 && idx < old.FieldCount() {
+				setReelChildDurability(child, reelChildDurability(old))
+			}
+			if idx := fieldIdxByCS(old.Class, csCreated); idx >= 0 && idx < old.FieldCount() {
+				child.Fields[fieldIdxByCS(child.Class, csCreated)].Num = old.Fields[idx].Num
 			}
 		}
 		obj.Fields[i].Val = child
@@ -797,7 +907,7 @@ func (s *Server) rebuildRod(ctx context.Context, it *store.Item, obj *proto.Valu
 //
 // f5 的 field[2] 是 gcfcdnfmnbh 列表（品类、guid、附加值），客户端工作坊
 // 与装配界面都按它逐行渲染零件。只写 f0..f2 而不登记进 f5 时，零件行为空。
-// 已存在的 guid 不重复添加；非竿或没有 f5 时直接返回。
+// 同品类旧索引由当前部件替换；没有 f5 时直接返回。
 func (s *Server) appendFactoryPartsToRig(ctx context.Context, obj *proto.Value) {
 	if obj == nil || obj.Kind != proto.KindObj || obj.FieldCount() <= 5 {
 		return
@@ -810,15 +920,6 @@ func (s *Server) appendFactoryPartsToRig(ctx context.Context, obj *proto.Value) 
 	if arr == nil {
 		return
 	}
-	seen := map[string]bool{}
-	for _, e := range arr.Items {
-		if e == nil || e.Kind != proto.KindObj || e.FieldCount() < 2 {
-			continue
-		}
-		if g := e.Fields[1].Hex; g != "" {
-			seen[g] = true
-		}
-	}
 	for i := 0; i < 3 && i < obj.FieldCount(); i++ {
 		child := obj.Fields[i].Val
 		if child == nil || child.Kind != proto.KindObj {
@@ -829,7 +930,7 @@ func (s *Server) appendFactoryPartsToRig(ctx context.Context, obj *proto.Value) 
 			continue
 		}
 		g := child.Fields[gidx].Hex
-		if g == "" || seen[g] {
+		if g == "" {
 			continue
 		}
 		var cat uint64
@@ -838,12 +939,21 @@ func (s *Server) appendFactoryPartsToRig(ctx context.Context, obj *proto.Value) 
 				cat = uint64(def.Category)
 			}
 		}
-		arr.Items = append(arr.Items, wiregen.MustMakeObj("gcfcdnfmnbh", map[int]*proto.Value{
+		if cat == 0 {
+			continue
+		}
+		kept := arr.Items[:0]
+		for _, e := range arr.Items {
+			if e != nil && e.Kind == proto.KindObj && e.FieldCount() >= 2 && e.Fields[0].U32() == uint32(cat) {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		arr.Items = append(kept, wiregen.MustMakeObj("gcfcdnfmnbh", map[int]*proto.Value{
 			0: proto.U32(uint32(cat)),
 			1: proto.Guid(g),
 			2: proto.U32(0),
 		}))
-		seen[g] = true
 	}
 }
 
@@ -1197,8 +1307,8 @@ func netTicksNow() int64 {
 var reclassifyCategories = map[int64]bool{
 	2: true, 19: true, 20: true, 30: true, 33: true, 38: true, 41: true,
 	42: true, 45: true, 47: true, 55: true, 57: true, 58: true, 61: true,
-	62: true, 63: true, 69: true, 70: true, 71: true, 72: true, 76: true,
-	78: true, 79: true, 82: true,
+	62: true, 63: true, 69: true, 70: true, 71: true, 72: true, 74: true,
+	76: true, 78: true, 79: true, 82: true,
 }
 
 func (s *Server) reclassifyStoredItem(ctx context.Context, it *store.Item, def *store.ItemDef) (bool, error) {
@@ -1253,6 +1363,10 @@ func (s *Server) reclassifyStoredItem(ctx context.Context, it *store.Item, def *
 	setNum(csNumericID, uint64(def.NumericID))
 	rowQty := it.Qty
 	if countableCategories[def.Category] {
+		writeItemQty(cls.Class, obj, uint64(rowQty))
+	} else if def.Category == couponCategory {
+		// 券已退出 countableCategories，但实例类 ahgeldclmdj 的权威数量槽
+		// dnmfciolgep 仍须写回，否则改写后数量槽保持 0，客户端读不出这一张。
 		writeItemQty(cls.Class, obj, uint64(rowQty))
 	}
 	workmanship := it.Workmanship
@@ -1336,6 +1450,13 @@ func (s *Server) CreateItem(ctx context.Context, uid int64, itemID, container st
 			writeItemQty(cls.Class, obj, fieldQty)
 			rowQty = int64(fieldQty)
 		}
+	} else if def.Category == couponCategory {
+		// 一券一实例：数量槽固定 1，行数即张数。units 必须严格等于 1：
+		// 多张请走 grantItemUnits/prepareCouponRows；units<1 也不能白送一张。
+		if units != 1 {
+			return nil, fmt.Errorf("梦鱼券需按张建行，CreateItem 不支持 units=%d", units)
+		}
+		writeItemQty(cls.Class, obj, 1)
 	}
 	// 嵌套子配置物化（渔轮/前导/拟饵）
 	s.materializeInto(ctx, cls.Class, def, obj, guid, 1.0, 1.0)
@@ -1397,6 +1518,10 @@ func (s *Server) prepareNewItemWithCount(ctx context.Context, uid int64, itemID,
 	if err != nil {
 		return nil, err
 	}
+	if it.WireClass == couponWireClass {
+		// 券不接受「一行多张」：多张必须走 prepareCouponRows 逐张建行。
+		return nil, fmt.Errorf("梦鱼券需按张建行，prepareNewItemWithCount 不支持 count=%d", count)
+	}
 	fields, err := FieldsFromJSON(it.FieldsJSON)
 	if err != nil {
 		return nil, err
@@ -1412,11 +1537,94 @@ func (s *Server) prepareNewItemWithCount(ctx context.Context, uid int64, itemID,
 	return it, nil
 }
 
+// prepareCouponRows 按「一张券一个实例」构造 count 张独立券（不落库）。
+//
+// 券的数量槽本身可用（dnmfciolgep），但客户端背包不读它、只按行渲染，
+// 所以张数必须用行数表达。上限沿用组合包的实例数上限，避免一次构造过多。
+func (s *Server) prepareCouponRows(ctx context.Context, uid int64, itemID, container string, count int64) ([]*store.Item, error) {
+	// 券是一券一实例：张数必须由调用方明确给出，不能把 0/负数夹成 1，
+	// 否则调用方少传一个参数就会凭空多出一张券。
+	if count < 1 {
+		return nil, fmt.Errorf("梦鱼券张数必须大于 0: %d", count)
+	}
+	if count > maxBundlePreparedItems {
+		return nil, fmt.Errorf("梦鱼券张数 %d 超过上限 %d", count, maxBundlePreparedItems)
+	}
+	rows := make([]*store.Item, 0, count)
+	for i := int64(0); i < count; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		it, err := s.prepareNewItem(ctx, uid, itemID, container, 1, "")
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, it)
+	}
+	return rows, nil
+}
+
+// insertPreparedRows 在一个经济事务里插入多行，任一行失败整体回滚。
+func (s *Server) insertPreparedRows(ctx context.Context, rows []*store.Item) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := beginEconomyTx(ctx, s.DB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, it := range rows {
+		if _, _, gerr := grantPreparedItemTx(ctx, tx, it, false); gerr != nil {
+			return gerr
+		}
+	}
+	return tx.Commit()
+}
+
+// grantItemUnits 发放 units 件物品并返回全部新行：可堆叠类别合并成一行，
+// 梦鱼券按件建行。管理指令、礼包等按「件数」发东西的入口都走这里。
+func (s *Server) grantItemUnits(ctx context.Context, uid int64, itemID, container string, units int64) ([]*store.Item, error) {
+	def, err := s.DB.GetItemDefByItemID(ctx, itemID)
+	if err != nil || def == nil {
+		return nil, fmt.Errorf("物品定义不存在: %s", itemID)
+	}
+	if def.Category != couponCategory {
+		it, _, aerr := s.AddToStack(ctx, uid, itemID, container, units)
+		if aerr != nil {
+			return nil, aerr
+		}
+		return []*store.Item{it}, nil
+	}
+	rows, err := s.prepareCouponRows(ctx, uid, itemID, container, units)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.insertPreparedRows(ctx, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // AddToStack 为可堆叠物品合并数量，返回现有物品或新行。
 func (s *Server) AddToStack(ctx context.Context, uid int64, itemID, container string, units int64) (*store.Item, bool, error) {
 	def, err := s.DB.GetItemDefByItemID(ctx, itemID)
 	if err != nil || def == nil {
 		return nil, false, fmt.Errorf("物品定义不存在: %s", itemID)
+	}
+	if def.Category == couponCategory {
+		// 梦鱼券：一张一个实例。调用方给的是张数，就逐张建行。
+		rows, err := s.prepareCouponRows(ctx, uid, itemID, container, units)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(rows) == 0 {
+			return nil, false, fmt.Errorf("梦鱼券张数无效: %d", units)
+		}
+		if err := s.insertPreparedRows(ctx, rows); err != nil {
+			return nil, false, err
+		}
+		return rows[len(rows)-1], false, nil
 	}
 	if !countableCategories[def.Category] {
 		it, err := s.CreateItem(ctx, uid, itemID, container, units)
@@ -1425,11 +1633,9 @@ func (s *Server) AddToStack(ctx context.Context, uid int64, itemID, container st
 	// 合并写入走 row.WireClass 驱动的 setItemQty（家族镜像在函数内处理），
 	// 无需在此预先解析实例类。
 
-	defQty := int64(1)
-	if v, ok := defAttrU64(def, csQty); ok && v > 0 {
-		defQty = int64(v)
-	}
-	addQty := defQty * units
+	// units 是请求发放的件数，直接累加到堆上；不能再乘定义单位量——cat58 的
+	// dip 定义单位量是 100，乘了会把「再来 1 件」变成「再来 100 件」。
+	addQty := units
 	// 找同类同 ID 堆
 	guids, _ := s.DB.ItemGUIDsByContainers(ctx, uid, []string{container})
 	for _, g := range guids {
@@ -1438,7 +1644,7 @@ func (s *Server) AddToStack(ctx context.Context, uid int64, itemID, container st
 			continue
 		}
 		fields, _ := FieldsFromJSON(row.FieldsJSON)
-		if cur, ok := itemQtyValue(row.WireClass, fields); ok {
+		if cur, ok := itemStackQtyValue(row.WireClass, fields); ok {
 			// 若 row.qty 与字段值不一致，以字段值为基准修正后再累加。
 			if cur > 0 {
 				row.Qty = int64(cur)

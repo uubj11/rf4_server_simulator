@@ -157,3 +157,135 @@ Status: in-progress
 - [假设] slope=0.35 种内通用：perch/crucian/g_carp 多重量级样本钉死，其余种
   样本量不足以独立验证斜率。
 - amp 列存在 ~1.3 独立因子，形式未定，未验证，本期不动。
+
+## v2 增补：恒 k/变 k 两类模型 + 17 新实测种（2026-11-17）
+
+数据源：2026-11-16/17 断电抢救包（`tools/wireshark/断电抢救-20261116.pcapng`，
+53 条 14/14 A 级样本，全部经服务端通道切换恢复解密——见
+logs/captures/official_trace/HANDOFF.md v2 章节）。鱼种代码↔中文名对照以
+static.sqlite3 `loc_fish` 表为准。
+
+### 发现：k 与体重关系分两类
+
+- **恒 k 类（Slope=0，pull = w×k）**：海鱼与小型鱼。跨体重档 k 精确不变：
+  coalfish 绿青鳕 702~3027g ×4 恒 21.58、atl_cod 大西洋鳕 ×2 恒 21.58、
+  m_scorpius 短角大杜父鱼 205~1142g ×5 恒 17.66、shemaya_cha 黑海欧白鱼
+  117~237g ×4 恒 18.64、tiulka 棱鲱 ×6 恒 ≈18.6。k 取值落在离散集合
+  {17.66, 18.64, 19.62, 21.58, 22.56, 23.54, 25.53}，疑似服务端曲线池直配幅值。
+  旧单样本 taran（18.64）/piksha（18.64）/b_gill（19.62）与离散值精确重合，
+  v2 一并改判恒 k。
+- **变 k 类（k = K0 + slope·ln(w_kg)，slope 鱼种各异）**：鲤科淡水鱼。
+  c.roach 0.23 / g_carp 0.23 / crucian 0.35 / perch 0.38 / carp 0.49 /
+  c.carp 0.45 / rudd 0.53 / m_carp 0.59。v1 的全局 slope=0.35 是折中值。
+
+### 实现变更
+
+- `fishPullK0` 值类型 `float64` → `fishPullParam{K0, Slope}`；Slope<0 表示
+  单样本未标定，回落全局 `fishPullLnSlope`（=0.35，降级为组/fallback 默认斜率）。
+- 恒 k 类不吃 `fish_pull_ln_slope` tunable（锚点测试断言）。
+- `fishPullK0For` 保留返回 K0（日志/显示层用），主路径改 `fishPullParamFor`。
+- f8 官方路径 0.5N 下限降为 0.05N：官方 10g 棱鲱 f8=0.186N、24g 欧鲌 0.424N，
+  旧下限与 A 级样本矛盾（legacy 分支保持 0.5N 不动）。
+- 17 个新实测种入表（恒 k 13 + 变 k/先验 4）：coalfish 21.58、atl_cod 21.58、
+  m_scorpius 17.66、shemaya_cha 18.64、tiulka 18.64、pumps_sunfish 19.62、
+  menek 18.64、pollachius 22.56、atl_herring 22.57、makrel 23.54、
+  cha_herring 25.53、rudd {19.24, 0.53}、carp_ghost 16.73、n_carp 16.53、
+  kw_tench 18.68、c_bleak 18.81、m_carp {16.27, 0.59}（均为 K0，恒 k 类
+  Slope=0、鲤科单样本 -1）。**m_carp 为低置信口径**：4 样本仅产出拟合参数，
+  无单样本 f8 锚点、无 f5 实测值（样本原始值按 CONTRIBUTING 禁令不入库、
+  断电后未留档），测试只钉表参数；补抓样本后再升级数值锚点。
+- 旧种复核修正：carp {16.50, 0.49}（7 样本）、c.carp {13.84, 0.45}（4）、
+  c.roach {16.36, 0.23}、perch {17.60, 0.38}（9）、g_carp {18.79, 0.23}（5，
+  底钓2 样本重拟合）；crucian {15.05, 0.35} 6 样本精确复核不变。
+- `fishPullSpeciesGroup` 移除已实测 5 种（coalfish/pollachius/menek/n_carp/
+  kw_tench）；`marine_gadid` 19.7 组值保留给未实测鳕形目，注释标注实测离散值。
+- f5 `fishStaminaRatePerGram` 新增 16 种（均值口径，样本极差 ±13%~30%）；
+  perch 2.75→2.69、c.carp 2.52→2.78（样本扩充重算）。m_carp 不在 f5 表
+  （无实测均值），运行时走 cyprinid 组值 2.50/g 回退。
+- 搏斗组词表补 tiulka → small 组（原落 default）。
+
+### 锚点与自校验
+
+- 锚点测试扩到 30 种 68 条（新种配跨体重档对钉 slope/恒 k；m_carp 无单样本
+  值不入锚点，仅钉表参数）；
+  crucian K0=15.05 与 v1 spec 精确一致、f5 每 g 2.297 vs 2.29 双指标自校验通过。
+- 全量门禁：gameserver 包仅剩既有基线失败 TestCafeNativeFlowPaysAndPushesRemoval
+  （单跑过、时序敏感，口径同 AGENTS.md）；其余包 2 失败均为环境/工作区既有问题
+  （launcher GOTMPDIR 路径分隔符、docs 索引缺 2026-11-16 解码文档登记），与本分支无关。
+
+### v2.1 增补：未实测种全覆盖归组 + 皮肤变种别名（2026-11-17）
+
+- static 库 249 种全覆盖，不再有裸 fallback：31 实测 + 204 习性组 + 16 别名
+  = 251 键，其中 `vobla`/`zander` 为两个非 loc_fish 兼容键（客户端旧键，
+  行为兼容保留），loc_fish 实际 249 种零遗漏。
+- **别名表 `fishPullAlias`**：16 个皮肤/变种鱼种继承宿主实测参数（避免组表
+  斜率偏差）——carp 系 10（common_carp/三花/鳞鲤白化/匈红鲤/绿鲤/带形框形
+  镜鲤系）、m_carp 系 3、n_carp 系 2、g_carp_albino。
+- **组值按组内实测成员标定**（`fishPullGroupK0` 值类型同步升级
+  `fishPullParam`）：marine_gadid 19.7→{21.58,0}、sunfish 20.4→{19.62,0}、
+  migratory_roach 18.8→{18.64,0}、herb_carp 18.2→{18.79,0.23}、
+  roach_run 16.4→{16.36,0.23}、still_carp 15.0→{15.05,0.35}、
+  pond_carp 13.7→{13.84,0.45}、carp_mid 16.7→{16.50,-1}、
+  predator 17.5→{17.30,-1}、weak_silver/salmonid/sturgeon/catfish/flatfish
+  保持 K0（Slope=-1 全局先验）。海鱼类组 Slope=0 恒 k、鲤科组继承成员
+  自拟合斜率、纯估计组 -1 吃全局 tunable。
+- **新增 5 组**：marine_pelagic {22.57,0}（鲱鲭中上层）、marine_rock {17.66,0}
+  （鮋/杜父/绵鳚/鳗鳃类）、small_forage {18.64,0}（小型饵料鱼：刺鱼/鮈/鱥/
+  泥鳅/胡瓜鱼/shemaya 自 roach_run 移入）、apex {25.53,0}（鲨/剑鱼/金枪鱼，
+  纯推断取离散上界）。
+- 官方 k 域注释更新：v1 的 [12.6, 20.6] 被恒 k 海鱼实证推翻，实测域
+  [12.59, 25.53]（s.bream~cha_herring）。
+- 归组依据：key/中文名词表分类（鳞鲱鳟鲈鲷鲆鲽鲨鳗鲶鲟……）+ 离散 k 离散值
+  近亲继承；蟹/贝/蛙等无拉力数据的渔获按体型归 weak_silver/marine_rock
+  （低置信，抓到后即校准）。fallback 17.5 仅剩非 loc_fish 未知键兜底。
+
+### v2.1.1 审查修正：跨层归组自洽 + 低置信口径落档（2026-11-17，PR #516）
+
+- **crawfish（河螯虾）归组修正**：salmonid → weak_silver。虾无拉力数据，
+  按「蟹/贝/蛙按体型归组」口径归贝/蛙组（K0 13.00），与 f5/f6 的
+  default 弱鱼口径（2.60/g、f6 0.55）方向一致；原 salmonid 18.00 与
+  虾的体型/习性明显不符。
+- **pinagor（圆鳍鱼）归组修正**：salmonid → marine_rock {17.66, 0}。
+  loc_fish 里圆鳍鱼仅出现在挪威海，运行时 marine 判定为真，f5/f6/f21
+  走 marine 口径（8.445/g、merlang 曲线池），f8 却走鲑科淡水模型
+  18.00 属跨层不自洽；圆鳍鱼为海底栖鱼，归 marine_rock 与 m_scorpius
+  恒 k 锚同族。
+- **m_carp 低置信口径落档**：4 样本仅产出拟合参数 {16.27, 0.59}，无单样本
+  f8 锚点、无 f5 实测值；f5 运行时走 cyprinid 组值 2.50/g 回退（表内
+  30 实测种、锚点 30 种 68 条计数以此为准）。测试钉表参数防误改，
+  补抓样本后再升级数值锚点。
+- **测试斜率可观测性修正**：斜率 tunable/别名继承断言原用 1kg
+  （ln(1)=0，斜率项恒消失，tunable 是否接线不可观测），改 2kg
+  （ln2≈0.693）并按 tunable 真实语义断言：`fish_pull_ln_slope` 只替换
+  Slope<0 未标定种的回退斜率——置 0 时 2kg fallback 恰为 2×17.5、
+  置 1 时为 2×(17.5+ln2)；自拟合斜率（perch 0.38）与恒 k（coalfish）
+  不受 tunable 影响；carp_albino 与 carp 2kg f8 逐位相等（整参数继承）。
+
+### v2.1.2 复审修正：组表驱动全搏斗层 + 别名全链路继承（2026-11-17，PR #516）
+
+- **f8 组表直查驱动 f5/f6/f21**（复审 P2-1）：新增 `fishPullGroupFightKey`
+  （f8 组 → 组键）与 `fightGroupKeyFromPullGroup`，`fishFightGroupKeyFor` 与
+  `fishCurveArchetypeFor` 淡水分支先查组表、词表只兜底未入组鱼种。修复
+  「54 个 f8 salmonid 中 26 个 f5/f6 落 default」等漂移：sig 系列等俄语译名
+  鲑科 →salmonid（3.00/g、f6 0.60、e.chub 池）、small_forage 组泥鳅/胡瓜鱼
+  →small（a_smelt 原被词表 smelt 误归 salmonid）、sunfish 组太阳鱼→small、
+  predator 组→ambush、weak_silver（crawfish）→small（2.50/g、f6 0.50、
+  c.roach 池）。海组（marine_*/flatfish）映射交回海图判定：淡水图的
+  marine_rock 成员（鳗/七鳃鳗/杜父）维持词表口径，淡水鳗鱼不吃 8.445/g
+  海水耐力。完备性测试保证组表/组值表每个键都有映射。
+- **agar/warm 移出 marine 词表**（复审点名 warm 跨层偏差）：两键只在淡水图
+  （chart-roster-marine-group spec §Further Notes 预留的「行为兼容保留」
+  口径），词表 marine 曾使 warm 的 f5 吃 8.445/g 海水耐力；移除后由组表
+  直查归 predator/sunfish。b_herring/c_herring/cha_herring/k_herring 为
+  里海流域洄游真海鱼，词表 marine 与 marine_pelagic 组语义同向，保留。
+- **皮肤变种全链路继承宿主**（复审 P2-2）：`fishPullAliasHost` 解析别名后
+  统一进 f5/f6 显式表（`fishStaminaRatePerGram`/`fishF6Table`/`fishF6Step`
+  用宿主键查询）与词表判定（`fishFightArchetypeFor` 入口解析）。midori_g
+  现在 f8/f5/f6/f21 = carp 的 16.50+0.49·ln(w)/2.10/g/0.65/c.carp 池，
+  非 1kg 断言（2kg f8 逐位相等）。
+- **fight_power_scale 分支下限 0.5N→0.05N**（复审 P2-3）：与主路径统一为
+  浮点保护下限；tiulka 10g 官方 f8=0.1864N，scale=0.5 现得 0.0932N
+  （旧下限抬回 0.5N），加回归测试。
+- **词表既有口径测试同步**：s.orfe（roach_run→small）、neiva（salmonid）、
+  m_zubatka（predator→ambush）等断言按组表直查新口径更新；受影响种在
+  生产的行为变化方向与 f8 组语义一致。

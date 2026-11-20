@@ -107,9 +107,9 @@ func TestCheckPreviewNotNewer(t *testing.T) {
 func TestCheckReportsLatestWhenAlreadyCurrent(t *testing.T) {
 	env := newTestEnv(t, manifestBody(1,
 		releaseBody("v1.0.0", "20261106120000",
-			"notes_url", "https://github.com/glance522/rf4_server_simulator/releases/tag/v1.0.0",
-			"download_url", "https://github.com/glance522/rf4_server_simulator/releases/latest",
-			"download_mirror_url", "https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/v1.0.0/a.zip"), ""))
+			"notes_url", "https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/tag/v1.0.0",
+			"download_url", "https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/latest",
+			"download_mirror_url", "https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/v1.0.0/a.zip"), ""))
 	res, err := env.checker.Check(context.Background(), "v1.0.0", "20261107120000")
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -125,11 +125,11 @@ func TestCheckReportsLatestWhenAlreadyCurrent(t *testing.T) {
 func TestCheckStableNewerAvailable(t *testing.T) {
 	env := newTestEnv(t, manifestBody(1,
 		releaseBody("v1.2.0", "20261107120000",
-			"notes_url", "https://github.com/glance522/rf4_server_simulator/releases/tag/v1.2.0",
-			"download_url", "https://github.com/glance522/rf4_server_simulator/releases/latest",
-			"download_mirror_url", "https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/v1.2.0/rf4_server_simulator-v1.2.0-windows-amd64.zip"),
+			"notes_url", "https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/tag/v1.2.0",
+			"download_url", "https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/latest",
+			"download_mirror_url", "https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/v1.2.0/rf4_server_simulator-v1.2.0-windows-amd64.zip"),
 		releaseBody("preview-20261107T110000Z-abc1234", "20261107110000",
-			"download_mirror_url", "https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/preview-20261107T110000Z-abc1234/rf4_server_simulator-preview-20261107T110000Z-abc1234-windows-amd64.zip")))
+			"download_mirror_url", "https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/preview-20261107T110000Z-abc1234/rf4_server_simulator-preview-20261107T110000Z-abc1234-windows-amd64.zip")))
 	res, err := env.checker.Check(context.Background(), "v1.1.0", "20261101120000")
 	if err != nil {
 		t.Fatalf("Check: %v", err)

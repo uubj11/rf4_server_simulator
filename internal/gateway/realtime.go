@@ -20,13 +20,14 @@ import (
 
 // realtime 指标。
 var (
-	rtConnsActive  prometheus.Gauge
-	rtFramesIn     *prometheus.CounterVec
-	rtFramesOut    prometheus.Counter
-	rtAcksSent     prometheus.Counter
-	rtAuthFailures prometheus.Counter
-	rtHandoffSaved prometheus.Counter
-	rtHandoffUsed  prometheus.Counter
+	rtConnsActive    prometheus.Gauge
+	rtFramesIn       *prometheus.CounterVec
+	rtFramesOut      prometheus.Counter
+	rtAcksSent       prometheus.Counter
+	rtAuthFailures   prometheus.Counter
+	rtHandoffSaved   prometheus.Counter
+	rtHandoffUsed    prometheus.Counter
+	rtHandoffMissing prometheus.Counter
 )
 
 func initRealtimeMetrics(reg *prometheus.Registry) {
@@ -37,6 +38,7 @@ func initRealtimeMetrics(reg *prometheus.Registry) {
 	rtAuthFailures = metrics.NewCounter(reg, "gateway_realtime_auth_failures_total", "认证失败数")
 	rtHandoffSaved = metrics.NewCounter(reg, "gateway_realtime_handoff_saved_total", "重连状态保存数")
 	rtHandoffUsed = metrics.NewCounter(reg, "gateway_realtime_handoff_used_total", "重连状态恢复数")
+	rtHandoffMissing = metrics.NewCounter(reg, "gateway_realtime_handoff_missing_total", "重连请求但无状态可承接数")
 }
 
 // obsRegistry 观测端口缺省时用本地一次性注册表（测试场景），保证指标永不 nil。
@@ -57,17 +59,45 @@ type RealtimeServer struct {
 	sem    chan struct{}
 	sids   sync.Map // sid -> *clientSession
 	sidSeq atomic.Uint64
+	// writers 只跟踪写者 goroutine。Close 必须等它归零，否则 main 里的
+	// db.Close() 会先于 handoff 落库，承接状态直接丢失。这里刻意不跟踪
+	// 整个会话 goroutine：会话收尾还要走隧道 sendClose，而 getConn 持全局
+	// 锁串行退避与拨号，会话一多就会拖到分钟级。
+	// writerMu 与 closing 配合，保证 Wait 期间不会有新的 Add。
+	writerMu sync.Mutex
+	writers  sync.WaitGroup
+	closing  atomic.Bool
+	// owners 记录每个 token 当前由哪个会话持有（token -> sid）。
+	//
+	// 承接状态按 token 存储，而同一 token 可能同时活着两个会话：主服已接管
+	// 旧会话，但网关侧旧 TCP 还没被读循环发现断开，旧写者仍在跑、仍会周期性
+	// 保存快照。没有这张表的话，旧写者会用落后的 wire_id 把新会话刚保存的
+	// 状态覆盖回去，客户端下次重连就从更早的位置续流，于是又解不开。
+	ownerMu sync.Mutex
+	owners  map[string]uint64
+
+	// tokenSlots 把「所有权校验 + 快照导出 + 落库」和「所有权夺取」串行化到
+	// 同一个 token 上。只做一次布尔校验挡不住 TOCTOU：旧写者通过校验之后可能
+	// 被调度走，新会话趁这个窗口接管并写入更新的 next_wire_id，随后旧写者把
+	// 自己那份更旧的快照写回去，客户端下次重连又从更早的位置续流。
+	// 用固定条纹而不是按 token 建锁：token 会不断新增，按需建锁会让这张表
+	// 无界增长；同一 stripe 上的不同 token 偶尔互相串行，代价可以忽略。
+	tokenSlots [tokenSlotCount]sync.Mutex
 }
+
+// tokenSlotCount 是所有权临界区的条纹数。取足够大的 2 的幂，让 hash 分布均匀。
+const tokenSlotCount = 64
 
 // NewRealtimeServer 构建 realtime 服务。
 func NewRealtimeServer(cfg config.Gateway, store Store, log *slog.Logger, tm *TunnelManager, obs *metrics.Server) *RealtimeServer {
 	initRealtimeMetrics(obsRegistry(obs))
 	return &RealtimeServer{
-		cfg:   cfg,
-		store: store,
-		log:   log,
-		tm:    tm,
-		sem:   make(chan struct{}, cfg.MaxConns),
+		cfg:    cfg,
+		store:  store,
+		log:    log,
+		tm:     tm,
+		sem:    make(chan struct{}, cfg.MaxConns),
+		owners: make(map[string]uint64),
 	}
 }
 
@@ -105,8 +135,32 @@ func (s *RealtimeServer) Serve() error {
 	}
 }
 
-// Close 停止接受。
-func (s *RealtimeServer) Close() error { return s.ln.Close() }
+// Close 停止接受新连接，并等待写者把 handoff 落库后返回。
+//
+// 关闭顺序很关键：隧道断开时主服会要求断开全部会话，这些会话的写者
+// goroutine 还要把 RC4 流与 wire_id 写进 handoff。如果这里不等它们结束，
+// 调用方随后的 db.Close() 会让最后一次——也是最准确的一次——保存失败，
+// 客户端重连时只能承接一份过期快照，keystream 立刻错位。
+//
+// 只等写者，不等整个会话：会话收尾随后的 sendClose 要走隧道，而 getConn
+// 持全局锁串行退避与拨号，20 个会话能拖过 systemd 的 90 秒停止超时。
+// 一旦被 SIGKILL，db.Close() 反而抢在 handoff 落库之前，修复目标全丢。
+func (s *RealtimeServer) Close() error {
+	first := !s.closing.Swap(true)
+	var err error
+	if s.ln != nil {
+		err = s.ln.Close()
+	}
+	if first {
+		s.dropAll("gateway_close")
+	}
+	// 持 writerMu 再 Wait：同时挡住新建会话的 writers.Add（WaitGroup 不允许
+	// 在 Wait 进行中 Add）。已经通过检查的会话不会被丢下，Add 都在此锁内。
+	s.writerMu.Lock()
+	s.writers.Wait()
+	s.writerMu.Unlock()
+	return err
+}
 
 // byID 按 sid 取会话。
 func (s *RealtimeServer) byID(sid uint64) *clientSession {
@@ -220,6 +274,10 @@ func (s *RealtimeServer) handleConn(nc net.Conn) {
 	}
 
 	// hermes 帧（明文，payload 含 <hermes>）
+	//
+	// 只消费到 hermes 那一帧为止。客户端常在同一个 TCP 段里紧跟 hermes 发出
+	// 第一个业务帧；若把整段解析结果一起吞掉，那一帧的 RC4 就被客户端消耗而
+	// 服务端没有消耗，此后每条上行都对不上 keystream——承接的会话第一帧就失步。
 	hermesSeen := false
 	for !hermesSeen {
 		frames, consumedBytes, err := proto.TakeCompleteFrames(buf)
@@ -227,12 +285,22 @@ func (s *RealtimeServer) handleConn(nc net.Conn) {
 			log.Warn("hermes 阶段帧解析失败", "err", err)
 			return
 		}
-		buf = buf[consumedBytes:]
-		for _, f := range frames {
+		keep := len(frames)
+		for i, f := range frames {
 			if f.FrameType == 0 && contains(f.Payload, hermesMarker) {
 				hermesSeen = true
+				keep = i + 1
+				break
 			}
 		}
+		consumed := 0
+		for _, f := range frames[:keep] {
+			consumed += len(f.Raw)
+		}
+		if consumed == 0 {
+			consumed = consumedBytes
+		}
+		buf = buf[consumed:]
 		if hermesSeen {
 			break
 		}
@@ -259,7 +327,9 @@ func (s *RealtimeServer) handleConn(nc net.Conn) {
 	}
 	key := []byte(token)
 	if reconnect {
-		if h, err := s.store.LoadHandoff(context.Background(), token); err == nil && h != nil {
+		h, err := s.store.LoadHandoff(context.Background(), token)
+		switch {
+		case err == nil && h != nil:
 			sess.rc4In = proto.Restore(h.RC4In)
 			sess.rc4Out = proto.Restore(h.RC4Out)
 			sess.nextWireID = h.NextWireID
@@ -269,7 +339,23 @@ func (s *RealtimeServer) handleConn(nc net.Conn) {
 			sess.resumed = true
 			rtHandoffUsed.Inc()
 			log.Info("realtime 重连成功：承接既有 RC4 密码流", "next_wire_id", sess.nextWireID)
-			_ = s.store.DeleteHandoff(context.Background(), token)
+		case err != nil:
+			// 读承接状态本身失败（数据库故障等）。这和「确实没有状态」是两码事：
+			// 此时按「没有状态」继续，会重新 KSA 出全新密码流，而客户端的流还在
+			// 旧位置上——结果就是整条下行全部解不开，同时库里那份承接状态被留成
+			// 永远没人再读的孤儿。正确做法是中止本次重连、把状态留着，让客户端
+			// 重试或人工介入。
+			rtHandoffMissing.Inc()
+			log.Error("读取承接状态失败，中止本次重连并保留承接状态", "err", err)
+			return
+		default:
+			// 客户端按「延续旧流」重连，但服务端确实没有可承接的状态。这里必须
+			// 显式记录下来：随后会用同一个 token 重新 KSA 出全新密码流，而
+			// 客户端的流早就走远了——除了客户端整条连接重建，没有别的救法。
+			// 不区分这两种情形，日志里只剩一片「信封解析失败」，无法定位。
+			rtHandoffMissing.Inc()
+			log.Warn("realtime 重连但无 handoff 可承接，将新建密码流（客户端大概率解不开下行）",
+				"reconnect", reconnect)
 		}
 	}
 	if sess.rc4In == nil {
@@ -291,9 +377,40 @@ func (s *RealtimeServer) handleConn(nc net.Conn) {
 		return
 	}
 
+	// 夺取该 token 的所有权：此后旧会话的周期性快照一律作废。
+	// 必须早于写者启动——否则新写者可能先存一版，随后被仍在跑的旧写者
+	// 用更旧的 wire_id 覆盖回去，客户端下次重连就从更早的位置续流。
+	s.claimOwnership(token, sess.id)
+	defer s.releaseOwnership(token, sess.id)
+
 	// ---- 单写者 goroutine ----
+	// 登记到 writers：Close 只等写者把 handoff 落库，不等随后的隧道收尾。
+	// 登记与 Close 的等待用 writerMu 互斥，避免 WaitGroup 在 Wait 期间被 Add。
+	s.writerMu.Lock()
+	if s.closing.Load() {
+		s.writerMu.Unlock()
+		// 关闭已经进入等待阶段，这个会话赶不上收尾：把刚开的隧道会话也关掉，
+		// 否则主服会留下一条没有 CLOSE 的悬挂会话。
+		_ = s.tm.sendClose(sess.id, "gateway_close")
+		return
+	}
+	s.writers.Add(1)
+	s.writerMu.Unlock()
+
+	// 到这里写者已登记、必然会被启动并收尾，承接状态才算真正「交出去」：
+	// 写者退出前会重新保存最新快照。删除必须落在「OPEN 成功 + 写者已登记」
+	// 之后、写者启动之前——放在启动之后有竞态：写者可能先刷一次快照，随后
+	// 这里再删，等于把刚存的状态删掉；放在 OPEN 之前则有 P1：sendOpen 失败
+	// 或撞上关闭提前返回，库里那份状态成了永远没人读的孤儿。
+	if sess.resumed {
+		_ = s.store.DeleteHandoff(context.Background(), token)
+	}
+
 	writerDone := make(chan struct{})
-	go sess.writer(writerDone)
+	go func() {
+		defer s.writers.Done()
+		sess.writer(writerDone)
+	}()
 
 	// ---- 读循环 ----
 	_ = nc.SetReadDeadline(time.Now().Add(120 * time.Second))
@@ -396,46 +513,54 @@ func (s *clientSession) writer(done chan<- struct{}) {
 	_ = s.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 
 	// 周期性保存 handoff，避免进程异常退出时丢失 RC4 流和 wire_id。
+	//
+	// 这个 ticker 必须由写者本人在主循环里消费：nextWireID 与两个 RC4 流
+	// 都只由写者推进，快照才能是「同一时刻的流 + 对应的下一个 wire_id」。
+	// 曾经这里另起 goroutine 读 nextWireID，既与写者构成无同步读，抓到的
+	// 也永远是落后的值，客户端重连承接后就地错位。
 	periodicSave := time.NewTicker(2 * time.Second)
 	defer periodicSave.Stop()
-	go func() {
-		for range periodicSave.C {
+
+drain:
+	for {
+		select {
+		case <-periodicSave.C:
+			s.saveHandoff(nextWireID)
+			continue
+
+		case task, ok := <-s.outCh:
+			if !ok {
+				break drain
+			}
+			switch task.kind {
+			case outAck:
+				if _, err := s.conn.Write(proto.BuildAckFrame(task.wireID)); err != nil {
+					s.log.Info("写 ACK 失败", "err", err)
+					s.closed.Store(true)
+					continue
+				}
+				_ = s.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+
+			case outData:
+				enc := s.rc4Out.Crypt(task.payload)
+				frame := proto.BuildFrame(0, nextWireID, enc)
+				nextWireID++
+				if _, err := s.conn.Write(frame); err != nil {
+					s.log.Info("写数据帧失败", "err", err)
+					s.closed.Store(true)
+					continue
+				}
+				s.framesSent.Add(1)
+				rtFramesOut.Inc()
+				_ = s.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+
+			case outFinish:
+				// 不会出现在 channel（close(outCh) 退出）；防御
+			}
+
 			if s.closed.Load() {
-				return
+				break drain
 			}
-			s.saveHandoff(nextWireID) // nextWireID 由写者独占，此处取快照即可
-		}
-	}()
-
-	for task := range s.outCh {
-		switch task.kind {
-		case outAck:
-			if _, err := s.conn.Write(proto.BuildAckFrame(task.wireID)); err != nil {
-				s.log.Info("写 ACK 失败", "err", err)
-				s.closed.Store(true)
-				continue
-			}
-			_ = s.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-
-		case outData:
-			enc := s.rc4Out.Crypt(task.payload)
-			frame := proto.BuildFrame(0, nextWireID, enc)
-			nextWireID++
-			if _, err := s.conn.Write(frame); err != nil {
-				s.log.Info("写数据帧失败", "err", err)
-				s.closed.Store(true)
-				continue
-			}
-			s.framesSent.Add(1)
-			rtFramesOut.Inc()
-			_ = s.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-
-		case outFinish:
-			// 不会出现在 channel（close(outCh) 退出）；防御
-		}
-
-		if s.closed.Load() {
-			break
 		}
 	}
 
@@ -443,12 +568,77 @@ func (s *clientSession) writer(done chan<- struct{}) {
 	s.saveHandoff(nextWireID)
 }
 
+// claimOwnership 把 token 的所有权交给 sid。
+//
+// 承接状态按 token 存储，而同一 token 可能同时活着两个网关侧会话：主服已经
+// 接管了旧会话，但旧 TCP 还没被读循环发现断开，旧写者仍在周期性保存快照。
+// 夺取所有权后，旧写者的保存会因不再是所有者而被丢弃，不会用落后的
+// wire_id 覆盖新会话刚存下的状态。
+func (s *RealtimeServer) claimOwnership(token string, sid uint64) {
+	// 必须与 saveHandoff 的「校验 + 落库」互斥：否则夺取动作可能插进旧写者
+	// 已经通过校验、还没落库的那个窗口里，让更旧的快照在接管之后才落地。
+	unlock := s.lockTokenSlot(token)
+	defer unlock()
+	s.ownerMu.Lock()
+	s.owners[token] = sid
+	s.ownerMu.Unlock()
+}
+
+// lockTokenSlot 返回该 token 所在条纹的解锁函数。
+//
+// 临界区的配对规则：saveHandoff 里「查所有权 → 导出快照 → 落库」必须在同一次
+// 持有期内完成；claimOwnership 也持有同一把条纹锁，于是两者的先后关系被强制
+// 成全序，不会出现「检查时还是旧所有者、落库时已经换了人」。
+func (s *RealtimeServer) lockTokenSlot(token string) func() {
+	var h uint32 = 2166136261
+	for i := 0; i < len(token); i++ {
+		h ^= uint32(token[i])
+		h *= 16777619
+	}
+	lk := &s.tokenSlots[h%uint32(len(s.tokenSlots))]
+	lk.Lock()
+	return lk.Unlock
+}
+
+// ownsToken 判断 sid 当前是否持有该 token 的所有权。
+func (s *RealtimeServer) ownsToken(token string, sid uint64) bool {
+	s.ownerMu.Lock()
+	defer s.ownerMu.Unlock()
+	cur, ok := s.owners[token]
+	return ok && cur == sid
+}
+
+// releaseOwnership 在会话收尾时交还所有权（仅当仍归自己）。
+//
+// 已被接管的旧会话走到这里时，owners 里记的是新会话的 sid，这里什么都不做——
+// 否则会把新会话的所有权一并抹掉，让更早的旧写者重新获得保存资格。
+func (s *RealtimeServer) releaseOwnership(token string, sid uint64) {
+	s.ownerMu.Lock()
+	defer s.ownerMu.Unlock()
+	if cur, ok := s.owners[token]; ok && cur == sid {
+		delete(s.owners, token)
+	}
+}
+
 // saveHandoff 保存重连接管状态。非 resume 的会话如果尚未发送数据帧、
 // 也尚未解析出客户端信封，则说明它还没有可恢复进度；此时不落库，
 // 防止空状态覆盖已有的有效 handoff。
+//
+// 落库前先确认本会话仍持有该 token 的所有权，且校验与落库在同一个 token
+// 临界区里完成：同一 token 的旧会话可能还在跑（主服已接管，但网关侧旧 TCP
+// 还没断），它手里的 wire_id 更旧，写进去会让客户端下次重连从更早的位置续流。
 func (s *clientSession) saveHandoff(nextWireID uint64) {
 	if s.rc4In == nil || s.rc4Out == nil {
 		return
+	}
+	// 所有权校验必须和导出、落库在同一临界区里，直到写进数据库才放开：
+	// 只做一次布尔检查的话，旧写者通过检查后可能被调度走，新会话趁机接管
+	// 并写入更新的 next_wire_id，随后旧写者把自己那份更旧的快照写回去
+	// （TOCTOU），客户端下次重连就从更早的位置续流。
+	unlock := s.srv.lockTokenSlot(s.token)
+	defer unlock()
+	if !s.srv.ownsToken(s.token, s.id) {
+		return // 已被新会话接管：旧快照写不得
 	}
 	if !s.resumed && s.framesSent.Load() == 0 && s.framesParsedOK.Load() == 0 {
 		return // 防污染：失步 fresh 会话的状态不落库（见上注）

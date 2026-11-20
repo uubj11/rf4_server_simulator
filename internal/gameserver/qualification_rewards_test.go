@@ -131,6 +131,13 @@ func TestQualificationCupSkipsGapTasks(t *testing.T) {
 		t.Fatal("分支 19 应有非缺口任务")
 	}
 	completeQualificationTasks(t, db, uid, ids)
+	// 活动关闭时即使历史进度已满，也不能发杯；重新开启后按原幂等键补发。
+	setMultiHookTunableForTest(t, srv, eventNewYearKey, 0)
+	setMultiHookTunableForTest(t, srv, eventAnniversaryKey, 0)
+	if cups := srv.ensureQualificationCups(c, uid); len(cups) != 0 {
+		t.Fatal("inactive event must not grant a cup")
+	}
+	setMultiHookTunableForTest(t, srv, eventNewYearKey, 1)
 	cups := srv.ensureQualificationCups(c, uid)
 	if len(cups) != 1 || cups[0].ItemID != "reward_bday26" {
 		t.Fatalf("应发 reward_bday26，实得 %v", cups)

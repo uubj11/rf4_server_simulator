@@ -86,8 +86,9 @@ func TestCountableQuantityMatchesField(t *testing.T) {
 	}
 	row, _ := db.GetItemByGUID(ctx, it.GUID)
 	fields, _ = FieldsFromJSON(row.FieldsJSON)
-	if got, want := row.Qty, int64(u64Of(fields[qi].Num)); got != want || got != 90 {
-		t.Fatalf("并堆后 row.qty=%d field.qty=%d，期望90/90", got, want)
+	// units 语义为「件数」：并堆 1 件 = 60 + 1 = 61（不再加一份定义单位量 30）。
+	if got, want := row.Qty, int64(u64Of(fields[qi].Num)); got != want || got != 61 {
+		t.Fatalf("并堆后 row.qty=%d field.qty=%d，期望61/61", got, want)
 	}
 }
 

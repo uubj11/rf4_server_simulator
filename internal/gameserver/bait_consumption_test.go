@@ -312,20 +312,46 @@ func TestBaitConsumptionThroughBiteAndReplay(t *testing.T) {
 	if _, ok := hFishingHooked(&Ctx{Sess: sess, Main: 14, Sub: 11, Log: logging.Discard()}); !ok {
 		t.Fatal("14/11 hook confirmation was not handled")
 	}
+	// 中鱼确认不扣饵（specs/changes/bait-consume-fight-end）：饵留在钩上支撑
+	// 客户端搏鱼 ctor 的挂载态读取。
 	row, _ = db.GetItemByGUID(t.Context(), source)
 	if row == nil || baitQuantity(row) != 4 {
-		t.Fatal("hook confirmation did not consume exactly one unit")
+		t.Fatal("hook confirmation must not consume bait (mount already reserved one)")
+	}
+	if len(s.currentBaits(t.Context(), rod)) != 1 {
+		t.Fatal("bait must stay mounted during the fight")
 	}
 	if _, ok := hFishingHooked(&Ctx{Sess: sess, Main: 14, Sub: 11, Log: logging.Discard()}); !ok {
 		t.Fatal("replayed 14/11 hook confirmation was not handled")
 	}
 	row, _ = db.GetItemByGUID(t.Context(), source)
 	if row == nil || baitQuantity(row) != 4 {
-		t.Fatal("replayed hook confirmation consumed another bait")
+		t.Fatal("replayed hook confirmation consumed bait")
+	}
+	// 14/12 跑鱼 = 搏鱼终局：此刻扣一次，且重复终局不再扣。
+	if _, ok := hFishingLeft(&Ctx{Sess: sess, Main: 14, Sub: 12, Log: logging.Discard()}); !ok {
+		t.Fatal("14/12 fish-left was not handled")
+	}
+	row, _ = db.GetItemByGUID(t.Context(), source)
+	if row == nil || baitQuantity(row) != 4 {
+		t.Fatal("fight end did not consume exactly one unit")
+	}
+	if _, ok := hFishingLeft(&Ctx{Sess: sess, Main: 14, Sub: 12, Log: logging.Discard()}); !ok {
+		t.Fatal("replayed 14/12 fish-left was not handled")
+	}
+	row, _ = db.GetItemByGUID(t.Context(), source)
+	if row == nil || baitQuantity(row) != 4 {
+		t.Fatal("replayed fight end consumed another bait")
 	}
 	if len(s.currentBaits(t.Context(), rod)) != 0 {
-		t.Fatal("next bait was mounted during the fight")
+		t.Fatal("consumed bait still mounted after fight end")
 	}
+	// 重新武装搏鱼态：搏鱼中（CastActive 且鱼在钩上）补饵调用不预留。
+	st.mu.Lock()
+	st.CastActive = true
+	st.Pending = pending
+	st.Resolved = false
+	st.mu.Unlock()
 	if err := sess.prepareBaitForCast(st, rod); err != nil {
 		t.Fatal(err)
 	}
@@ -659,8 +685,10 @@ func TestBaitRefillsWhenFishIsLanded(t *testing.T) {
 	if _, ok := hFishingHooked(&Ctx{Sess: sess, Main: 14, Sub: 11, Log: logging.Discard()}); !ok {
 		t.Fatal("14/11 未处理")
 	}
-	if got := len(s.currentBaits(ctx, rod)); got != 0 {
-		t.Fatalf("中鱼后钩上饵数 = %d，期望 0", got)
+	// 中鱼确认不扣饵（specs/changes/bait-consume-fight-end）：饵留在钩上，
+	// 由 14/4 终局扣饵 + 补挂回调完成"消耗→补挂"闭环。
+	if got := len(s.currentBaits(ctx, rod)); got != 1 {
+		t.Fatalf("中鱼确认后钩上饵数 = %d，期望 1（搏鱼中不扣饵）", got)
 	}
 	ctx14 := &Ctx{Sess: sess, Main: 14, Sub: 4, ExpectResponse: true, Log: logging.Discard()}
 	body, ok := s.fishingEndSettle(ctx14)

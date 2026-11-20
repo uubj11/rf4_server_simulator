@@ -14,6 +14,8 @@ import (
 // 对每个 DATA(请求信封) 回显 call_id 的固定响应（marker -2）。
 type StubGameServer struct {
 	mu     sync.Mutex
+	ln     net.Listener
+	conns  []*tunnel.Conn
 	opened []tunnel.OpenPayload
 	data   [][]byte
 	closed []uint64
@@ -27,7 +29,7 @@ func StartStubGameServer(t *testing.T, psk string) (*StubGameServer, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	stub := &StubGameServer{}
+	stub := &StubGameServer{ln: ln}
 	go func() {
 		for {
 			nc, err := ln.Accept()
@@ -39,10 +41,27 @@ func StartStubGameServer(t *testing.T, psk string) (*StubGameServer, string) {
 				_ = nc.Close()
 				continue
 			}
+			stub.mu.Lock()
+			stub.conns = append(stub.conns, c)
+			stub.mu.Unlock()
 			go stub.readLoop(c)
 		}
 	}()
 	return stub, ln.Addr().String()
+}
+
+// Stop 关闭监听并断开全部隧道连接，模拟主服侧隧道中断。
+//
+// 与单纯关监听不同：只有把已建立的连接也掐断，网关才会进入「隧道断开 →
+// 会话收尾发 CLOSE → 重连退避」这条路径，关闭延迟类回归才有意义。
+func (s *StubGameServer) Stop() {
+	_ = s.ln.Close()
+	s.mu.Lock()
+	conns := append([]*tunnel.Conn{}, s.conns...)
+	s.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 func (s *StubGameServer) readLoop(c *tunnel.Conn) {

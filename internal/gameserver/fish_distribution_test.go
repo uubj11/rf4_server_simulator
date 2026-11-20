@@ -183,3 +183,35 @@ func TestFishDistributionUsesCanonicalLocation(t *testing.T) {
 		t.Fatalf("canonical location changed distribution: a=%+v b=%+v", a, b)
 	}
 }
+
+func TestBsSalmonHasStaticDistributionAndBaitEvidence(t *testing.T) {
+	srv, db := newStaticRigTestServer(t)
+	ctx := context.Background()
+	loc := db.ResolveStatLoc(ctx, "level_013_sev_don")
+	if loc == "" {
+		t.Fatal("北顿涅茨河 loc_alias 未解析")
+	}
+	roster, err := db.LocRoster(ctx, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catches float64
+	found := false
+	for _, row := range roster {
+		if row.FishKey == "bs_salmon" {
+			found = true
+			catches = row.Catches
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("LocRoster(%q) 缺少 bs_salmon", loc)
+	}
+	if catches != 8 {
+		t.Fatalf("bs_salmon 名册权重=%v，期望 8", catches)
+	}
+	evidence := srv.loadLocalBaitEvidence(ctx, loc, "AngryWalker S8-001", "AngryWalker S8-001")
+	if !evidence["bs_salmon"] {
+		t.Fatal("AngryWalker S8-001 未命中 bs_salmon 的本地饵证据")
+	}
+}

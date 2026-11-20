@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -27,7 +28,8 @@ func buyReturnTestItem(t *testing.T, s *Server, uid int64, shop, item string, go
 	c := economyTestCtx(s, uid, proto.Args524(proto.StrVal(shop), proto.StrVal(item), proto.U64(999999)))
 	c.ExpectResponse = true
 	c.replyCapture = &ctxReplyCapture{}
-	if b, ok := hStoreBuy(gold)(c); !ok || len(b) == 0 {
+	b, ok := hStoreBuy(gold)(c)
+	if !ok || len(b) == 0 {
 		t.Fatal("purchase failed")
 	}
 	var guid string
@@ -37,6 +39,18 @@ func buyReturnTestItem(t *testing.T, s *Server, uid int64, shop, item string, go
 	row, err := s.DB.GetItemByGUID(context.Background(), guid)
 	if err != nil {
 		t.Fatal(err)
+	}
+	fields, err := FieldsFromJSON(row.FieldsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := fieldIdxByCS(row.WireClass, csOrigin)
+	if i >= 0 && fields[i].Val != nil && fields[i].Val.Kind == proto.KindObj {
+		response := decodeTreeValue(t, s, b)
+		goods := response.Fields[1].Val
+		if goods == nil || len(goods.Items) != 1 || !reflect.DeepEqual(goods.Items[0].Fields[i].Val, fields[i].Val) {
+			t.Fatal("purchase response must include persisted return receipt")
+		}
 	}
 	return row
 }

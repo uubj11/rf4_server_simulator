@@ -135,7 +135,7 @@ func (s *Server) fishQueryMaps(ctx context.Context, req FishQueryRequest, c fish
 				}
 			}
 			nameMap, _ := s.cachedFishNames(ctx, c)
-			rule := fishBaitRules[ruleName(nameMap[req.Fish])]
+			rule, _ := lookupFishBaitRule(nameMap[req.Fish])
 			for _, zone := range rule.chartZones {
 				priority[zone] += 1000
 			}
@@ -152,7 +152,7 @@ func (s *Server) fishQueryMaps(ctx context.Context, req FishQueryRequest, c fish
 				loc.points = loc.points[:6]
 			}
 		} else {
-			loc.regions, err = newFishQueryRegions(statLoc, fishQueryRegionScenes[key], c.now, s.tunableF("fish_distribution_enabled", 0) == 1)
+			loc.regions, err = newFishQueryRegions(statLoc, fishQueryRegionScenes[key], c.now, s.tunableF("fish_distribution_enabled", 0) == 1, s.fishZonesFor(ctx, statLoc))
 			if err != nil {
 				return nil, err
 			}

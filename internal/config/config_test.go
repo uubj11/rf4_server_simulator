@@ -18,3 +18,25 @@ func TestStaticDatabasePathDefaultAndEnvOverride(t *testing.T) {
 		t.Fatalf("环境变量静态库路径=%q", got)
 	}
 }
+
+func TestAdminPasswordEnvOverride(t *testing.T) {
+	t.Setenv("RF4_ADMIN_PASSWORD", "compose-test-password")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Admin.Password != "compose-test-password" {
+		t.Fatal("RF4_ADMIN_PASSWORD did not override the configured password")
+	}
+}
+
+func TestLoginCompatEnvOverride(t *testing.T) {
+	t.Setenv("RF4_GATEWAY_LOGIN_COMPAT_ADDR", ":7515")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Gateway.LoginCompatAddr != ":7515" {
+		t.Fatalf("RF4_GATEWAY_LOGIN_COMPAT_ADDR=%q", cfg.Gateway.LoginCompatAddr)
+	}
+}

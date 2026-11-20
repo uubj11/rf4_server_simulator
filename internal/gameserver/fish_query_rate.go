@@ -1,6 +1,7 @@
 package gameserver
 
 import (
+	"context"
 	"math"
 	"sort"
 	"time"
@@ -54,6 +55,18 @@ func (s *Server) fishQueryMeanDelay(st *FishState, weather fishingWeather, at ti
 		return meanBiteDelay(cfg, false, 1, 1)
 	}
 	return meanBiteDelay(cfg, rigTypeLureFamily[st.RigType], s.weatherBiteDelayFactor(st, weather, at), st.Bonus.BiteSpeed)
+}
+
+// fishQueryPaceState 查鱼助手的节奏因子：按候选饵算对口分（查询假设无窝料，
+// Ground=1；打窝的实际手感以实钓为准）。c 携带请求级缓存，同一次查询内
+// 名册与饵证据只查一次。
+func (s *Server) fishQueryPaceState(ctx context.Context, c fishRollContext, st *FishState) fishPaceState {
+	if !s.paceEnabled() || st == nil {
+		return neutralFishPaceState()
+	}
+	score := s.baitPaceScore(ctx, c, st.Loc, []string{st.Bait}, st.RigType)
+	factor, prob, lureProb, tier := s.paceTierFor(score)
+	return fishPaceState{Known: true, Score: score, Factor: factor, Prob: prob, LureProb: lureProb, Ground: 1, Tier: tier}
 }
 
 func (p *FishQueryPlan) setTheoreticalRate(delay float64) {

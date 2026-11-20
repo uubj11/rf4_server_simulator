@@ -22,7 +22,7 @@ test('about page renders embedded README markdown',async()=>{
   await page.locator('#aboutReadme h1').waitFor();
   assert.equal(await page.locator('#aboutReadme h1').textContent(),'测试项目');
   assert.equal(await page.locator('#aboutReadme table').count(),1);
-  assert.equal(await page.locator('#aboutReadme a').getAttribute('href'),'https://github.com/glance522/rf4_server_simulator/blob/main/docs/deploy.md');
+  assert.equal(await page.locator('#aboutReadme a').getAttribute('href'),'https://github.com/OpenFisherCommunity/rf4_server_simulator/blob/main/docs/deploy.md');
   assert.equal(await page.locator('#aboutReadme pre code').textContent(),'bin\\launcher.exe');
   assert.equal(await page.locator('#view-about').isVisible(),true);
   assert.deepEqual(errors,[]);

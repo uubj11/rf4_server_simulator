@@ -51,6 +51,8 @@ func (c *Ctx) ArgInt(i int) (uint64, bool) {
 
 // AfterResponse 注册响应发送后的回调。请求回执路径会先持久化并发送应答，
 // 再执行回调，确保技能树/背包推送不会抢在应答之前。
+// 注意：expect=false（不回包）的 handler 走 sendRequestResult 早退分支，
+// 注册的回调不会执行——无回包命令要推送请直接推，勿走本函数。
 func (c *Ctx) AfterResponse(fn func()) {
 	if c != nil && fn != nil {
 		c.afterResponse = append(c.afterResponse, fn)

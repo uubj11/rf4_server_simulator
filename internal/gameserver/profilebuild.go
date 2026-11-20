@@ -2,7 +2,9 @@ package gameserver
 
 import (
 	"context"
+	"database/sql"
 	"math"
+	"sort"
 	"time"
 
 	"rf4server/internal/proto"
@@ -484,6 +486,192 @@ func (s *Session) Push4_22Items(extraGUIDs []string) {
 	if err != nil {
 		return
 	}
+	items = s.appendFightItemTrees(pctx, items, extraGUIDs)
+	if len(items) == 0 {
+		return
+	}
+	s.Push(4, 22, proto.Args(proto.S("61"), items...))
+}
+
+// Push4_22FightSync 搏鱼期运行位对齐推送：竿+槽11线全量 + 路亚拟饵树 + extras，
+// 全树按官方搏鱼帧口径注入挂载运行位后推送。形状依据 2026-11-12 官方 lure2
+// 抓包：搏鱼期每 2s 帧中所有挂装组件 flags = 定义基值|运行位，拟饵树每帧都在；
+// 路亚缺位时客户端钩组实例构造/玩法判定翻车 → 保持力×0.05 → 秒脱。
+// 只改树内容（flags 值、新增拟饵树元素），4/22 的 args 结构不变。
+// 调用点：14/11 中鱼确认（客户端 ctor 一次性锁定挂载态，运行位必须当刻可达）
+// 与 14/12/14/4 磨损结算（gear = 本次结算竿 w.rodGUID，非手持竿）。
+func (s *Session) Push4_22FightSync(gear string, extraGUIDs []string) {
+	if gear == "" {
+		return
+	}
+	pctx := s.pushCtx()
+	// 多竿语义：gear 由调用方给定为本次结算/中鱼的那根竿，
+	// 不读"手持竿"状态，buildFightItemsForGear 也不触碰钓鱼状态。
+	items, err := s.Srv.buildFightItemsForGear(pctx, s.Userid, gear, true)
+	if err != nil {
+		return
+	}
+	hookLure, herr := s.appendFightHookLureTrees(pctx, items, gear)
+	if herr != nil {
+		// 组件/品类查询失败：整帧放弃——客户端保留上一帧，由下一拍结算/中鱼
+		// 重推；绝不发缺钩/拟饵树的帧，那正是 f0=1 秒脱形状。
+		s.log.Warn("搏鱼帧钩/拟饵挂载树查询失败，放弃本帧", "rod", shortGUID(gear), "err", herr)
+		return
+	}
+	items = s.appendFightItemTrees(pctx, hookLure, extraGUIDs)
+	if len(items) == 0 {
+		return
+	}
+	// 树重建一次批量 IN 查询拿全量品类，再统一注入运行位。
+	ids := map[int64]struct{}{}
+	for _, item := range items {
+		collectFightNumericIDs(item, ids)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	idList := make([]int64, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	var cats map[int64]int64
+	var cerr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if cats, cerr = s.Srv.DB.ItemDefCategories(pctx, idList); cerr == nil {
+			break
+		}
+	}
+	if cerr != nil {
+		// 查询失败时绝不能静默回退成"裸基值树"——那正是秒脱形状。
+		// 重试一次仍失败就整帧放弃：客户端保留上一帧，由下一拍结算/中鱼重推。
+		s.log.Warn("4/22 搏鱼运行位品类批量查询失败，放弃本帧", "err", cerr)
+		return
+	}
+	catOf := func(numericID int64) (int64, bool) {
+		c, ok := cats[numericID]
+		return c, ok
+	}
+	for _, item := range items {
+		markFightMounted(item, catOf)
+	}
+	s.Push(4, 22, proto.Args(proto.S("61"), items...))
+}
+
+// appendFightHookLureTrees 把竿装配的拟饵行（catLure）与钩行（catHook）整树追加
+// 到搏鱼帧。组件读取走 **f5 真源**（storedRigComponents），仅 f5 为空时回退
+// rig_component 投影（与 rigSetTarget 同口径）——投影是单向派生，"f5 完整、
+// 投影为空"的历史档案按投影读会漏发全部钩/拟饵树；海钓判定优先
+// rigTypeForWrite（f5/竿型推导），rig 表兜底；遍历按 slot/ordinal 确定性排序。
+// 形状依据 2026-11-15 官方海钓抓包（logs/captures/official_trace/marine_422_*，
+// HANDOFF 〇节）：铁板/拟饵竿周期帧含 ioombppcnlh 容器+内置钩（官方 def 10228=
+// pilkerlures_21176 + 15699=triple_21057，容器 0x2004600/钩 22016），裸钩竿周期帧含
+// agedjipcnpe 单钩（def 9062=mhook_20894，22016）；浮钓/底钓官方周期帧无钩树
+// （float_422 619B 帧 0 命中）——钩行只对海钓钓组（marineRigType）追加。
+// 拟饵树对全部钓法追加：旧口径按 17 号槽取首件，海钓多拟饵/槽内混装（2026-11-15
+// 北海 5 拟饵 + 4 独立钩行）时漏发，客户端搏鱼 ctor 读挂载态判定翻车 →
+// 保持力×0.05 → f0=1 秒脱（docs/搏鱼脱钩根因与修复整体方案-2026-11-13.md §七.1）。
+// 查询/构树失败向上返回错误、由调用方整帧放弃（绝不发缺钩/拟饵树的帧——
+// 那正是秒脱形状）；组件数量为个位数（每 2s 热路径），逐个读物品行可接受，
+// 品类走批量 IN 查询。
+func (s *Session) appendFightHookLureTrees(ctx context.Context, items []*proto.Value, gear string) ([]*proto.Value, error) {
+	comps := s.Srv.storedRigComponents(ctx, gear)
+	if len(comps) == 0 {
+		// f5 缺失/非竿：回退 rig_component 投影（与 rigSetTarget 同口径）。
+		projRows, perr := s.Srv.DB.ListRigComponents(ctx, gear)
+		if perr != nil {
+			return nil, perr
+		}
+		if len(projRows) == 0 {
+			return items, nil
+		}
+		for _, rc := range projRows {
+			comps[rigCompKey(rc.Slot, rc.Ordinal)] = rigComp{
+				Category: rc.Slot, Ordinal: rc.Ordinal, GUID: rc.GUID, Extra: rc.Extra,
+			}
+		}
+	}
+	marine := false
+	if rt := s.Srv.rigTypeForWrite(ctx, gear); rt > 0 {
+		marine = marineRigType(rt)
+	} else if rt, ok, rerr := s.Srv.DB.GetRigType(ctx, gear); rerr == nil && ok {
+		marine = marineRigType(rt)
+	}
+	// 确定性顺序：按 slot/ordinal 升序遍历。
+	keys := make([]int64, 0, len(comps))
+	for key := range comps {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ci, cj := rigCompCategory(keys[i]), rigCompCategory(keys[j])
+		if ci != cj {
+			return ci < cj
+		}
+		return rigCompOrdinal(keys[i]) < rigCompOrdinal(keys[j])
+	})
+	seen := map[string]bool{}
+	for _, item := range items {
+		if idx := fieldIdxByCS(item.Class, csGUID); idx >= 0 && idx < len(item.Fields) {
+			seen[item.Fields[idx].GuidHex()] = true
+		}
+	}
+	rows := make([]*store.Item, 0, len(keys))
+	numIDs := make([]int64, 0, len(keys))
+	for _, key := range keys {
+		comp := comps[key]
+		if comp.GUID == "" || seen[comp.GUID] {
+			continue
+		}
+		// ErrNoRows = 组件引用的物品行不存在（断件重算窗口的悬空引用），
+		// 跳过该组件；其余数据库错误向上返回、整帧放弃。
+		row, rerr := s.Srv.DB.GetItemByGUID(ctx, comp.GUID)
+		if rerr != nil && rerr != sql.ErrNoRows {
+			return nil, rerr
+		}
+		if row == nil || row.UID != s.Userid {
+			continue
+		}
+		rows = append(rows, row)
+		numIDs = append(numIDs, row.NumericID)
+	}
+	if len(rows) == 0 {
+		return items, nil
+	}
+	var cats map[int64]int64
+	var cerr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if cats, cerr = s.Srv.DB.ItemDefCategories(ctx, numIDs); cerr == nil {
+			break
+		}
+	}
+	if cerr != nil {
+		return nil, cerr
+	}
+	for _, row := range rows {
+		cat, ok := cats[row.NumericID]
+		if !ok {
+			continue
+		}
+		if cat != catLure && !(marine && cat == catHook) {
+			continue
+		}
+		tree, terr := s.Srv.ItemToTree(ctx, row)
+		if terr != nil {
+			return nil, terr
+		}
+		if tree == nil {
+			continue
+		}
+		if idx := fieldIdxByCS(tree.Class, csGUID); idx >= 0 && idx < len(tree.Fields) {
+			seen[tree.Fields[idx].GuidHex()] = true
+		}
+		items = append(items, tree)
+	}
+	return items, nil
+}
+
+// appendFightItemTrees 把 extraGUIDs 中尚未出现的物品整树追加到 items
+// （按顶层 csGUID 去重，校验归属后 ItemToTree）；轮/竿/前导附加共用。
+func (s *Session) appendFightItemTrees(ctx context.Context, items []*proto.Value, extraGUIDs []string) []*proto.Value {
 	seen := map[string]bool{}
 	for _, item := range items {
 		if idx := fieldIdxByCS(item.Class, csGUID); idx >= 0 && idx < len(item.Fields) {
@@ -495,20 +683,17 @@ func (s *Session) Push4_22Items(extraGUIDs []string) {
 			continue
 		}
 		seen[g] = true
-		row, gerr := s.Srv.DB.GetItemByGUID(pctx, g)
+		row, gerr := s.Srv.DB.GetItemByGUID(ctx, g)
 		if gerr != nil || row == nil || row.UID != s.Userid {
 			continue
 		}
-		tree, terr := s.Srv.ItemToTree(pctx, row)
+		tree, terr := s.Srv.ItemToTree(ctx, row)
 		if terr != nil || tree == nil {
 			continue
 		}
 		items = append(items, tree)
 	}
-	if len(items) == 0 {
-		return
-	}
-	s.Push(4, 22, proto.Args(proto.S("61"), items...))
+	return items
 }
 
 // Push4_22Trees 以官服搏鱼帧形状推送裸物品/部件子树（4/22 args("61")）。
@@ -565,12 +750,14 @@ const hookMountedFlag = uint64(1024)
 
 // markHookMounted 递归把树中所有钩对象（agedjipcnpe）的 flags 补挂竿位，
 // 兼容裸钩（沉底/浮钓/海钓单钩）与容器嵌套钩（海钓串钩/路亚 ioombppcnlh）两种形状。
+// 拟饵容器本体同钩规则 |=1024：官方中鱼帧拟饵本体 22016，缺位时客户端
+// 路亚钩组实例不进搏鱼态。
 func markHookMounted(v *proto.Value) {
 	if v == nil {
 		return
 	}
-	if v.Class == "agedjipcnpe" {
-		if idx := fieldIdxByCS("agedjipcnpe", csStateEnum); idx >= 0 && idx < len(v.Fields) &&
+	if v.Class == "agedjipcnpe" || v.Class == lureWireClass {
+		if idx := fieldIdxByCS(v.Class, csStateEnum); idx >= 0 && idx < len(v.Fields) &&
 			v.Fields[idx].Num != nil {
 			*v.Fields[idx].Num |= hookMountedFlag
 		}
@@ -598,6 +785,26 @@ func (s *Session) Push4_22Hook(mounted bool, gears ...string) {
 		}
 	}
 	s.Push(4, 22, proto.Args(proto.S("61"), items...))
+}
+
+// Push4_22HookGUID 按钩 GUID 推单钩 4/22，只影响这一枚钩。
+//
+// 多钩钓组里每一枚挂了鱼的钩都需要自己的挂竿位：官方口径下缺这个标志时
+// 客户端钩实体不进搏鱼态（浮漂无咬钩演出、左下角无搏鱼指示），鱼模型也不会
+// 挂到那枚钩上。Push4_22Hook 只取线末端那枚（rigSpec 槽位 12），没法覆盖
+// 倒钓臂上的其余钩位。
+func (s *Session) Push4_22HookGUID(hookGUID string, mounted bool) bool {
+	if s == nil || s.Srv == nil || hookGUID == "" {
+		return false
+	}
+	tree := s.Srv.buildHookTreeByGUID(s.pushCtx(), hookGUID)
+	if tree == nil {
+		return false
+	}
+	if mounted {
+		markHookMounted(tree)
+	}
+	return s.Push(4, 22, proto.Args(proto.S("61"), tree)) != 0
 }
 
 // pushCtx 推送上下文（超时保护）。

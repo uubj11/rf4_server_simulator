@@ -186,20 +186,69 @@ func qualificationStageList(branch uint64) *proto.Value {
 func qualificationTaskList(branch, stage uint64) *proto.Value {
 	tasks := make([]*proto.Value, 0, qualificationTasks)
 	for task := uint64(1); task <= qualificationTasks; task++ {
+		ruleID := qualificationRuleID(branch, stage, task)
+		rule := qualificationRule(ruleID)
+		// 这些海洋任务只限制水域，不额外要求海钓钓组。
+		switch ruleID {
+		case 8001, 8002, 8003, 8103, 8201, 8203, 8301,
+			8401, 8402, 8501, 8503, 8601, 8602, 8603:
+			rule.Fields[9].Val = proto.U32Arr([]uint32{})
+		}
 		tasks = append(tasks, proto.Obj("gjbbiokohda", 5019,
 			proto.Field{Op: "BYTE", Num: ptrU64(0)}, // Idx0 枚举 fidehpgfmmo（仅成员 0）
-			proto.Field{Op: "VAL", Val: proto.Args(proto.S("204"),
-				qualificationRule(qualificationRuleID(branch, stage, task)))},
+			proto.Field{Op: "VAL", Val: proto.Args(proto.S("204"), rule)},
 		))
 	}
 	return proto.Args(proto.S("216"), tasks...)
 }
 
 // qualificationRule 构造一条任务规则（bcijcdlkjbk / hgnkdommpea 5007）。
-// Idx0 为规则类型（= 本地化键 qlfctn_t_<id>），Idx3 为进度分母（静态目标值）。
-// Idx4 钓组大类、Idx5 竿型、Idx6 竿硬度档、Idx27 顺流位用于客户端「鱼竿/条件」文案，
-// 与服务端 qualificationRodTypesFor 同源；其余字段按 ClassOps 零值（数组 → null）。
+// 28 个字段来自客户端 4.0.25034 登录官服后反序列化的永久资格规则；以 U32
+// 承载的 float32 字段保留原始位模式。静态显示表与服务端资格判定相互独立。
 func qualificationRule(ruleID uint64) *proto.Value {
+	rule, ok := qualificationRuleWireByID[ruleID]
+	if !ok {
+		if ruleID < 9000 {
+			panic("missing permanent qualification wire rule")
+		}
+		return qualificationEventRule(ruleID)
+	}
+	fields := map[int]*proto.Value{
+		0:  proto.U32(uint32(ruleID)),
+		1:  proto.U32(rule.F1),
+		2:  proto.U32(rule.F2),
+		3:  proto.U32(rule.F3),
+		4:  proto.U32(rule.F4),
+		5:  proto.U32Arr(rule.F5),
+		6:  proto.U32Arr(rule.F6),
+		7:  proto.U32Arr(rule.F7),
+		8:  proto.U32Arr(rule.F8),
+		9:  proto.U32Arr(rule.F9),
+		10: proto.U32Arr(rule.F10),
+		11: proto.U32Arr(rule.F11),
+		12: proto.U32Arr(rule.F12),
+		13: proto.U32Arr(rule.F13),
+		14: proto.U32(rule.F14),
+		15: proto.U32(rule.F15),
+		16: qualificationStringArray(rule.F16),
+		17: qualificationStringArray(rule.F17),
+		18: proto.U64(rule.F18),
+		19: qualificationStringArray(rule.F19),
+		20: proto.U32(rule.F20),
+		21: proto.U32(rule.F21),
+		22: proto.U32Arr(rule.F22),
+		23: proto.U32(rule.F23),
+		24: proto.U32(rule.F24),
+		25: proto.U32(rule.F25),
+		26: proto.U32(rule.F26),
+		27: proto.U32(rule.F27),
+	}
+	return wiregen.MustMakeObj("hgnkdommpea", fields)
+}
+
+// qualificationEventRule 保留限时活动规则的既有最小条件；官服运行时导出的 168 条
+// 永久资格表不包含未开放活动节点。
+func qualificationEventRule(ruleID uint64) *proto.Value {
 	fields := map[int]*proto.Value{
 		0: proto.U32(uint32(ruleID)),
 		3: proto.U32(qualificationTarget(ruleID)),
@@ -214,15 +263,23 @@ func qualificationRule(ruleID uint64) *proto.Value {
 		fields[6] = proto.U32Arr(u32Values(powers))
 	}
 	if driftRuleIDs[int64(ruleID)] {
-		fields[27] = proto.U32(64) // StreamMoving 顺水漂流
+		fields[27] = proto.U32(64)
 	}
 	return wiregen.MustMakeObj("hgnkdommpea", fields)
 }
 
-func u32Values(v []int64) []uint32 {
-	out := make([]uint32, len(v))
-	for i, x := range v {
-		out[i] = uint32(x)
+func qualificationStringArray(values []string) *proto.Value {
+	items := make([]*proto.Value, 0, len(values))
+	for _, value := range values {
+		items = append(items, proto.BytesOf([]byte(value)))
+	}
+	return &proto.Value{Kind: proto.KindArray, Items: items}
+}
+
+func u32Values(values []int64) []uint32 {
+	out := make([]uint32, len(values))
+	for i, value := range values {
+		out[i] = uint32(value)
 	}
 	return out
 }
@@ -239,6 +296,10 @@ func hFog(ctx *Ctx) ([]byte, bool) {
 		srv := ctx.Sess.Srv
 		for _, cup := range srv.ensureQualificationCups(ctx.Sess.pushCtx(), ctx.Sess.Userid) {
 			srv.pushAwardUpdate(ctx.Sess.Userid, cup)
+		}
+		// 阶段礼物兜底：覆盖发放功能上线前已达标的历史阶段（kv 幂等）。
+		for _, row := range srv.ensureEventStageGifts(ctx.Sess.pushCtx(), ctx.Sess.Userid) {
+			srv.pushItemUpdate(ctx.Sess.Userid, row)
 		}
 		obj = srv.build5003(ctx.Sess.pushCtx(), ctx.Sess.Userid)
 	} else {

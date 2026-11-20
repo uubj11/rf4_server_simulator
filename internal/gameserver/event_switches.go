@@ -58,6 +58,11 @@ var eventTaskCounts = map[uint64][]uint64{
 	eventBranchIXExtra:     {3, 4, 3, 3, 3, 3, 4},          // 9周年特别挑战 23
 }
 
+// EventStageCount 返回活动分支实际拥有的阶段数，供管理端保存校验共用。
+func EventStageCount(branch int64) int {
+	return len(eventTaskCounts[uint64(branch)])
+}
+
 func (s *Server) anniversaryEnabled() bool {
 	return s != nil && s.tunableF(eventAnniversaryKey, eventDefaultAnniversary) == 1
 }
@@ -139,6 +144,26 @@ func (s *Server) eventStage() uint32 {
 	return 0
 }
 
+// activeQualificationEventBranches 与面板开关、分支选择和结束时间共用配置。
+// 在开启结算事务前读取，避免事务持写锁时另一个连接读 tunable。
+func (s *Server) activeQualificationEventBranches(nowUnix int64) map[int64]bool {
+	if s == nil || s.eventStage() == 0 {
+		return nil
+	}
+	end := s.tunableF(eventEndKey, 0)
+	if end <= 0 {
+		end = defaultEventEndUnix
+	}
+	if float64(nowUnix) >= end {
+		return nil
+	}
+	active := make(map[int64]bool)
+	for _, branch := range s.eventBranches() {
+		active[int64(branch)] = true
+	}
+	return active
+}
+
 // eventNodes 返回当前活动面板的分支节点。Idx1 由开启的开关决定，挂哪些分支由
 // event_branches 配置决定；客户端按 qlfctn_n_<id> / qlfctn_t_<id> 查文案。
 func (s *Server) eventNodes() []*proto.Value {
@@ -146,36 +171,37 @@ func (s *Server) eventNodes() []*proto.Value {
 	if stage == 0 {
 		return nil
 	}
+	giftPlans := s.eventStageGiftPlans()
 	branches := s.eventBranches()
 	out := make([]*proto.Value, 0, len(branches))
 	for _, branch := range branches {
-		out = append(out, eventBranchNode(branch, eventTaskCounts[branch], stage))
+		out = append(out, eventBranchNode(branch, eventTaskCounts[branch], stage, giftPlans))
 	}
 	return out
 }
 
 // eventBranchNode 构造一个活动分支节点（5009）。Idx0 是分支 ID，客户端据此查
 // qlfctn_n_<id> 名称；Idx1 决定被哪个面板的 gppikafllmb 谓词收下（5 新年 / 6 周年）。
-func eventBranchNode(branch uint64, counts []uint64, stage uint32) *proto.Value {
+func eventBranchNode(branch uint64, counts []uint64, stage uint32, giftPlans []eventStageGiftPlan) *proto.Value {
 	return proto.Obj("bibmoppiacg", 5009,
 		proto.Field{Op: "BYTE", Num: ptrU64(branch)},
 		proto.Field{Op: "BYTE", Num: ptrU64(uint64(stage))},
 		proto.Field{Op: "BYTE", Num: ptrU64(0)},
-		proto.Field{Op: "VAL", Val: eventStageList(branch, counts)},
-		proto.Field{Op: "VAL", Val: nullVal()},
+		proto.Field{Op: "VAL", Val: eventStageList(branch, counts, giftPlans)},
+		proto.Field{Op: "VAL", Val: eventCompletionGiftPreview(giftPlans, branch)},
 		proto.Field{Op: "VAL", Val: nullVal()},
 	)
 }
 
 // eventStageList 按每阶段任务数数组构造 5008 阶段列表。
-func eventStageList(branch uint64, counts []uint64) *proto.Value {
+func eventStageList(branch uint64, counts []uint64, giftPlans []eventStageGiftPlan) *proto.Value {
 	stages := make([]*proto.Value, 0, len(counts))
 	for i, count := range counts {
 		stage := uint64(i + 1)
 		stages = append(stages, proto.Obj("goglkgnhpcl", 5008,
 			proto.Field{Op: "U32", Num: ptrU64(stage)},
 			proto.Field{Op: "VAL", Val: eventTaskList(branch, stage, count)},
-			proto.Field{Op: "VAL", Val: nullVal()},
+			proto.Field{Op: "VAL", Val: eventStageGiftPreview(giftPlans, branch, stage)},
 			proto.Field{Op: "VAL", Val: nullVal()},
 		))
 	}

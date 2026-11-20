@@ -13,9 +13,49 @@ import (
 // jerkbait→抽停硬饵。与成就系统 baitPrefix 同源，前缀匹配兼容复数形式
 // （spinnerbaits/crankbaits/jerkbaits/poppers）。
 
+// 拟饵分类优先按 item_def 的拟饵类型（mbemakijdeh）判族，类型未知时回落到
+// item_id 前缀。前缀会误判少数族：X-Walker 系列 item_id 是 plug_w_*（看着像
+// 鱼形硬饵），拟饵类型却是 5（水表），只按前缀会漏算「水表路亚」任务。
+//
+// 类型→族：1/20 旋转亮片、2 勺子路亚、4 鱼形硬饵、5/10 水表路亚、7 抽停硬饵。
+// 其余类型（3/8/9 软饵、6 铁板、11 飞蝇、12..19 铅头钩/汲钩等）不属于这五族，
+// 不映射；它们回落到 item_id 前缀，前缀也不属于五族时返回空串（如 hm_foamr）。
+var lureTypeFamilies = map[int64]string{
+	1: "spinner", 20: "spinner",
+	2: "spoon",
+	4: "wobbler",
+	5: "topwater", 10: "topwater",
+	7: "jerkbait",
+}
+
+// lureFamilyOf 返回本尾鱼拟饵所属的族：拟饵类型优先，未知时按 item_id 前缀。
+func lureFamilyOf(ev qualificationEvent) string {
+	if fam, ok := lureTypeFamilies[ev.LureType]; ok {
+		return fam
+	}
+	return lureFamily(ev.Bait)
+}
+
 // lureFamily 返回拟饵 item_id 所属的拟饵族；非上述硬饵/亮片族返回空串。
+// 自制拟饵（hm_*）按子类型前缀归族：它们的 item_id 不带商店货的族前缀
+// （hm_walker/hm_popper、hm_jerk、hm_spoon、hm_spinner、hm_pl/hm_crank/
+// hm_shad/hm_minnow），不补映射会让「使用某类拟饵」的任务在手工饵上永不计数。
+//
+// 这是拟饵类型缺失时的兜底，不是权威判定；新代码请用 lureFamilyOf。
 func lureFamily(bait string) string {
 	switch {
+	case strings.HasPrefix(bait, "hm_spinner"):
+		return "spinner"
+	case strings.HasPrefix(bait, "hm_spoon"):
+		return "spoon"
+	case strings.HasPrefix(bait, "hm_walker"), strings.HasPrefix(bait, "hm_popper"):
+		return "topwater"
+	case strings.HasPrefix(bait, "hm_jerk"):
+		return "jerkbait"
+	case strings.HasPrefix(bait, "hm_pl"), strings.HasPrefix(bait, "hm_crank"),
+		strings.HasPrefix(bait, "hm_shad"), strings.HasPrefix(bait, "hm_minnow"),
+		strings.HasPrefix(bait, "hm_j_minnow"):
+		return "wobbler"
 	case strings.HasPrefix(bait, "spinner"):
 		return "spinner"
 	case strings.HasPrefix(bait, "spoon"):
@@ -85,7 +125,7 @@ func qLocLevelIn(levels ...string) qFilter {
 
 func qLureFamilyIn(families ...string) qFilter {
 	return func(ev qualificationEvent) bool {
-		f := lureFamily(ev.Bait)
+		f := lureFamilyOf(ev)
 		for _, want := range families {
 			if f == want {
 				return true
@@ -195,8 +235,27 @@ func qXPAtLeast(xp int64) qFilter {
 	return func(ev qualificationEvent) bool { return ev.XP >= xp }
 }
 
+func qBaseXPAtLeast(xp int64) qFilter {
+	return func(ev qualificationEvent) bool { return ev.BaseXP >= xp }
+}
+
 func qIsNight() qFilter {
 	return func(ev qualificationEvent) bool { return ev.IsNight }
+}
+
+// qBiteHours 使用咬钩时间判断跨午夜时段，开始时刻包含、结束时刻不包含。
+// 升级前已挂住的鱼没有准确时间，不能以结算时间冒充咬钩时间。
+func qBiteHours(start, end int64) qFilter {
+	return func(ev qualificationEvent) bool {
+		if ev.BiteUnix <= 0 {
+			return false
+		}
+		_, hour := worldDayAndHour(ev.BiteUnix)
+		if start > end {
+			return hour >= start || hour < end
+		}
+		return hour >= start && hour < end
+	}
 }
 
 // qDrifting 顺水漂流：咬钩时客户端上报过 0x40 StreamMoving。
@@ -358,13 +417,20 @@ func qCountBaitItem(filters ...qFilter) func(qualificationEvent) string {
 	}
 }
 
-// qCountBaitFlavor 过滤通过则按味型去重计数（「N 种不同味道的颗粒」）。
+// qCountBaitFlavor 过滤通过则按饵的味道去重计数（「N 种不同味道的颗粒」）。
+// 味道不能取 item_def.acclagajcdn：颗粒/煮饵整族都是同一档位（实测 25），
+// 按它数永远到不了文案要求的种数。可区分味道的是饵本身——
+// plt_cb_pch14/18/24 是同一味道的不同尺寸，去掉尾部尺寸数字后同键。
 func qCountBaitFlavor(filters ...qFilter) func(qualificationEvent) string {
 	return func(ev qualificationEvent) string {
-		if !qPassAll(ev, filters) || ev.BaitFlavor <= 0 {
+		if !qPassAll(ev, filters) || ev.Bait == "" {
 			return ""
 		}
-		return "flavor:" + strconv.FormatInt(ev.BaitFlavor, 10)
+		key := strings.TrimRightFunc(ev.Bait, func(r rune) bool { return r >= '0' && r <= '9' })
+		if key == "" {
+			return ""
+		}
+		return "flavor:" + key
 	}
 }
 
@@ -384,7 +450,7 @@ func qCountLureFamily(filters ...qFilter) func(qualificationEvent) string {
 		if !qPassAll(ev, filters) {
 			return ""
 		}
-		fam := lureFamily(ev.Bait)
+		fam := lureFamilyOf(ev)
 		if fam == "" {
 			return ""
 		}

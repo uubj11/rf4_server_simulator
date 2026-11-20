@@ -67,7 +67,7 @@ func TestWorkshopDiagWasherConditionFollowsDragForce(t *testing.T) {
 		if math.Abs(float64(got)-0) > 1e-3 {
 			t.Fatalf("摩擦片完好度 f1=%v，期望 0（按制动力报告）", got)
 		}
-		// 报价仍由 21/2 的整机保养口径覆盖，与服务端一致，不受本改动影响。
+		// 报价应反映该摩擦片的实际磨损，与修理结算一致。
 		price := item.Field(3).Val
 		if price == nil {
 			t.Fatal("摩擦片缺少价格对象")

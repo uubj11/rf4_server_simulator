@@ -9,6 +9,38 @@ import (
 	"rf4server/internal/wiregen"
 )
 
+// 12501 的分支子线钓组是 ThreeWay(10)，属于路亚；下发分类与实际判定一致。
+func TestEventThreeWayRigClassMatchesRule(t *testing.T) {
+	rule := qualificationRule(12501)
+	body, err := proto.EncodeValue(rule, wiregen.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := proto.DecodeValue(body, 0, wiregen.Table())
+	if err != nil {
+		t.Fatal(err)
+	}
+	class := decoded.Field(4)
+	if got := class.U32(); got != 2 {
+		t.Fatalf("12501 ThreeWay must be shown as spinning, got %d", got)
+	}
+	for _, r := range eventQualificationRules {
+		if r.ID != 12501 {
+			continue
+		}
+		ev := qualificationEvent{CatchGUID: "three-way", Species: "perch", LocLevel: evLocLadoga, RigType: 10, WeightG: 1501}
+		if r.Counted(ev) == "" {
+			t.Fatal("ThreeWay catch must count for 12501")
+		}
+		ev.RigType = 12
+		if r.Counted(ev) != "" {
+			t.Fatal("ordinary bottom rig must not count for 12501")
+		}
+		return
+	}
+	t.Fatal("12501 rule missing")
+}
+
 // 活动分支 9..20 的 273 条任务必须全部注册、编号不重复、静态分母 > 0，
 // 且与 eventTaskCounts 推导的编号阶梯逐条吻合。
 func TestEventQualificationRulesCovered(t *testing.T) {

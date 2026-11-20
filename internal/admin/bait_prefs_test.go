@@ -31,6 +31,18 @@ func TestBaitPrefsAPI(t *testing.T) {
 	mustExec(`INSERT INTO loc_wiki_fish(loc,fish_key,fish_zh,in_map_roster,in_habitat) VALUES('铜湖','atl_cod','测试鱼XYZ',1,1)`)
 	mustExec(`INSERT INTO companion_bait_fish(bait_id,fish_key,tier,evidence) VALUES('worm_01','c.roach',3,900),('maggot','c.roach',2,120),('fly','c.roach',1,10)`)
 	mustExec(`INSERT INTO companion_bait_fish(bait_id,fish_key,tier,evidence) VALUES('pilkerlures_2691','atl_cod',3,77)`)
+	// 官方占比默认最小样本 5；测试只有 4 条纪录，显式降到 1。
+	mustExec(`INSERT OR REPLACE INTO tunables(key,value) VALUES('bait_share_min_count','1')`)
+	// 官方渔获纪录：验证后台把 rf4records_catch 的占比一并展示（口径同 loadRf4Share）。
+	mustExec(`CREATE TABLE IF NOT EXISTS rf4records_catch(
+		fish_name_en TEXT, fish_key TEXT, bait_name TEXT, bait_id TEXT, weight_g INTEGER,
+		waterbody TEXT, region TEXT, categories TEXT, trophy_class TEXT, catch_date TEXT,
+		fetched_at TEXT, PRIMARY KEY(fish_name_en,bait_name,weight_g,catch_date,waterbody))`)
+	mustExec(`INSERT INTO rf4records_catch(fish_name_en,fish_key,bait_name,bait_id,weight_g,waterbody,region,categories,trophy_class,catch_date,fetched_at) VALUES
+		('Common Roach','c.roach','Worm','worm_01',100,'铜湖','','','','01.01.26','2026-01-01T00:00:00Z'),
+		('Common Roach','c.roach','Worm','worm_01',110,'铜湖','','','','01.01.26','2026-01-01T00:00:00Z'),
+		('Common Roach','c.roach','Worm','worm_01',120,'铜湖','','','','01.01.26','2026-01-01T00:00:00Z'),
+		('Common Roach','c.roach','Maggot','maggot',130,'铜湖','','','','01.01.26','2026-01-01T00:00:00Z')`)
 
 	cfg := config.Admin{HTTPAddr: "127.0.0.1:0", JWTSecret: "test"}
 	srv := NewServer(cfg, db, logging.Discard(), WebFS())
@@ -106,6 +118,14 @@ func TestBaitPrefsAPI(t *testing.T) {
 	}
 	if t3, _ := roach["tier3"].(float64); t3 != 1 {
 		t.Fatalf("c.roach tier3 应为 1，实得 %v", roach["tier3"])
+	}
+	if off, _ := roach["official"].([]any); len(off) == 0 {
+		t.Fatal("应带出官方占比")
+	} else {
+		first := off[0].(map[string]any)
+		if first["bait_id"] != "worm_01" || first["pct"].(float64) != 75 {
+			t.Fatalf("官方占比首项应为 worm_01 75%%，实得 %v", first)
+		}
 	}
 	if roach["in_strict"] != true {
 		t.Fatal("有规则的鱼严格模式应可咬")

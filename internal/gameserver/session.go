@@ -144,7 +144,7 @@ func (s *Session) Push(main, sub uint8, body *proto.Value) uint32 {
 	env := proto.BuildRequestEnvelope(callID, main, sub, append(bodyBytes, 0x01))
 	if traceCmds {
 		s.log.Info("TRACE 推", "cmd", cmdKey(main, sub), "len", len(bodyBytes),
-			"hex", traceHexHead(bodyBytes, 160))
+			"hex", traceHexHead(bodyBytes, traceHexMax))
 	}
 	if err := s.tunnel.WriteRecord(tunnel.TypeData, s.ID, env); err != nil {
 		s.log.Warn("推送发送失败", "cmd", cmdKey(main, sub), "err", err)
@@ -268,7 +268,13 @@ func (s *Session) Close(reason string) {
 		// 下线即离开所有地图：钓鱼游装备包全部回收（重登进图再发放）。
 		s.Srv.recallAllTripEquipment(s.pushCtx(), s.Userid)
 		s.log.Info("会话关闭", "reason", reason)
-		s.stopOnce.Do(func() { close(s.stopCh) })
+		s.stopOnce.Do(func() {
+			// 测试里用字面量构造的 Session 不带 stopCh（正式会话由 newSession 初始化），
+			// 推送失败会走到 Close，这里必须防 nil，否则整个进程 panic。
+			if s.stopCh != nil {
+				close(s.stopCh)
+			}
+		})
 		s.Srv.removeSession(s)
 	}
 }

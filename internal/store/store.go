@@ -78,6 +78,35 @@ func (d *DB) Migrate() error {
 		WHERE name='migrations/00046_fish_hunt.sql'`); err != nil {
 		return fmt.Errorf("兼容大鱼狩猎分支迁移编号: %w", err)
 	}
+	// 本地分支 2026-11-20 并入上游 v0.1.10（299 提交）时，上游占用了
+	// 00060~00062 / 00065~00066（skill_cast_effects、rf4records_catch、
+	// add_bs_salmon_grade_line、fish_zone、fish_zone_cells），与本地这 5 个
+	// 迁移撞号。本地改成 00078~00082，已按旧号建过这些表/列的库按文件名
+	// 重映射新编号，避免重放迁移（CREATE TABLE/ALTER 都会失败）。
+	// 顺序：先于 retireStaleMigrationRows 执行，否则旧行会被当链路分支退役。
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=78, name='migrations/00078_pity_lane_aggregate.sql' WHERE name='migrations/00060_pity_lane_aggregate.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00060: %w", err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=79, name='migrations/00079_condition_energy_max.sql' WHERE name='migrations/00061_condition_energy_max.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00061: %w", err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=80, name='migrations/00080_growth_set.sql' WHERE name='migrations/00062_growth_set.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00062: %w", err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=83, name='migrations/00083_spot_catch_player_hud.sql' WHERE name='migrations/00065_spot_catch_player_hud.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00065: %w", err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=84, name='migrations/00084_map_proficiency.sql' WHERE name='migrations/00066_map_proficiency.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00066: %w", err)
+	}
+	// 00063/00064 是上游 fish_zone 族的旧分支号段（今 00065~00069）。上游测试
+	// 明确要求 63/64 留给旧库同号登记行，所以本地这两支也一并挪到 00083/00084。
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=81, name='migrations/00081_spot_catch_player.sql' WHERE name='migrations/00063_spot_catch_player.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00063: %w", err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=82, name='migrations/00082_spot_catch_player_zone.sql' WHERE name='migrations/00064_spot_catch_player_zone.sql'`); err != nil {
+		return fmt.Errorf("兼容本地分支迁移编号 00064: %w", err)
+	}
 	entries, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {
 		return err
@@ -127,6 +156,28 @@ func (d *DB) Migrate() error {
 				if _, err := tx.Exec(`UPDATE profile SET membership_exp=membership_expires_at WHERE membership_exp=0 AND membership=1 AND membership_expires_at BETWEEN 1 AND 253402300799`); err != nil {
 					_ = tx.Rollback()
 					return err
+				}
+			}
+		}
+		if spec, ok := renumberedColumnMigrations[name]; ok {
+			// 本地 fish_zone 族 2026-11-16 因上游占用 00060~00062 改号为 00065~00069，
+			// 已按旧编号建过列的库会以新名字重放这些 ADD COLUMN（无 IF NOT EXISTS）。
+			// 与 00055 同口径：列已在就跳过 ALTER，只登记新编号。圆形三列是同一
+			// 迁移原子加的，要么全有要么全无，按全有判断。
+			present := 0
+			for _, col := range spec.columns {
+				var n int
+				if err := tx.QueryRow(
+					fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name=?`, spec.table), col).Scan(&n); err != nil {
+					_ = tx.Rollback()
+					return err
+				}
+				present += n
+			}
+			if present == len(spec.columns) {
+				body = []byte("-- 列已由改号前的旧编号迁移建过，跳过 ALTER，只登记新编号")
+				if spec.remains != "" {
+					body = []byte(spec.remains)
 				}
 			}
 		}
@@ -222,6 +273,20 @@ func (d *DB) ensureLegacyPlayerColumns() error {
 // 只为让出原编号并保留可追溯的名字，不会被任何主线迁移占用。
 const staleMigrationVersionBase = 9_000_000
 
+// renumberedColumnMigrations 是改号后重放的 ADD COLUMN 类迁移：列已存在时
+// 跳过 ALTER（remains 非空则只跑这段幂等 SQL），迁移本身仍登记新编号。
+// 键是迁移在 migrationsFS 里的名字。
+var renumberedColumnMigrations = map[string]struct {
+	table   string
+	columns []string
+	remains string
+}{
+	"migrations/00066_fish_zone_cells.sql":   {table: "fish_zone", columns: []string{"cells_json"}},
+	"migrations/00067_fish_zone_circle.sql":  {table: "fish_zone", columns: []string{"cx", "cz", "radius"}},
+	"migrations/00068_catch_log_hook.sql":    {table: "catch_log", columns: []string{"hook"}, remains: `CREATE INDEX IF NOT EXISTS idx_catch_log_fish_hook ON catch_log(fish_key, hook);`},
+	"migrations/00069_fish_zone_sea_set.sql": {table: "fish_zone", columns: []string{"sea_zones_json"}},
+}
+
 // catchTackleCatBackfillSQL 是 00055 迁移里除 ALTER TABLE 之外的部分（回填 + 索引）。
 // 分支库可能已建过 tackle_cat 列，此时跳过 ALTER 只跑这一段，保证迁移可重复执行。
 const catchTackleCatBackfillSQL = `
@@ -243,6 +308,11 @@ CREATE INDEX IF NOT EXISTS idx_catch_log_uid_tackle ON catch_log(uid, tackle_cat
 // 迁移、该文件后来没有并入主线时，主线同号迁移第一次登记就会撞 schema_migrations.version
 // 的 UNIQUE 约束，整个服务直接起不来（实测：00035_reel_component_wear 挡住 00035_trip_state）。
 // 这里只把旧登记行改名挪到退役编号段，表结构和数据都不动。
+//
+// 退役编号段本身也会被上一轮退役占住：同一个编号经历两轮退役（2026-11-16 实机：
+// 9000060 已是上一轮 retired/00060_skill_cast_effects，另一分支遗留的同号 60 行
+// 又要退役）时，固定映射 9M+编号 会撞 UNIQUE，服务同样起不来。所以落点从
+// 9M+编号 起向上探测第一个空位，并对本轮已挪走的行记占位，避免相邻编号连锁互踩。
 func retireStaleMigrationRows(sql *sql.DB, entries []string) error {
 	known := make(map[string]bool, len(entries))
 	wanted := make(map[int64]bool, len(entries))
@@ -276,9 +346,22 @@ func retireStaleMigrationRows(sql *sql.DB, entries []string) error {
 	}
 	rows.Close()
 
+	claimed := make(map[int64]bool, len(stale))
 	for _, s := range stale {
+		target := staleMigrationVersionBase + s.version
+		for {
+			var n int
+			if err := sql.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, target).Scan(&n); err != nil {
+				return fmt.Errorf("探测退役编号 %d: %w", target, err)
+			}
+			if n == 0 && !claimed[target] {
+				break
+			}
+			target++
+		}
+		claimed[target] = true
 		if _, err := sql.Exec(`UPDATE schema_migrations SET version=?, name=? WHERE version=? AND name=?`,
-			staleMigrationVersionBase+s.version, "retired/"+s.name, s.version, s.name); err != nil {
+			target, "retired/"+s.name, s.version, s.name); err != nil {
 			return fmt.Errorf("退役旧分支迁移登记 %s: %w", s.name, err)
 		}
 	}

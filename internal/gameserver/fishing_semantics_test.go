@@ -291,8 +291,8 @@ func TestFishingLeftBumpsEscapes(t *testing.T) {
 
 func TestFishingEndSettleUnhookedDoesNotCountEscape(t *testing.T) {
 	srv, db := newDetachTestServer(t)
-	const uid = int64(1000001)
-	sess := newProbeSess(srv)
+	sess, gc := newTunnelProbe(t, srv)
+	uid := sess.Userid
 	st := srv.stateFor(uid)
 	st.mu.Lock()
 	st.Pending = &RolledFish{
@@ -307,6 +307,7 @@ func TestFishingEndSettleUnhookedDoesNotCountEscape(t *testing.T) {
 	if !ok || len(body) == 0 {
 		t.Fatalf("14/4 未处理: ok=%v bytes=%d", ok, len(body))
 	}
+	assertNoPush(t, gc, 400*time.Millisecond, "14/4 咬饵未咬钩不应产生 24/27 跑鱼推送")
 
 	var escapes int
 	if err := db.SQL.QueryRow(`SELECT COALESCE((SELECT value FROM player_counters WHERE uid=? AND key='escapes'),0)`, uid).Scan(&escapes); err != nil {

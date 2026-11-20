@@ -70,16 +70,20 @@ func TestQualificationBiteSnapshotSurvivesBaitConsumption(t *testing.T) {
 		t.Fatalf("咬钩夜间标记 = %v，期望 %v", pending.IsNight, nowNight)
 	}
 
-	// 14/11 中鱼会消耗并删除挂载的天然饵子实例。
+	// 14/11 中鱼确认不再扣饵（扣饵挪到搏鱼终局，specs/changes/bait-consume-fight-end）：
+	// 天然饵子实例仍挂在钩上，让客户端搏鱼 ctor 读到完整挂载态。
 	hFishingHooked(miscCtx(sess, 14, 11, rigRequestTree(t, proto.Guid(rod.GUID))))
-	if row, _ := db.GetItemByGUID(t.Context(), baitChild); row != nil {
-		t.Fatalf("14/11 后天然饵子实例应已删除: %+v", row)
+	if row, _ := db.GetItemByGUID(t.Context(), baitChild); row == nil {
+		t.Fatal("14/11 中鱼确认不应扣饵，天然饵子实例应仍在钩上")
 	}
 
-	// 14/4 结算仍必须能按快照累计「使用天然饵」任务 4003。
+	// 14/4 结算即搏鱼终局：终局扣饵删除子实例，结算仍按快照累计「使用天然饵」任务 4003。
 	ctx14 := &Ctx{Sess: sess, Main: 14, Sub: 4, ExpectResponse: true, Log: logging.Discard()}
 	if body, ok := s.fishingEndSettle(ctx14); !ok || len(body) == 0 {
 		t.Fatalf("14/4 未处理: ok=%v bytes=%d", ok, len(body))
+	}
+	if row, _ := db.GetItemByGUID(t.Context(), baitChild); row != nil {
+		t.Fatalf("14/4 终局扣饵后天然饵子实例应已删除: %+v", row)
 	}
 	states, err := db.QualificationStates(t.Context(), uid)
 	if err != nil {
@@ -218,4 +222,42 @@ func TestQualificationSettlementAtomicAndReplayable(t *testing.T) {
 
 func catchSettlementKey(uid int64, fishGUID string) string {
 	return fmt.Sprintf("catch-settlement:%d:%s", uid, strings.ToLower(fishGUID))
+}
+
+func TestQualification4402UsesSettledBaseXP(t *testing.T) {
+	srv, db := newDetachTestServer(t)
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const uid = int64(1000001)
+	if _, err := db.EnsureProfile(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.ExecContext(ctx, `UPDATE profile SET membership=1,membership_exp=? WHERE uid=?`, time.Now().Unix()+3600, uid); err != nil {
+		t.Fatal(err)
+	}
+	// bream 官服锚：g3 c=1.4999（记录卡），g2 缺档=锚÷档乘 6.25=0.239984/g；会员加成翻倍。
+	// 完成线 qBaseXPAtLeast(7000) → 用 30kg 让 base 过线覆盖 complete 分支。
+	for _, tc := range []struct {
+		weight, base, total int64
+		complete            bool
+	}{{10000, 2399, 4798, false}, {30000, 7199, 14398, true}} {
+		fish := &RolledFish{FishGUID: newFishGUID(), Species: "bream", Grade: 2, WeightG: tc.weight, LocLevel: evLocBelaya}
+		ev := qualificationEvent{Kind: qevFishLanded, CatchGUID: fish.FishGUID, Species: fish.Species, WeightG: fish.WeightG, RigType: 1, RodType: 3}
+		result, err := srv.settleCatchOnceWithQualification(ctx, uid, fish, 1, &ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.baseXP != tc.base || result.totalXP != tc.total {
+			t.Fatalf("unexpected fixture XP: base=%d total=%d", result.baseXP, result.totalXP)
+		}
+		if complete := result.qualChanges[4402].CompletedTS > 0; complete != tc.complete {
+			t.Fatalf("base XP %d, total XP %d: completed=%v", tc.base, tc.total, complete)
+		}
+		replay, err := srv.settleCatchOnceWithQualification(ctx, uid, fish, 1, &ev)
+		if err != nil || !replay.replayed {
+			t.Fatalf("settlement replay failed: %+v %v", replay, err)
+		}
+	}
 }

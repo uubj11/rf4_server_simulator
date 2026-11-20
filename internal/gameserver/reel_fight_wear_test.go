@@ -403,14 +403,14 @@ func TestFightReelStressSecondsFollowRealGaps(t *testing.T) {
 
 // TestFishFightPullKgfMatchesKTable 钉住换算恒等式：27.f8 是牛，磨损账比较的
 // 泄力是公斤，入账前除以 newtonPerKgf。期望值由逐鱼种 K 表公式手算
-// （perch K0=17.6，f8 = 0.461kg × (17.6 + 0.35·ln(0.461)) ≈ 7.9887N ≈ 0.8146kgf），
-// 不用实现代码复算。
+// （perch K0=17.60/slope=0.38，f8 = 0.461kg × (17.6 + 0.38·ln(0.461)) ≈ 7.9779N
+// ≈ 0.8136kgf），不用实现代码复算。
 func TestFishFightPullKgfMatchesKTable(t *testing.T) {
 	srv := &Server{}
 	f := &RolledFish{FishGUID: "fish0000000000000000000000000001", Species: "perch", WeightG: 461, Grade: 2}
 	// fishFightPullFor 末尾四舍五入到万分位：牛数最大偏差 5e-5，折公斤力约 5.1e-6。
 	const tol = 1e-4
-	wantN := 0.461 * (17.6 + fishPullLnSlope*math.Log(0.461))
+	wantN := 0.461 * (17.60 + 0.38*math.Log(0.461))
 	if got, want := srv.fishFightPullFor(f), wantN; math.Abs(got-want) > tol {
 		t.Fatalf("27.f8 应为 K 表牛数 %.6f，实得 %.6f", want, got)
 	}

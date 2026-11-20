@@ -19,10 +19,11 @@ git fetch "${WRITE_REMOTE}" main
 git checkout -B write-back FETCH_HEAD
 
 python3 - "${CHANNEL}" "${VERSION}" "${BUILD_TS}" "${RELEASED_AT}" "${ASSET_NAME}" <<'PY'
-import json, sys
+import json, os, sys
 
 channel, version, build_ts, released_at, asset_name = sys.argv[1:6]
 assert channel in ("preview", "stable"), channel
+base = "https://github.com/" + os.environ.get("GITHUB_REPOSITORY", "OpenFisherCommunity/rf4_server_simulator")
 with open("version.json", encoding="utf-8") as f:
     data = json.load(f)
 if data.get("schema") != 1:
@@ -32,15 +33,14 @@ entry = {
     "version": version,
     "build_ts": build_ts,
     "released_at": released_at,
-    "notes_url": f"https://github.com/glance522/rf4_server_simulator/releases/tag/{version}",
+    "notes_url": f"{base}/releases/tag/{version}",
     # releases/latest 只指向正式版；preview 用户给列表页（含 Pre-release）。
-    "download_url": "https://github.com/glance522/rf4_server_simulator/releases/latest"
+    "download_url": f"{base}/releases/latest"
     if channel == "stable"
-    else "https://github.com/glance522/rf4_server_simulator/releases",
+    else f"{base}/releases",
     # 国内加速直链：gh-proxy 包裹的本仓库 release 附件（2026-11 实测可用）。
     "download_mirror_url": (
-        "https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator"
-        f"/releases/download/{version}/{asset_name}"
+        f"https://gh-proxy.com/{base}/releases/download/{version}/{asset_name}"
     ),
 }
 data[channel] = entry

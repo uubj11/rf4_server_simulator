@@ -5,6 +5,8 @@
 ## 使用与部署
 
 - [部署指南](deploy.md)：构建、配置、初始化、启动、客户端接入与安全约束。
+- [Docker Compose 部署](../docker/README.md)：多服务容器、本地与局域网接入、存档和更新。
+- [Docker 单容器部署](../DOCKER.md)：单镜像构建、必需配置与数据卷。
 - [客户端兼容性检查清单](client-checklist.md)：登录、会话、玩家状态、钓鱼、物品与经济等回归项。
 - [管理控制台](admin-console.md)：launcher 内嵌 Control Deck 的功能与 API。
 - [静态数据隔离](static_runtime_isolation.md)：可写玩家库与只读静态目录的运行时隔离模型。
@@ -26,6 +28,8 @@
 - [钓鱼状态恢复](fishing-state-recovery.md)：快照、重连与未结算鱼的恢复路径。
 - [护网与钓获记录同步](keepnet-synchronization.md)：入护、记录与库存一致性。
 - [当前装备的技能加成](equipped-fishing-skills.md)：装备加成如何进入判定。
+- [官方投距技能效果对照表](cast-skill-official-effects.md)：skill_cast_effect_def
+  的官方文案提取方法与逐节点对照。
 - [欢乐时光](happy-hour.md)：计时口径、加成数值与资格持久化。
 - [战利品箱](loot-box.md)：开箱产出与发放口径。
 - [弹弓投掷视觉](slingshot-throw-visual.md)：投掷外观与服务端校验的边界。
@@ -65,10 +69,24 @@
 - [rf4almanac 重量数据整理与可用性分析（2026-11-08）](analysis-rf4almanac-weight-2026-11-08.md)；
   抓取与许可声明见该文「抓取与许可声明」一节。
 - [鱼口配置叠加/覆盖关系调查（2026-11-10）](后台配置对发鱼流程影响的调查.md)。
+- [路亚秒脱钩归因分析（2026-11-12）](路亚秒脱钩归因分析-2026-11-12.md)：模拟器脱钩
+  间隔双峰签名 × 官方 lure2 抓包运行位对照的证据源；结论已正式化为
+  specs/changes/lure-fight-mount-flags/spec.md。
 - [升级礼物卡片机制（完整还原）](LEVEL_UP_GIFT_CARDS.md)。
+- [咬钩→搏鱼→断线全链机制与模拟器差异分析（2026-11-12）](analysis-bite-hook-fight-line-break-2026-11-12.md)。
+- [客户端"脱钩/断线"本地判定机制专项调研（2026-11-12）](analysis-client-line-break-detection-2026-11-12.md)。
+- [四类钓法状态门与路亚线杯状态排查（2026-11-12）](analysis-fishing-method-state-gates-2026-11-12.md)。
+- [浮钓顺水漂流不发鱼排查（2026-11-12）](analysis-float-drift-fish-spawn-2026-11-12.md)。
+- [鱼脱钩（跑鱼）客户端/服务端判定机制分析（2026-11-12）](客户端结算脱钩逻辑分析.md)。
 - [入水证据官方报文核验与浮钓顺流修复方案（2026-11-13）](analysis-inwater-evidence-packet-verification-2026-11-13.md)：
   六份官方 pcap 全量解码 14/7 f5 位序；浮钓顺流/下沉与 14/3 入水证据修复
   （P1/P2/P3）的依据与方案存档。
+- [搏鱼脱钩根因与修复整体方案（2026-11-13）](搏鱼脱钩根因与修复整体方案-2026-11-13.md)：
+  海鱼静态参数缺口的根因定量与落表方案；结论已正式化为
+  specs/changes/fight-statics-official-tables/spec.md。
+- [路亚脱钩率归因收敛：咬饵≠咬钩（2026-11-16）](路亚脱钩率分析-2026-11-16.md)：
+  客户端两阶段模型（f0=1 叼住吐出 / f0=2 真脱钩）；结论已正式化为
+  specs/changes/lure-f0-1-silent-spit-out/spec.md。
 
 ## 工程约定
 
@@ -77,6 +95,7 @@
 - [工程工作流](agents/workflow.md)：快速路径与约束路径的分级、门禁级别。
 - [变更记录约定](agents/issue-tracker.md)：`specs/changes` 目录与状态流转。
 - [档案与技能树统一显示可用技能点](../specs/changes/issue-401-skill-points/spec.md)：Issue #401 的修复范围与验证状态。
+- [商店扣款前校验物品可下发性](../specs/changes/store-goods-wire-preflight/spec.md)：吸引成分购买可见性与异常商品拒购边界。
 - [领域文档约定](agents/domain.md)：文档地图、证据等级、对账表。
 - [ADR 0001](adr/0001-engineering-constraints.md)：为什么采用按风险分级的约束体系。
 

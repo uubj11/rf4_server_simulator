@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"rf4server/internal/fishmaps"
 	"rf4server/internal/store"
 )
 
@@ -19,6 +21,128 @@ type catalogItem struct {
 	Category  int64  `json:"category"`
 	Kind      string `json:"kind"`
 	Brand     string `json:"brand"`
+	Group     string `json:"group"`
+	GroupKey  string `json:"group_key"`
+}
+
+type catalogGroup struct {
+	Key   string `json:"key"`
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+	Order int    `json:"-"`
+}
+
+const catalogKindExpr = `COALESCE(NULLIF(c.kind,''),NULLIF(d.kind,''),'')`
+
+func catalogGroupFor(kind string, category int64) (key, name string, order int) {
+	switch {
+	case category == 6 || kind == "reel":
+		return "reel", "完整渔轮", 10
+	case category == 27 || kind == "bait" || kind == "bait_boil":
+		return "bait", "饵料", 20
+	case category == 26:
+		return "food", "食物与饮料", 30
+	case kind == "rod" || kind == "rod_casting" || kind == "rod_match" ||
+		kind == "rod_spinning" || kind == "rod_telescopic" || kind == "feeder":
+		return "rod", "鱼竿", 40
+	case strings.HasPrefix(kind, "lure_"):
+		return "lure", "拟饵", 50
+	case kind == "float":
+		return "float", "浮漂", 60
+	case kind == "container":
+		return "container", "套装与容器", 70
+	default:
+		return "other", "其他商品", 100
+	}
+}
+
+func completeCatalogCondition() string {
+	return catalogKindExpr + ` <> 'rod_blank'
+		AND COALESCE(d.category,0) NOT IN (4,5,7,8,9,10,34,36,48,49,50,51,52,53,54,57)`
+}
+
+func catalogGroupCondition(key string) (string, bool) {
+	switch key {
+	case "reel":
+		return `(COALESCE(d.category,0)=6 OR ` + catalogKindExpr + `='reel')`, true
+	case "bait":
+		return `(COALESCE(d.category,0)=27 OR ` + catalogKindExpr + ` IN ('bait','bait_boil'))`, true
+	case "food":
+		return `COALESCE(d.category,0)=26`, true
+	case "rod":
+		return catalogKindExpr + ` IN ('rod','rod_casting','rod_match','rod_spinning','rod_telescopic','feeder')`, true
+	case "lure":
+		return catalogKindExpr + ` LIKE 'lure_%'`, true
+	case "float":
+		return catalogKindExpr + `='float'`, true
+	case "container":
+		return catalogKindExpr + `='container'`, true
+	case "other":
+		return `NOT (` + strings.Join([]string{
+			`COALESCE(d.category,0)=6`,
+			`COALESCE(d.category,0)=27`,
+			`COALESCE(d.category,0)=26`,
+			catalogKindExpr + ` IN ('reel','bait','bait_boil','rod','rod_casting','rod_match','rod_spinning','rod_telescopic','feeder','float','container')`,
+			catalogKindExpr + ` LIKE 'lure_%'`,
+		}, " OR ") + `)`, true
+	default:
+		return "", false
+	}
+}
+
+func catalogJoins(r *http.Request) string {
+	if r.URL.Query().Get("shop_only") == "1" {
+		return ` JOIN shop_item s ON s.item_id=d.item_id`
+	}
+	return ""
+}
+
+func (s *Server) handleCatalogGroups(w http.ResponseWriter, r *http.Request) {
+	conditions := []string{completeCatalogCondition()}
+	args := make([]any, 0)
+	if group := strings.TrimSpace(r.URL.Query().Get("group")); group != "" {
+		where, ok := catalogGroupCondition(group)
+		if !ok {
+			httpError(w, 400, "未知商品分类")
+			return
+		}
+		conditions = append(conditions, where)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.SQL.QueryContext(ctx, `
+		SELECT COALESCE(d.category,0), `+catalogKindExpr+`, COUNT(DISTINCT d.item_id)
+		FROM item_def d
+		LEFT JOIN item_catalog c ON c.item_id=d.item_id`+catalogJoins(r)+`
+		WHERE `+strings.Join(conditions, " AND ")+`
+		GROUP BY d.category,c.kind,d.kind`, args...)
+	if err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	groups := make(map[string]*catalogGroup)
+	for rows.Next() {
+		var category, count int64
+		var kind string
+		if err := rows.Scan(&category, &kind, &count); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		key, name, order := catalogGroupFor(kind, category)
+		g := groups[key]
+		if g == nil {
+			g = &catalogGroup{Key: key, Name: name, Order: order}
+			groups[key] = g
+		}
+		g.Count += count
+	}
+	out := make([]catalogGroup, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, *group)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Order < out[j].Order })
+	writeJSON(w, out)
 }
 
 func (s *Server) handleCatalogItems(w http.ResponseWriter, r *http.Request) {
@@ -28,17 +152,31 @@ func (s *Server) handleCatalogItems(w http.ResponseWriter, r *http.Request) {
 		limit = 80
 	}
 	like := "%" + q + "%"
+	conditions := []string{"(d.item_id LIKE ? OR COALESCE(c.name_zh,c.name,'') LIKE ?)"}
+	args := []any{like, like}
+	if r.URL.Query().Get("complete_only") == "1" {
+		conditions = append(conditions, completeCatalogCondition())
+	}
+	if group := strings.TrimSpace(r.URL.Query().Get("group")); group != "" {
+		where, ok := catalogGroupCondition(group)
+		if !ok {
+			httpError(w, 400, "未知商品分类")
+			return
+		}
+		conditions = append(conditions, where)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	rows, err := s.db.SQL.QueryContext(ctx, `
+	query := `
 		SELECT d.item_id, d.numeric_id, COALESCE(c.name_zh,c.name,''), COALESCE(d.category,0),
-		       COALESCE(d.kind,''), COALESCE(d.brand,'')
+		       COALESCE(d.kind,''), COALESCE(d.brand,''), COALESCE(c.kind,'')
 		FROM item_def d
-		LEFT JOIN item_catalog c ON c.item_id=d.item_id
-		WHERE d.item_id LIKE ? OR COALESCE(c.name_zh,c.name,'') LIKE ?
+		LEFT JOIN item_catalog c ON c.item_id=d.item_id` + catalogJoins(r) + `
+		WHERE ` + strings.Join(conditions, " AND ") + `
 		GROUP BY d.item_id,d.numeric_id
-		ORDER BY CASE WHEN d.item_id=? THEN 0 ELSE 1 END, d.item_id LIMIT ?`,
-		like, like, q, limit)
+		ORDER BY CASE WHEN d.item_id=? THEN 0 ELSE 1 END, d.item_id LIMIT ?`
+	args = append(args, q, limit)
+	rows, err := s.db.SQL.QueryContext(ctx, query, args...)
 	if err != nil {
 		httpError(w, 500, err.Error())
 		return
@@ -47,10 +185,15 @@ func (s *Server) handleCatalogItems(w http.ResponseWriter, r *http.Request) {
 	out := make([]catalogItem, 0)
 	for rows.Next() {
 		var v catalogItem
-		if err := rows.Scan(&v.ItemID, &v.NumericID, &v.Name, &v.Category, &v.Kind, &v.Brand); err != nil {
+		var catalogKind string
+		if err := rows.Scan(&v.ItemID, &v.NumericID, &v.Name, &v.Category, &v.Kind, &v.Brand, &catalogKind); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
+		if catalogKind == "" {
+			catalogKind = v.Kind
+		}
+		v.GroupKey, v.Group, _ = catalogGroupFor(catalogKind, v.Category)
 		out = append(out, v)
 	}
 	writeJSON(w, out)
@@ -115,13 +258,155 @@ func (s *Server) handleStoreItemReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// fishAreaPaper 标定的纸地图数值，字段与 fishmaps.PaperMap 一致（float32 精度原样下发）。
+type fishAreaPaper struct {
+	OffsetX float32 `json:"offset_x"`
+	OffsetZ float32 `json:"offset_z"`
+	Scale   float32 `json:"scale"`
+	Width   float64 `json:"width"`
+	Height  float64 `json:"height"`
+}
+
+// fishAreaCalibration 内陆网格图的场景标定（世界↔图像像素换算见 docs/fish-query-coordinates.md）。
+type fishAreaCalibration struct {
+	OriginX float64        `json:"origin_x"`
+	OriginZ float64        `json:"origin_z"`
+	Size    float64        `json:"size"`
+	Paper   *fishAreaPaper `json:"paper"`
+	// DisplayOriginX/Z 游戏内 HUD 显示坐标原点（显示=(世界−原点)/5）。内陆与 origin 相同；
+	// 挪威海游戏内显示 Z=世界Z/5+420（原点 z=-2100），与像素标定的世界原点分离
+	// （2026-11-14 实测：玩家在 198 区，游戏显示 469:349 ↔ 世界 (2345,-355)）。
+	DisplayOriginX float64 `json:"display_origin_x,omitempty"`
+	DisplayOriginZ float64 `json:"display_origin_z,omitempty"`
+}
+
+// fishAreaRow 在 store.FishAreaView 基础上追加地图编辑器所需的定位信息：
+// map_kind: grid=可拖拽画矩形（有纸地图标定）；sea=海图区号（有图无标定）；
+// none=无图（保留手填兜底）。calibration 为 nil 表示无网格标定。
+type fishAreaRow struct {
+	Loc         string               `json:"loc"`
+	FishCount   int64                `json:"fish_count"`
+	Level       string               `json:"level"`
+	MapKind     string               `json:"map_kind"`
+	Texture     string               `json:"texture"`
+	Calibration *fishAreaCalibration `json:"calibration"`
+}
+
+// handleFishSeaNow GET：玩家当前所在海图区号。优先读 fishing_state 实时钓鱼状态
+// （玩家正在海上抛竿时的 loc12_N），兜底最近一条海钓记录。这是与判鱼完全同源的
+// 权威信号——管理员不用在图上找格子，直接高亮"我在哪"。
+func (s *Server) handleFishSeaNow(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var loc string
+	var ts float64
+	var live bool
+	err := s.db.SQL.QueryRowContext(ctx,
+		`SELECT loc, updated_ts FROM fishing_state
+		 WHERE loc LIKE 'loc12_%' AND cast_active=1 ORDER BY updated_ts DESC LIMIT 1`).Scan(&loc, &ts)
+	if err == nil {
+		live = true
+	} else {
+		err = s.db.SQL.QueryRowContext(ctx,
+			`SELECT loc, ts FROM catch_log WHERE loc LIKE 'loc12_%' ORDER BY ts DESC LIMIT 1`).Scan(&loc, &ts)
+	}
+	if err != nil {
+		httpError(w, 404, "没有进行中的海钓，也没有海钓记录")
+		return
+	}
+	zone := 0
+	if i := strings.LastIndexByte(loc, '_'); i >= 0 {
+		if n, e := strconv.Atoi(loc[i+1:]); e == nil {
+			zone = n
+		}
+	}
+	if zone <= 0 {
+		httpError(w, 500, "区号解析失败: "+loc)
+		return
+	}
+	writeJSON(w, map[string]any{"zone": zone, "loc": loc, "ts": ts, "live": live})
+}
+
+// handleFishSeaZoneLatest GET：最近一次海钓的客户端上报区号（catch_log.loc=loc12_N）。
+// 海图区域命中按客户端上报区号判定，用钓获记录定位就是零误差——不需要在图上找格子。
+func (s *Server) handleFishSeaZoneLatest(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var loc, fish string
+	var ts float64
+	err := s.db.SQL.QueryRowContext(ctx,
+		`SELECT loc, COALESCE(name_zh,fish_key), ts FROM catch_log
+		 WHERE loc LIKE 'loc12_%' ORDER BY ts DESC LIMIT 1`).Scan(&loc, &fish, &ts)
+	if err != nil {
+		httpError(w, 404, "还没有海钓记录——去钓一条鱼再回来点")
+		return
+	}
+	zone := 0
+	if i := strings.LastIndexByte(loc, '_'); i >= 0 {
+		if n, err := strconv.Atoi(loc[i+1:]); err == nil {
+			zone = n
+		}
+	}
+	if zone <= 0 {
+		httpError(w, 500, "区号解析失败: "+loc)
+		return
+	}
+	writeJSON(w, map[string]any{"zone": zone, "loc": loc, "fish": fish, "ts": ts})
+}
+
+// handleFishSeaZones GET：海图（挪威海）声呐区号的世界坐标矩形，
+// 供地图编辑器渲染可点选的海图网格。
+func (s *Server) handleFishSeaZones(w http.ResponseWriter, r *http.Request) {
+	grids, err := fishmaps.SeaZoneGrids()
+	if err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"zones": grids})
+}
+
 func (s *Server) handleFishAreas(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.ListFishAreasAdmin(r.Context())
 	if err != nil {
 		httpError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, rows)
+	out := make([]*fishAreaRow, 0, len(rows))
+	for _, row := range rows {
+		item := &fishAreaRow{Loc: row.Loc, FishCount: row.FishCount, MapKind: "none"}
+		if level := s.db.ResolveLevelKeyByName(r.Context(), row.Loc); level != "" {
+			item.Level = level
+			if name, known := fishmaps.TextureFor(level); known {
+				item.Texture = "maps/" + name + ".webp"
+				if sc, ok := fishmaps.Scenes[level]; ok && sc.Paper != nil {
+					item.MapKind = "grid"
+					item.Calibration = &fishAreaCalibration{
+						OriginX: sc.OriginX, OriginZ: sc.OriginZ, Size: sc.Size,
+						Paper: &fishAreaPaper{
+							OffsetX: sc.Paper.OffsetX, OffsetZ: sc.Paper.OffsetZ,
+							Scale: sc.Paper.Scale, Width: sc.Paper.Width, Height: sc.Paper.Height,
+						},
+					}
+				} else {
+					// 海图：区域用声呐区号语义，但几何工具（矩形/格子/圆）同样可用；
+					// 挪威海带客户端标定，其他海图（当前没有）降级矢量参考图。
+					item.MapKind = "sea"
+					if sp := fishmaps.SeaPaper; sp != nil && level == "level_012_north_sea" {
+						item.Calibration = &fishAreaCalibration{
+							OriginX: 0, OriginZ: 0, Size: 0,
+							DisplayOriginX: 0, DisplayOriginZ: -2100,
+							Paper: &fishAreaPaper{
+								OffsetX: sp.OffsetX, OffsetZ: sp.OffsetZ,
+								Scale: sp.Scale, Width: sp.Width, Height: sp.Height,
+							},
+						}
+					}
+				}
+			}
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleFishConfig(w http.ResponseWriter, r *http.Request) {

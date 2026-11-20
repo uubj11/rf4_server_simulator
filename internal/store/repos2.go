@@ -526,6 +526,43 @@ func (d *DB) GetItemDef(ctx context.Context, numericID int64) (*ItemDef, error) 
 	return def, nil
 }
 
+// ItemDefCategories 批量按 numeric_id 取品类（4/22 搏鱼推送热路径专用）。
+// 树重建一次查询拿全量，调用方禁止逐对象单查；查询不到的 id 不在返回 map 里。
+func (d *DB) ItemDefCategories(ctx context.Context, numericIDs []int64) (map[int64]int64, error) {
+	out := make(map[int64]int64, len(numericIDs))
+	if len(numericIDs) == 0 {
+		return out, nil
+	}
+	const chunk = 500 // SQLite 变量上限余量
+	for start := 0; start < len(numericIDs); start += chunk {
+		end := start + chunk
+		if end > len(numericIDs) {
+			end = len(numericIDs)
+		}
+		part := numericIDs[start:end]
+		marks := make([]string, len(part))
+		qargs := make([]interface{}, len(part))
+		for i, id := range part {
+			marks[i] = "?"
+			qargs[i] = id
+		}
+		rows, err := d.SQL.QueryContext(ctx,
+			`SELECT numeric_id, COALESCE(category,0) FROM item_def WHERE numeric_id IN (`+
+				strings.Join(marks, ",")+`)`, qargs...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, cat int64
+			if err := rows.Scan(&id, &cat); err == nil {
+				out[id] = cat
+			}
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // GetItemDefByItemID 按 systemID 取定义。
 func (d *DB) GetItemDefByItemID(ctx context.Context, itemID string) (*ItemDef, error) {
 	row := d.SQL.QueryRowContext(ctx, `
@@ -851,6 +888,61 @@ func (d *DB) SpawnModeSet(ctx context.Context, mode, updatedBy string) error {
 			ON CONFLICT (key) DO UPDATE SET value=?, updated_by=?, updated_ts=?`,
 			key, values[key], updatedBy, now,
 			values[key], updatedBy, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// biteModeKeys 是「鱼汛模式」预设统管的五个开关。与发鱼模式不同，
+// 五个开关也可以在鱼群规则条里逐个手调（那是合法的 mixed 状态）。
+var biteModeKeys = []string{
+	"bite_gate_enabled", "fish_ecology_enabled", "fish_weather_enabled",
+	"fish_bait_rules_enabled", "fish_distribution_enabled",
+}
+
+// BiteModeFor 由当前 tunables 推断鱼汛模式：realistic=五开、legacy=五关，
+// 其余为 mixed（管理员手动改过单个开关）。
+func BiteModeFor(t map[string]string) string {
+	all, none := true, true
+	for _, key := range biteModeKeys {
+		if t[key] == "1" {
+			none = false
+		} else {
+			all = false
+		}
+	}
+	switch {
+	case all:
+		return "realistic"
+	case none:
+		return "legacy"
+	}
+	return "mixed"
+}
+
+// BiteModeSet 原子切换鱼汛模式：realistic=五开，legacy=五关。
+func (d *DB) BiteModeSet(ctx context.Context, mode, updatedBy string) error {
+	value := "0"
+	switch mode {
+	case "realistic":
+		value = "1"
+	case "legacy":
+	default:
+		return fmt.Errorf("未知鱼汛模式: %s", mode)
+	}
+	now := float64(time.Now().Unix())
+	tx, err := d.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, key := range biteModeKeys {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO tunables(key, value, updated_by, updated_ts) VALUES(?,?,?,?)
+			ON CONFLICT (key) DO UPDATE SET value=?, updated_by=?, updated_ts=?`,
+			key, value, updatedBy, now,
+			value, updatedBy, now); err != nil {
 			return err
 		}
 	}

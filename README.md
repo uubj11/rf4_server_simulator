@@ -1,166 +1,101 @@
 # rf4_server_simulator
 
-对一款钓鱼游戏的**本地服务端进行模拟与技术研究**的 Go 实现。项目采用统一启动器 + 双服务进程架构（接入网关 / 游戏逻辑服务），管理后台直接内嵌在 launcher 的 Web 入口中，使用本地单文件 SQLite，尽量做到无外部中间件即可运行。
+[English](README.en.md)
 
-> 本项目由玩家兴趣驱动，不以盈利为目的，不是完整复刻，也不是可直接长期运营的私服方案。
-## 本项目目前处于持续开发阶段，制作组未收取任何费用，网络上的一切收费行为都是假冒，请勿相信
+**由 OpenFisherCommunity 共同维护的开源钓鱼游戏本地服务端模拟器。**
 
-## 下载即玩（推荐玩家）
+在自己的电脑上，体验从配竿、选饵、抛投和搏鱼，到成长、制作、任务与收藏的钓鱼生活。项目面向本地游玩、学习研究与社区协作，也支持在可信局域网中部署。
 
-如果只是想游玩，**不需要安装 Go，也不需要自行编译**。请前往 [Releases](https://github.com/glance522/rf4_server_simulator/releases/latest) 下载最新的 Windows 已编译版本，解压后阅读包内的“快速开始.txt”，双击“启动服务器.cmd”或 `bin\launcher.exe` 即可运行。
+[下载正式版](https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/latest) · [体验预览版](https://github.com/OpenFisherCommunity/rf4_server_simulator/releases) · [快速开始](#快速开始) · [交流社区](#交流社区) · [文档中心](docs/README.md)
 
-如果正式 Release 更新不及时，可以尝试 [Releases](https://github.com/glance522/rf4_server_simulator/releases) 页面中最新标记为 **Pre-release** 的 **Preview** 版本。Preview 由 `main` 分支最新提交自动构建，包名和发布说明中会标明对应的 Commit ID。
+> **项目免费、开源，持续开发中。** 维护者未收取任何费用，不售卖服务端、整合包或安装服务，也不会开放充值、捐款或赞助。请勿相信冒用项目名义的收费行为。
+>
+> 这是服务端模拟器，不包含游戏本体；当前适配客户端 **4.0.25034**。
 
-游玩过程中如果遇到 Bug、崩溃、协议异常或功能不符合预期，欢迎在 [Issues](https://github.com/glance522/rf4_server_simulator/issues) 中反馈。为便于定位问题，请尽量提供：
+## 现在可以玩什么
 
-- 使用的 Release 版本和客户端版本；
-- 问题发生前做了什么，以及能否稳定复现；
-- 相关日志或截图（请先移除 token、账号、路径等个人信息）；
-- 如果与特定钓法、装备或地图有关，请一并注明。
+以下是当前 `main` 分支已实现的主要玩法与功能。正式版、预览版的具体覆盖范围，请以对应的发布说明为准。
 
-我们希望通过玩家的实际反馈持续修正问题，让项目变得更好。
+| 方向 | 已实现的玩法与功能 |
+| --- | --- |
+| **钓鱼与探索** | 浮钓、底钓、路亚、海钓相关链路；地图旅行、租船、多竿与多钩钓组；抛投、咬钩、刺鱼、搏鱼、入护和放生。 |
+| **找鱼与诱鱼** | 鱼饵偏好、天气与昼夜鱼口、水层及落点环境、鱼群分布、窝料与 PVA、大鱼狩猎、海图声呐鱼群。部分规则需在后台开启或调整。 |
+| **钓具与制作** | 钓组装拆、拟饵换钩、自制引线与窝料、配方模板保存；装备载荷、耐久与搏鱼磨损，以及工坊诊断和修理。 |
+| **成长与挑战** | 等级经验、技能与装备加成、升级礼物、成就、资格任务与部分活动任务、欢乐时光。 |
+| **图鉴与收藏** | 渔获纪录、稀有鱼图鉴、水域奖杯、鱼种里程碑奖座；卡片掉落、卡册收集、售卡与塑封奖励。 |
+| **日常与交易** | 商店购买和退货、鱼市卖鱼、咖啡厅订单、食物饮品与状态恢复、篝火、制作加工、邮件附件、房屋仓储与战利品箱。 |
+| **游戏内助手** | 通过「查鱼助手」查询鱼种、鱼饵和区域建议；通过「钓具助手」选择满红不爆保护或耐力播报。 |
+| **本地管理** | 启动器统一启停服务、查看日志和启动游戏；Web 后台管理角色、背包、技能、商店、鱼口、饵料规则与邮件。 |
 
-## 项目定位与使用边界
+想了解具体机制、开关和适用范围，可以继续阅读[钓鱼机制](docs/gameplay.md)、[管理控制台](docs/admin-console.md)和[文档中心](docs/README.md)。
 
-- 本项目是个人爱好驱动的本地研究项目，主要用于学习和实践协议编解码、会话保序、状态机、数据持久化与服务端工程。
-- 受时间、精力和对完整游戏机制的理解限制，当前进度**无法与成熟私服相比**，也不以追赶或替代私服为目标。
-- 钓鱼系统目前只保证**能够完成上鱼和基础结算**，并没有完整复刻官服的鱼群、概率、生态、活动节奏与长期经济机制。
-- 很多系统仍不完善。部分命令目前只保证协议形状合法、客户端不崩溃，实际业务语义仍在补齐；请不要把本项目视为完整或生产可用的服务端。
-- 本项目**不会开放任何捐款、充值、赞助或付费功能**，维护者不以盈利为目的。
-- **请勿向任何第三方私服充值。** 私服的资金与稳定性没有保障，可能随时关停或跑路，请自行谨慎判断风险。
-- 请遵守当地法律法规、游戏服务条款及相关权利人的要求。本仓库只包含服务端模拟与学习代码，不提供游戏本体。
+## 快速开始
 
-## 交流与协作
+### Windows：下载即玩
 
-欢迎正在推进同类本地化、协议研究或服务端实现的同仁，通过 Issue、Pull Request 或其他公开渠道交流进展、协议结论和实现思路。
+**不需要安装 Go，也不需要自行编译。**
 
-我们更希望把这里作为一个开放的技术交流与协作入口，而不是收费产品或私服运营项目。发现错误、补齐机制或分享兼容性结论，都是非常有价值的贡献。
+1. 前往 [Releases](https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/latest)，下载名称以 `windows-amd64.zip` 结尾的发布包，完整解压；不要选择 `Source code`。
+2. 准备 **4.0.25034** 客户端，按照包内的 `快速开始.txt` 完成本机证书信任与 hosts 设置。详细步骤见[发布包与客户端接入指南](docs/deploy.md#使用-windows-发布包)。
+3. 双击 `启动服务器.cmd`，或运行 `bin\launcher.exe`。打开[本地控制中心](http://127.0.0.1:9500/)，等待游戏服务就绪；首次运行会自动初始化本地数据。
+4. 在控制中心保存 `rf4_x64.exe` 的路径，然后点击「启动游戏」。角色和玩法参数可在同一控制中心的管理后台中调整。
 
-提交代码前请阅读 [贡献指南](CONTRIBUTING.md)。所有作者和 AI Agent 都应保持提交职责单一，并遵守项目的开源与使用边界。
+想体验最近合入的功能，可在[全部发布](https://github.com/OpenFisherCommunity/rf4_server_simulator/releases)中选择标记为 **Pre-release** 的 Preview。预览版更新更快，也可能包含尚待充分验证的改动。更新前请备份存档和配置，详见[数据与备份](docs/deploy.md#数据)。
 
-## 快速开始（一键）
+### Docker 或源码运行
 
-双击或运行 `bin/launcher.exe`（无需任何命令行）：
+在仓库根目录，使用 Compose 启动服务端：
 
-- 首次运行自动创建 `data/` 并初始化本地数据库（迁移 + 静态配置导入 + 默认管理员 `admin/admin123`）
-- 按序启动 gameserver → gateway 并做健康检查；**崩溃自动重启**（指数退避）
-- **系统托盘常驻**：绿=全部运行 / 黄=部分 / 红=停止；菜单可打开面板/管理后台、启停全部、退出
-- **统一控制中心** `http://127.0.0.1:9500`：状态卡片、单进程启停/重启、双路实时日志
-- **管理后台** `http://127.0.0.1:9500/#admin`：直接内嵌在 launcher 中，不单独占端口
-- **启动游戏**：在统一控制中心保存 `rf4_x64.exe` 绝对路径，点击即可执行 `rf4_x64.exe -region CN`
-
-进阶（可选命令行）：
-
-```powershell
-bin\seed.exe       -config config.yaml                                   # 仅初始化数据库
-bin\gameserver.exe -config config.yaml                                   # 单独运行某进程
-bin\gateway.exe    -config config.yaml                                   # 单独运行网关
+```sh
+docker compose -f docker/compose.yaml up -d --build --wait
 ```
 
-## 架构
+Docker 模式的管理后台为 `http://127.0.0.1:8080/`，客户端需另行配置和启动。平台要求、存档与接入步骤见 [Docker Compose 指南](docker/README.md)；另有 [Docker 单容器方案](DOCKER.md)，两种方案任选其一。
 
-```text
-游戏客户端（hosts 指向本机）
-   │ HTTPS :443 登录              TCP :9341 实时
-   ▼                              ▼
-┌─────────────── gateway ────────────────┐
-│ 登录应答（token 签发）/ TCP 接入 / 握手 │
-│ 帧编解码 / RC4 双向加解密 / ACK / 保活  │
-│ 重连接管（RC4 状态落库）                │
-└──────────────┬─────────────────────────┘
-                │ 内部隧道（明文 RPC 信封，PSK 握手）
-                ▼
-┌────────────── gameserver ──────────────┐
-│ 信封编解码 / 命令分发 / 推送守卫        │
-│ 钓鱼闭环 / 物品 / 商店 / 邮箱           │
-└──────────────┬─────────────────────────┘
-                ▼
-        data/rf4server.db（单文件，WAL）
-              + server_data/static.sqlite3（运行期只读 ATTACH）
-                ▲
-┌────────────── launcher :9500 ──────────┐
-│ 运行控制 + 内嵌管理后台 /admin/          │
-└─────────────────────────────────────────┘
-```
+自行编译、配置和手动启动，请阅读[部署指南](docs/deploy.md)。
 
-- **gateway**：客户端唯一入口。持有 RC4 会话加密（密码流跨帧连续）、先 ACK
-  后转发、传输保活、断线重连接管。
-- **gameserver**：游戏逻辑。命令分发、推送守卫（形状不符拒发）、钓鱼闭环、
-  物品/商店/邮箱/技能；管理指令经共享 SQLite 队列消费。
-- **launcher / admin**：统一运行控制与 Control Deck 管理后台（JWT + 内嵌
-  SPA，无外部依赖）。管理 handler 直接挂载在 9500 的 `/admin/`，不再单独
-  监听 8080。功能包括玩家档案/货币/等级/技能熟练度、背包与护网增删、商店
-  库存覆盖、分水域鱼口控制、多附件邮件、踢人/封禁与全操作审计。
+## 当前进展
 
-## 客户端接入准备
+- **已经打通**：本地登录、地图与角色、钓具装配、钓鱼结算、成长收藏、交易制作及管理后台，正在围绕实际游玩持续补齐细节。
+- **持续完善**：不同钓法和装备组合的手感、数值与兼容性，活动及其他非核心系统的覆盖，以及长时间游玩的稳定性。
+- **仍有边界**：部分规则采用本地模拟，未完整复刻原版的概率、生态、经济与全部活动；有协议响应也不代表对应玩法已经完整实现。其他客户端版本尚未验证。
 
-- **适用客户端版本：4.0.25034**；其他版本尚未验证。
-- **修改 hosts 把登录域名指向本机**（需管理员权限）：
-  编辑 `%SystemRoot%\System32\drivers\etc\hosts`，追加以下内容后保存：
-  ```text
-  127.0.0.1 api.rf4game.ru
-  127.0.0.1 api.rf4game.com
-  ```
-- **信任本地证书**：首次运行 gateway 会自动生成自签名证书 `certs/server.crt`，
-  双击安装到“受信任的根证书颁发机构”（客户端登录走 HTTPS，需要信任它）。
-- 测完想回官服：把 hosts 里添加的行删掉即可。
+最新变化见 [Release 发布说明](https://github.com/OpenFisherCommunity/rf4_server_simulator/releases)，问题与讨论见 [Issues](https://github.com/OpenFisherCommunity/rf4_server_simulator/issues)。欢迎反馈实际游玩体验，也欢迎帮助核对机制和补充测试。
 
-更完整的部署与客户端接入步骤见 [部署指南](docs/deploy.md)。
+## 交流社区
 
-## 从源码运行或自行编译（可选）
+| 渠道 | 入口 |
+| --- | --- |
+| **Discord** | [加入 OpenFisherCommunity](https://discord.gg/qaEQEG3TS) |
+| **QQ 交流群 3** | `1128152596` |
+| **QQ 交流群 4** | `1134665746` |
+| QQ 交流群 1 | `379233540`（Release 标注已满） |
+| QQ 交流群 2 | `225460820`（Release 标注已满） |
+| Bug 与建议 | [GitHub Issues](https://github.com/OpenFisherCommunity/rf4_server_simulator/issues) |
 
-如果你下载的是源码版本，或者希望自行编译，请先安装 Go 1.27.3 或更高版本。完整的构建、配置、启动、客户端接入与故障排查步骤见 [部署指南](docs/deploy.md)；其中也提供了可交给 Codex、Dsh、豆包、WorkBuddy 等智能体使用的部署 prompt。只玩 Release 版本时不需要安装 Go。操作前建议备份 hosts，并且不要上传或分享 `config.yaml`、`certs/`、`data/`。
+QQ 群信息沿用项目 Release 公布的交流群。反馈问题时，请说明发布版本、客户端版本、复现步骤，并附上已移除账号、token 和个人路径的日志或截图。
 
-## 构建
+欢迎通过 Pull Request 参与开发、完善文档或补充回归测试。提交前请阅读[贡献指南](CONTRIBUTING.md)；开发入口与仓库约定见 [CLAUDE.md](CLAUDE.md)。感谢每一位贡献代码、参与测试、提交问题与帮助验证修复的朋友。
 
-```powershell
-# Windows（PowerShell）
-powershell -File build.ps1          # 产物在 bin/
+## 文档导航
 
-# 或 make（Git Bash / Linux）
-make build
-```
+- **开始游玩与部署**：[部署指南](docs/deploy.md) · [Docker Compose](docker/README.md) · [Docker 单容器](DOCKER.md)
+- **玩法与管理**：[钓鱼机制](docs/gameplay.md) · [管理控制台](docs/admin-console.md) · [咖啡厅订单](docs/cafe_orders.md)
+- **开发与排查**：[架构概览](docs/architecture.md) · [机制代码索引](docs/mechanism-map.md) · [调试工作流](docs/debugging-workflow.md)
+- **完整目录**：[文档中心](docs/README.md)
 
-依赖 Go 1.27.3+，纯 Go 依赖（SQLite 驱动为 modernc.org/sqlite，无 CGO）。
+## Star History
 
-## 配置
+如果项目对你有帮助，欢迎点一颗 Star，或把它分享给同样喜欢钓鱼与开源的朋友。
 
-- `config.example.yaml`：模板（入库）
-- `config.yaml`：实际配置（**不入库**，从模板复制后修改）
-- 静态库：`sqlite.static_path`（默认 `server_data/static.sqlite3`），运行期只读 ATTACH
-- 游戏启动路径保存在 `launcher.game_path`，默认区域参数为 `launcher.game_region: CN`
-- 环境变量覆盖：`RF4_SQLITE_PATH`、`RF4_SQLITE_STATIC_PATH`、`RF4_LOG_LEVEL`、`RF4_GAME_CLIENT_PATH` 等（见 `internal/config`）
+<a href="https://www.star-history.com/#OpenFisherCommunity/rf4_server_simulator&amp;Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=OpenFisherCommunity/rf4_server_simulator&amp;type=Date&amp;theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=OpenFisherCommunity/rf4_server_simulator&amp;type=Date&amp;theme=light" />
+    <img alt="rf4_server_simulator 的 Star 增长曲线（手绘风格）" src="https://api.star-history.com/svg?repos=OpenFisherCommunity/rf4_server_simulator&amp;type=Date&amp;theme=light" width="800" />
+  </picture>
+</a>
 
-## 运行
+## 许可与项目定位
 
-```powershell
-bin\seed.exe       -config config.yaml   # 初始化本地数据库（幂等，仓库自带静态配置库）
-bin\gameserver.exe -config config.yaml
-bin\gateway.exe    -config config.yaml
-```
-
-详细步骤、管理后台说明、协议约束与故障排查见 [docs/deploy.md](docs/deploy.md)。
-
-## 开发
-
-开发（尤其 AI Agent）前请先读 [CLAUDE.md](CLAUDE.md)（仓库硬约束与文档入口）和
-[CONTRIBUTING.md](CONTRIBUTING.md)（提交规范）。
-
-```bash
-make test      # go vet + 全部单测（含端到端钓鱼闭环，无需外部服务）
-make corpus    # 语料回环测试（语料文件不在仓库中时自动跳过）
-```
-
-## 客户端兼容与实现范围
-
-- 当前支持的客户端版本为 **4.0.25034**；其他版本尚未验证。
-- 目前已测试的钓法为：**手杆、简易沉底、简易路亚**。
-- 实现以客户端能够顺畅运行和完成基础玩法闭环为主要目标，没有复刻官服的手感、概率、生态或完整机制。实现概览、已知边界和检查项见 [文档索引](docs/README.md)。
-
-## 文档
-
-完整文档见 [docs/README.md](docs/README.md)，包括部署、客户端兼容性检查、架构、钓鱼机制、管理后台、个人中心、咖啡厅订单、商店目录和协议调试资料。
-
-## 许可
-
-项目采用 **MIT 协议**（见 [LICENSE](LICENSE)）。本 README 中的项目定位与使用边界用于说明维护者立场，不改变许可证本身授予的权利与义务。
+采用 [MIT 许可证](LICENSE)。本项目用于本地游玩、学习研究与可信局域网交流，不以私服运营或商业服务为目标；不提供游戏本体或未经授权的客户端资源。请遵守适用的法律法规、游戏服务条款及相关权利人的要求。

@@ -402,8 +402,7 @@ func TestLureHookMountTargetsRequestedSlot(t *testing.T) {
 		t.Fatalf("装槽 0 不应动槽 1：实得 %s", g)
 	}
 
-	// 拆 B（元素移除、数组缩短为 [A]）后按 250+0 规范索引重装：落槽 0
-	// 并顶替 A（短缩语义下原槽 1 已不存在）。
+	// 拆 B 后按 250+0 规范索引重装到空槽 0，槽 1 的 A 必须保留。
 	if det := s.rigRemoveComponentInstance(t.Context(), uid, lure.GUID, catHook, hookB.GUID, 0); det == nil {
 		t.Fatal("拟饵拆钩失败")
 	}
@@ -411,13 +410,7 @@ func TestLureHookMountTargetsRequestedSlot(t *testing.T) {
 		rigSetOpts{ParentType: familyLure, EnforceCategory: true, SplitStack: true}); res.Rejected {
 		t.Fatalf("拟饵换钩被拒: %+v", res)
 	}
-	got = lureTestHookSlots(t, s, lure.GUID)
-	if len(got) != 1 {
-		t.Fatalf("拆 B 后重装应得 1 个元素，实得 %d", len(got))
-	}
-	if g := lureHookItemGUID(got, 0); g != hookB.GUID {
-		t.Fatalf("extra=250 应装到槽 0，实得 %s", g)
-	}
+	assertLureSlotReload(t, s, lure.GUID, []string{hookB.GUID, hookA.GUID})
 }
 
 // 多槽追加语义（14:31~14:32 实测客户端行为）：数组缩短后行控件不重建，
@@ -489,8 +482,8 @@ func TestLureHookMultiSlotAppendAndStaleRowGuard(t *testing.T) {
 		t.Fatalf("拒绝陈旧行后 B 应原位保留，实得 %v", lureHookItemGUIDs(got))
 	}
 
-	// 槽数封顶：定义 %d 槽已装满后（先追加 B 满 2），再装 C 应被拒。
-	if res := s.rigSetComponent(t.Context(), uid, lure.GUID, catHook, hookA.GUID, 1,
+	// 先将 A 装回空槽 0；两槽占满后，越界安装 C 应被拒。
+	if res := s.rigSetComponent(t.Context(), uid, lure.GUID, catHook, hookA.GUID, 0,
 		rigSetOpts{ParentType: familyLure, EnforceCategory: true, SplitStack: true}); res.Rejected {
 		t.Fatalf("装回 A 被拒: %+v", res)
 	}
@@ -712,12 +705,12 @@ func TestLureHookOriginalRefundAfterShortenDrift(t *testing.T) {
 		t.Fatalf("卸槽 0 应退包 +1（两槽同型号时按同 numeric 计）: before=%d got=%d", before, got)
 	}
 
-	// 替换漂移后剩余的原装钩（当前下标 0，原槽 1）：必须仍识别为原装并退包。
+	// 替换槽 1 的原装钩；存储下标虽变为 0，请求仍使用稳定槽位 1。
 	hook, err := s.CreateItem(t.Context(), uid, "c_hook_20712", "backpack", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := s.rigSetComponent(t.Context(), uid, lure.GUID, catHook, hook.GUID, 0,
+	res := s.rigSetComponent(t.Context(), uid, lure.GUID, catHook, hook.GUID, 1,
 		rigSetOpts{ParentType: familyLure, EnforceCategory: true, SplitStack: true})
 	if res.Rejected {
 		t.Fatalf("替换剩余原装钩被拒: %+v", res)

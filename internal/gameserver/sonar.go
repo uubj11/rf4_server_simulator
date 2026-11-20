@@ -3,7 +3,6 @@ package gameserver
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -14,15 +13,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"rf4server/internal/fishmaps"
 	"rf4server/internal/proto"
 	"rf4server/internal/store"
 	"rf4server/internal/wiregen"
 )
 
 // 声呐网格资产；文件定义各水域的网格几何、单元格顺序和采样参数。
-//
-//go:embed assets/sonar_grids_4_0_24799.json
-var sonarGridsJSON []byte
+// 资产正本在 internal/fishmaps（与后台海图渲染共用同一副本），此处只解析。
+var sonarGridsJSON = fishmaps.SonarGridsJSON()
 
 const (
 	sonarResponseClass = "efnipphkbce"
@@ -761,6 +760,14 @@ func sonarZoneNumber(systemID string) (int, bool) {
 		return 0, false
 	}
 	return zone, true
+}
+
+// sonarZoneFromLoc 客户端上报的 loc12_N 直接给出权威海图区号。
+func sonarZoneFromLoc(loc string) (int, bool) {
+	if !strings.HasPrefix(loc, "loc12_") {
+		return 0, false
+	}
+	return sonarZoneNumber(loc)
 }
 
 // sonarZoneForPoint 把抛竿落点换算成海图区号。矩形重叠时取面积最小的水域，

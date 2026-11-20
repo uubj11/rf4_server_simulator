@@ -7,19 +7,9 @@ package gameserver
 // 因此 15/1、15/2 必须改实例字段；按竿的装配路径写 f5/rig_component
 // 只会把钩从背包摘走，拟饵仍渲染出厂钩——表现为"拟饵更换不了钓钩"。
 //
-// 槽位语义（2026-11-09 八轮实机实验定版，官方语义）：卸钩 = 元素从
-// gpoaffnjbdo 数组移除（缩短）。客户端实证：jdpjgahlapp 状态行在
-// kcgjlnmdbol()<=0（= 数组 Length==0）时报「钩未安装」；详情面板按
-// Length 逐元素建槽行，空数组无行可崩。保长度的三种空槽表示全部
-// 实锤崩客户端：缩短外的 0x00 null 元素（数组解析不一致→槽位行 NPE）、
-// 0xFF elem_null（登录快照打死客户端）、幻影对象（客户端渲染成真钩，
-// 卸载按钮仍激活）。
-//
-// 多槽（14:31~14:32 实测）：客户端行控件在数组缩短后不重建，仍按旧行
-// 号发请求。装钩下标 ≥ 当前元素数 = 追加意图，追加到末尾并以定义出厂
-// 钩槽数封顶（lureHookMountOrdinal）；拆钩只接受真实存在的下标/GUID，
-// 命中陈旧行（GUID 不在数组）一律拒绝（lureHookRemoveOrdinal）——绝不
-// 兜底到活动钩 0，那是「装钩总顶第一颗、卸载总拆第一颗」的事故根源。
+// 持久化数组只保存真实钩，槽位身份由 lure_hook_slots.go 单独记录。
+// ItemToTree 按定义容量发送固定位置的 args(60)，未装钩的位置为空元素。
+// 15/1、15/2 的槽位下标先映射到真实钩数组，不能直接使用紧凑存储下标。
 //
 // 出厂钩（内嵌子对象，GUID 由 uuidLike 合成、无独立物品行）被卸下/替换
 // 时按子对象 NumericID 物化独立背包实例退回（2026-11-09 拍板）。短缩
@@ -66,11 +56,7 @@ func lureRestoredHookKey(i int) string {
 	return lureFactoryHookKey(i) + ":r"
 }
 
-// lurePhantomHookKey 空槽幻影钩的 GUID 派生 key（2026-11-09 用户拍板
-// 「空槽」语义）。空槽的前两种编码是解析层毒药（0x00 截断数组、0xFF
-// 未知标记打死客户端），但空物品句柄本身可渲染——背包空格就是这个
-// 视图族渲染的。幻影钩 = 结构完整的钩对象 + 唯一确定性 GUID + 任何
-// 物品表都不存在：客户端按 GUID 查句柄得空 → 槽位显示「钩未安装」。
+// lurePhantomHookKey 仅用于识别并清理历史幻影钩，不创建占位物品。
 func lurePhantomHookKey(i int) string {
 	return lureFactoryHookKey(i) + ":e"
 }
@@ -126,6 +112,39 @@ func setWireParentFields(fields []proto.Field, wireClass, parentGUID string) {
 			fields[sidx].Num = ptrU64(4) // rig
 		}
 	}
+}
+
+// attachLureHookTx shares ownership transfer and the commit-time hook projection
+// between crafting and manual installation. The caller owns commit/rollback.
+func (s *Server) attachLureHookTx(ctx context.Context, tx *sql.Tx, uid int64, lureGUID string, hook *store.Item) (*proto.Value, error) {
+	if hook == nil || hook.UID != uid || hook.Container != "backpack" || hook.RigGUID != "" || hook.Qty != 1 || hook.Durability <= 0 {
+		return nil, fmt.Errorf("hook unavailable for installation")
+	}
+	if cat, ok := effectiveCategoryTx(ctx, tx, hook.ItemID); !ok || cat != catHook || hook.WireClass != "agedjipcnpe" {
+		return nil, fmt.Errorf("selected item is not a hook instance")
+	}
+	fields, err := FieldsFromJSON(hook.FieldsJSON)
+	if err != nil {
+		return nil, err
+	}
+	fields = alignFieldsToOps(hook, fields)
+	setWireFloat(fields, hook.WireClass, fieldIdxByCS(hook.WireClass, csWorkmanship), hook.Workmanship)
+	setWireFloat(fields, hook.WireClass, fieldIdxByCS(hook.WireClass, csDurability), hook.Durability)
+	setWireParentFields(fields, hook.WireClass, lureGUID)
+	res, err := tx.ExecContext(ctx, `UPDATE item SET rig_guid=?, slot=?, container='rig'
+		WHERE guid=? AND uid=? AND container='backpack' AND COALESCE(rig_guid,'')='' AND qty=1 AND durability>0`,
+		lureGUID, catHook, hook.GUID, uid)
+	if err != nil {
+		return nil, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return nil, fmt.Errorf("hook ownership changed")
+	}
+	hook.RigGUID = lureGUID
+	if err := updateItemFieldsTx(ctx, s.DB, tx, hook, fields); err != nil {
+		return nil, err
+	}
+	return proto.Obj(hook.WireClass, uint32(hook.TypeID), fields...), nil
 }
 
 // isLureRow 判断物品行是否为拟饵实例。
@@ -211,40 +230,6 @@ func applyLureActiveOrdinal(class string, fields []proto.Field, active int) {
 	fields[k].Num = ptrU64(uint64(active))
 }
 
-// lureHookMountOrdinal 选出装钩目标槽。尾部 int 是 0 基槽位下标；
-// 客户端行控件在数组缩短后不重建（仍发旧行号，2026-11-09 14:32 实测
-// len=1 时收到 extra=1），下标落在当前元素数之外视为追加意图，返回
-// len(items)，由调用方按定义出厂钩槽数封顶。绝不回落到活动钩——那会
-// 把玩家点向新槽的钩顶替到第一颗。
-func lureHookMountOrdinal(extra int64, n int) int {
-	if n <= 0 {
-		return 0
-	}
-	if extra >= lureHookIndexBase && extra < lureHookIndexBase+int64(n) {
-		return int(extra - lureHookIndexBase)
-	}
-	if extra >= 0 && extra < int64(n) {
-		return int(extra)
-	}
-	return n
-}
-
-// lureHookRemoveOrdinal 选出拆钩目标槽，只接受当前真实存在的下标；
-// 越界（客户端陈旧行号）返回 -1，由调用方拒绝——兜底拆第一颗是
-// 2026-11-09 14:31 实测的「卸载总是第一个槽」事故根源。
-func lureHookRemoveOrdinal(extra int64, n int) int {
-	if n <= 0 {
-		return -1
-	}
-	if extra >= lureHookIndexBase && extra < lureHookIndexBase+int64(n) {
-		return int(extra - lureHookIndexBase)
-	}
-	if extra >= 0 && extra < int64(n) {
-		return int(extra)
-	}
-	return -1
-}
-
 // setLureChildRef 把钩对象写成拟饵子部件：父引用指向拟饵、容器枚举为 rig(4)。
 func setLureChildRef(v *proto.Value, parent string) {
 	if v == nil || v.Kind != proto.KindObj {
@@ -321,7 +306,14 @@ func (s *Server) lureHookMountPrepare(ctx context.Context, uid int64, lureGUID, 
 		list = proto.Args(proto.S(lureHookArgsCode))
 	}
 	items := append([]*proto.Value(nil), list.Items...)
-	ordinal := lureHookMountOrdinal(extra, len(items))
+	positions, err := s.loadLureHookPositions(ctx, lureRow, items)
+	if err != nil {
+		return nil
+	}
+	ordinal := lureHookStorageOrdinal(extra, positions, items)
+	if ordinal < 0 {
+		return nil
+	}
 
 	// 追加（空饵重装/客户端陈旧行号）时以定义出厂钩槽数为上限。
 	// 槽数是静态定义值，事务内复验数组长度时直接复用。
@@ -410,7 +402,14 @@ func (s *Server) lureHookMountCommit(ctx context.Context, plan *lureHookMountPla
 		list = proto.Args(proto.S(lureHookArgsCode))
 	}
 	items := append([]*proto.Value(nil), list.Items...)
-	ordinal := lureHookMountOrdinal(plan.extra, len(items))
+	positions, err := loadLureHookPositionsTx(ctx, tx, lureRow, items)
+	if err != nil {
+		return rejectErr("读取钩位置", err)
+	}
+	ordinal := lureHookStorageOrdinal(plan.extra, positions, items)
+	if ordinal < 0 {
+		return reject("钩槽下标无效")
+	}
 	if ordinal >= len(items) && (plan.lureDefSlots <= 0 || len(items) >= plan.lureDefSlots) {
 		return reject("钩槽已满")
 	}
@@ -421,17 +420,10 @@ func (s *Server) lureHookMountCommit(ctx context.Context, plan *lureHookMountPla
 	if hookRow.Durability <= 0 {
 		return reject("新钩已损坏")
 	}
-	hookFields, hfErr := FieldsFromJSON(hookRow.FieldsJSON)
-	if hfErr != nil {
-		return rejectErr("解析新钩字段", hfErr)
+	hookTree, err := s.attachLureHookTx(ctx, tx, plan.uid, plan.lureGUID, hookRow)
+	if err != nil {
+		return rejectErr("新钩装配", err)
 	}
-	hookFields = alignFieldsToOps(hookRow, hookFields)
-	// 事务内按最新钩行重建写入拟饵的树，不能复用 Prepare 快照：耐久、
-	// 工艺或字段可能在预检后变化。钩是简单终端件，这里直接投影可变字段。
-	setWireFloat(hookFields, hookRow.WireClass, fieldIdxByCS(hookRow.WireClass, csWorkmanship), hookRow.Workmanship)
-	setWireFloat(hookFields, hookRow.WireClass, fieldIdxByCS(hookRow.WireClass, csDurability), hookRow.Durability)
-	setWireParentFields(hookFields, hookRow.WireClass, plan.lureGUID)
-	hookTree := proto.Obj(hookRow.WireClass, uint32(hookRow.TypeID), hookFields...)
 
 	// 旧钩槽一致性：预检与提交必须看到同一颗被替换钩（不同 call_id 的
 	// 并发装/拆在两次预检之间改动了数组 → 拒绝，绝不基于陈旧快照退包）。
@@ -454,21 +446,11 @@ func (s *Server) lureHookMountCommit(ctx context.Context, plan *lureHookMountPla
 	if err := updateItemFieldsTx(ctx, s.DB, tx, lureRow, fields); err != nil {
 		return rejectErr("拟饵写回", err)
 	}
-	// 新钩归属：条件 UPDATE 把关——仍须在背包且未被任何钓组持有，
-	// RowsAffected != 1 即已被并发操作抢先。
-	hookRes, err := tx.ExecContext(ctx,
-		`UPDATE item SET rig_guid=?, slot=?, container='rig'
-		 WHERE guid=? AND container='backpack' AND COALESCE(rig_guid,'')=''`,
-		plan.lureGUID, catHook, plan.hookGUID)
-	if err != nil {
-		return rejectErr("新钩归属变更", err)
+	if err := replaceLureHookPosition(positions, oldGUID, plan.hookGUID, plan.extra); err != nil {
+		return rejectErr("更新钩位置", err)
 	}
-	if n, nerr := hookRes.RowsAffected(); nerr != nil || n != 1 {
-		return reject("新钩已被其他操作占用")
-	}
-	hookRow.RigGUID = plan.lureGUID
-	if err := updateItemFieldsTx(ctx, s.DB, tx, hookRow, hookFields); err != nil {
-		return rejectErr("新钩字段写回", err)
+	if err := saveLureHookPositionsTx(ctx, tx, plan.lureGUID, positions); err != nil {
+		return rejectErr("保存钩位置", err)
 	}
 	// 旧钩返还：带物品行的实例退回背包（行 + 字段清理）；原装出厂钩
 	// 物化退包入库（新 guid → f0 新增段）。恢复/幻影命名空间不退。
@@ -604,7 +586,11 @@ func (s *Server) lureHookRemovePrepare(ctx context.Context, uid int64, lureGUID,
 		}
 	}
 	if ordinal < 0 {
-		ordinal = lureHookRemoveOrdinal(extra, len(items))
+		positions, err := s.loadLureHookPositions(ctx, lureRow, items)
+		if err != nil {
+			return nil
+		}
+		ordinal = lureHookStorageOrdinal(extra, positions, items)
 	}
 	if ordinal < 0 || ordinal >= len(items) {
 		return nil
@@ -667,6 +653,10 @@ func (s *Server) lureHookRemoveCommit(ctx context.Context, plan *lureHookRemoveP
 		return abort("钩槽数组已变化")
 	}
 	items := append([]*proto.Value(nil), list.Items...)
+	positions, err := loadLureHookPositionsTx(ctx, tx, lureRow, items)
+	if err != nil {
+		return abortErr("读取钩位置", err)
+	}
 	// 用与预检同一定位规则在最新数组上复定位；槽内容不一致即并发改动。
 	ordinal := -1
 	if plan.hookGUID != "" {
@@ -678,15 +668,19 @@ func (s *Server) lureHookRemoveCommit(ctx context.Context, plan *lureHookRemoveP
 		}
 	}
 	if ordinal < 0 {
-		ordinal = lureHookRemoveOrdinal(plan.extra, len(items))
+		ordinal = lureHookStorageOrdinal(plan.extra, positions, items)
 	}
 	if ordinal < 0 || ordinal >= len(items) || lureHookItemGUID(items, ordinal) != plan.removedGUID {
 		return abort("钓组已被其他操作修改，请重试")
 	}
 
-	// 官方语义（文件头）：卸钩 = 元素从数组移除（缩短）。绝不发任何
-	// 保长空槽表示（三种均实锤崩客户端）。活动钩下标按剥离映射随迁
-	// （PR#339 评审 P2：不再机械回落 0，把仍在的活动钩切到第一颗）。
+	if err := replaceLureHookPosition(positions, plan.removedGUID, "", 0); err != nil {
+		return abortErr("清除钩位置", err)
+	}
+	if err := saveLureHookPositionsTx(ctx, tx, plan.lureGUID, positions); err != nil {
+		return abortErr("保存钩位置", err)
+	}
+	// Storage stays compact; ItemToTree restores empty positions on the wire.
 	activeBefore := lureActiveOrdinal(fields, len(items))
 	keptOld := make([]int, 0, len(items)-1)
 	for i := range items {

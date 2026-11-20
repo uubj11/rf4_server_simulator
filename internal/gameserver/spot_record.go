@@ -26,10 +26,10 @@ func spotCoordKey(x, z float64) string {
 // 未登记标定的地图返回空串，调用方回退到原始坐标。
 func spotHUDKey(levelKey string, x, z float64) string {
 	scene, ok := fishQueryRegionScenes[levelKey]
-	if !ok || !validFishQueryCoordinate(scene.originX) || !validFishQueryCoordinate(scene.originZ) {
+	if !ok || !validFishQueryCoordinate(scene.OriginX) || !validFishQueryCoordinate(scene.OriginZ) {
 		return ""
 	}
-	frame := fishQueryMapFrame{originX: scene.originX, originZ: scene.originZ}
+	frame := fishQueryMapFrame{originX: scene.OriginX, originZ: scene.OriginZ}
 	mx, mz, ok := frame.project(x, z)
 	if !ok {
 		return ""

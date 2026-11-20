@@ -73,11 +73,11 @@ func TestUpdateInfoInjection(t *testing.T) {
 		Channel:               "stable",
 		CurrentVersion:        "v1.1.0",
 		LatestVersion:         "v1.2.0",
-		NotesURL:              "https://github.com/glance522/rf4_server_simulator/releases/tag/v1.2.0",
-		DownloadURL:           "https://github.com/glance522/rf4_server_simulator/releases/latest",
-		DownloadMirrorURL:     "https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/v1.2.0/a.zip",
+		NotesURL:              "https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/tag/v1.2.0",
+		DownloadURL:           "https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/latest",
+		DownloadMirrorURL:     "https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/v1.2.0/a.zip",
 		PreviewVersion:        "preview-20261107T110000Z-abc1234",
-		PreviewDownloadMirror: "https://gh-proxy.com/https://github.com/glance522/rf4_server_simulator/releases/download/preview-20261107T110000Z-abc1234/b.zip",
+		PreviewDownloadMirror: "https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/preview-20261107T110000Z-abc1234/b.zip",
 	})
 	for _, path := range []string{"/api/me", "/api/dashboard"} {
 		code, body := call(path, token)

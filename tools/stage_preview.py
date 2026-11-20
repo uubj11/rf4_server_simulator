@@ -12,12 +12,14 @@ LOCAL_FILES = {
 PORTAL_FILES = {'index.html', 'local.js'}
 PORTAL_CSS = {'framework.css', 'local.css', 'portal.css', 'reference-ui.css'}
 STATIC_FILES = {'server_data/static.sqlite3', 'server_data/compat_parts.json'}
+OPTIONAL_LOCAL_FILES = {'ref/icons.zip'}
+MAX_OPTIONAL_FILE_BYTES = {'ref/icons.zip': 128 << 20}
 
 def allowed(name):
     p = PurePosixPath(name)
     if p.is_absolute() or '..' in p.parts:
         return False
-    if name in {'README.md', 'LICENSE', 'config.example.yaml'} | STATIC_FILES:
+    if name in {'README.md', 'LICENSE', 'config.example.yaml'} | STATIC_FILES | OPTIONAL_LOCAL_FILES:
         return True
     if p.parts[0:1] == ('docs',) and p.suffix == '.md':
         return True
@@ -26,6 +28,16 @@ def allowed(name):
     if p.parent == PurePosixPath('local-service'):
         return p.name in LOCAL_FILES
     return p.parent == PurePosixPath('local-service/web/portal') and p.name in PORTAL_FILES
+
+def optional_local_files(root):
+    out = []
+    for name, limit in sorted(MAX_OPTIONAL_FILE_BYTES.items()):
+        path = root / name
+        if path.is_file():
+            if path.stat().st_size > limit:
+                raise ValueError(f'Optional release resource exceeds size limit: {name}')
+            out.append(name)
+    return out
 
 def stage(root, target, tracked):
     root, target = Path(root).resolve(), Path(target).resolve()
@@ -45,5 +57,6 @@ def stage(root, target, tracked):
 if __name__ == '__main__':
     root = Path(__file__).resolve().parents[1]
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
-    copied = stage(root, sys.argv[1], filter(None, tracked))
-    print('Staged', len(copied), 'tracked resource files')
+    resources = list(dict.fromkeys(filter(None, tracked) + optional_local_files(root)))
+    copied = stage(root, sys.argv[1], resources)
+    print('Staged', len(copied), 'resource files')

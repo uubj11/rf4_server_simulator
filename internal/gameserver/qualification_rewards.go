@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"rf4server/internal/proto"
 	"rf4server/internal/store"
@@ -19,7 +20,7 @@ import (
 // 全完成判定：缺口任务不在面板上，不能拿玩家看不到的任务卡奖杯。
 //
 // 发放与 kv 幂等键同事务（升级礼物同型）：重放/重连/重复巡检不重发，
-// 奖杯卖掉/丢掉也不重发（标记仍在）。阶段礼物无官服物品样本，不做。
+// 奖杯卖掉/丢掉也不重发（标记仍在）。其他阶段/完成奖励由 event_stage_gifts 发放。
 
 type qualificationCup struct {
 	ItemID string
@@ -80,7 +81,11 @@ func (s *Server) ensureQualificationCups(ctx context.Context, uid int64) []*stor
 	var granted []*store.Item
 	var names []string
 	permanentDone := 0
+	activeEvents := s.activeQualificationEventBranches(time.Now().Unix())
 	for branch := int64(1); branch <= 20; branch++ {
+		if branch >= 9 && !activeEvents[branch] {
+			continue
+		}
 		cup, ok := qualificationCupByBranch[branch]
 		if !ok || len(branchRules[branch]) == 0 {
 			continue
@@ -254,4 +259,21 @@ func append811Row(container, line *proto.Value) *proto.Value {
 		return container
 	}
 	return proto.Args(proto.S("173"), line)
+}
+
+// append811Rows 合并已经包装好的 args(173) 礼物行数组。
+// 阶段奖励通过 giftRows811 一次生成整个容器；801.f4 要求容器内直接包含
+// 811 对象，因此追加容器元素，保持一层 args(173) 包装。
+func append811Rows(container, rows *proto.Value) *proto.Value {
+	if rows == nil || rows.Kind == proto.KindNull {
+		return container
+	}
+	if rows.Kind != proto.KindArgs || rows.ArgCodeStr() != "173" {
+		return append811Row(container, rows)
+	}
+	if container != nil && container.Kind == proto.KindArgs && container.ArgCodeStr() == "173" {
+		container.Items = append(container.Items, rows.Items...)
+		return container
+	}
+	return rows
 }

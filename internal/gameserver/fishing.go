@@ -57,6 +57,7 @@ type FishState struct {
 	LureMotionMask  uint32  // 14/7 f5 原始拟饵运动位，保留给完整状态映射
 	LureAction      string  // 已识别的运动状态；未知时为空
 	LureLayer       float64 // 0=水面，1=水底；路亚实时水层
+	LureDive        float64 // 仅进程内：当前拟饵名义泳层（loadLureAttributes 的 DiveDepth），0=未知；钳制运动推导值并作抛竿种子
 	LureStateAt     time.Time
 	LureLayerAt     time.Time
 	LurePulseAt     time.Time
@@ -68,20 +69,46 @@ type FishState struct {
 	Hooked          bool
 	Resolved        bool
 	Pending         *RolledFish
-	biteTimer       *time.Timer
-	pendingTimer    *time.Timer
-	castGeneration  uint64
-	biteTicket      uint64
-	pendingTicket   uint64
-	PendingRepush   int           // 14/12 f0=3/5/6 连续拒收鱼实体时的重推次数
-	LuckRepush      int           // 蓝冠天命鱼的有限重推次数
-	BiteAt          time.Time     // 原定咬钩绝对时刻；硬重启后据此恢复 timer
-	Keepnet         []*RolledFish // 回退缓存（DB 权威）
-	Bait            string
-	LastSkill       int64       // 本次钓鱼大类（1 浮钓 / 2 纺车）
-	Armed           *RolledFish // GM 武装"下一杆必上"（唯一绕过重量上限的路径）
-	Bonus           fishingSkillBonus
-	persist         fishPersistMeta
+	// Extra 是本杆多钩钓组上已咬钩、等待接管搏斗的额外鱼。
+	// 每条已各自推过 14/14 并绑定自己的钩位（HookGUID），按先后顺序结算。
+	// 仅进程内状态：它们是尚未结算的在途鱼，进程重启即丢，不产生错误渔获。
+	Extra []*RolledFish
+	// HoldMulti 表示本杆主鱼已结算、但 Extra 里还有鱼没处理：
+	// 此时钓组仍视为在水中，下一条由 14/5 / 14/6 提升，玩家不必重新抛竿。
+	HoldMulti bool
+	// Batch 是 14/4 收竿时已一并结算、等玩家同一次 14/5/14/6 决定的其余鱼。
+	//
+	// 客户端把 14/4 当作"本杆结束"：收竿后立刻回到手持状态并开始下一次抛投
+	// （实机 2026-11-13 15:40:29 收竿、15:40:31 就发 14/1 算抛距），所以逐条
+	// 接管搏斗永远接不上。本杆其余鱼只能在收竿时一起结算，入护/放生跟着玩家
+	// 对主鱼的同一次选择走。
+	Batch          []*RolledFish
+	biteTimer      *time.Timer
+	pendingTimer   *time.Timer
+	castGeneration uint64
+	biteTicket     uint64
+	pendingTicket  uint64
+	PendingRepush  int           // 14/12 f0=3/5/6 连续拒收鱼实体时的重推次数
+	LuckRepush     int           // 蓝冠天命鱼的有限重推次数
+	EmptyStreak    int           // 连续空轮计数（保底杂口 bite_gate_pity_rounds 用；出鱼即清零，不持久化）
+	BiteAt         time.Time     // 原定咬钩绝对时刻；硬重启后据此恢复 timer
+	Keepnet        []*RolledFish // 回退缓存（DB 权威）
+	Bait           string
+	LastSkill      int64       // 本次钓鱼大类（1 浮钓 / 2 纺车）
+	Armed          *RolledFish // GM 武装"下一杆必上"（唯一绕过重量上限的路径）
+	Bonus          fishingSkillBonus
+	persist        fishPersistMeta
+
+	// pace 是饵效控速（bite_pace_enabled，默认关）的一杆因子：对口分、延迟
+	// 乘数、底层杆/路亚轮判定概率、打窝压缩。仅进程内：重启后 PaceKnown=false，
+	// timer 触发前由 ensurePaceState 惰性重算。语义见 specs/changes/bite-pace/spec.md。
+	PaceScore    float64
+	PaceFactor   float64
+	PaceProb     float64
+	PaceLureProb float64
+	PaceGround   float64
+	PaceTier     int
+	PaceKnown    bool
 
 	hookedChatFishGUID string // 仅进程内：同一尾鱼的确认与拒收重推共用播报标记。
 }
@@ -93,7 +120,15 @@ func (st *FishState) effectiveBaitDepthCMLocked(now time.Time) int64 {
 		return 0
 	}
 	if rigTypeLureFamily[st.RigType] {
-		return int64(math.Round(normalizeWaterLayer(st.LureLayer) * 500))
+		// LureLayer=0 为"未知"态（复审 P3）：按种子 LureDive 兜底，再退旧中层 250cm，
+		// 避免无证据饵落库 0cm 污染 qualification 深度判定。
+		if st.LureLayer > 0 {
+			return int64(math.Round(normalizeWaterLayer(st.LureLayer) * 500))
+		}
+		if st.LureDive > 0 {
+			return int64(math.Round(normalizeWaterLayer(st.LureDive) * 500))
+		}
+		return 250
 	}
 	target := st.DepthCM
 	if target <= 0 {
@@ -279,11 +314,15 @@ type RolledFish struct {
 	QualBait qualificationBait
 	// CastM / IsNight 同样是咬钩快照：抛投距离取本杆实际落点，夜间按咬钩
 	// 时刻判定，避免搏鱼跨过 06:00/19:00 后改用结算时间。
-	CastM   float64
-	IsNight bool
+	CastM    float64
+	IsNight  bool
+	BiteUnix int64 // 精确时段资格使用的咬钩时间，随鱼持久化。
 	// ModelVariant 这尾鱼在客户端用的 FishFamily 族名（a_salmon_f2 等）；
 	// 空=用鱼种默认族。溜鱼 / 结算弹窗 / 渔护 / 鱼卡共用这一个值。
 	ModelVariant string
+	// NoEntity 表示客户端明确拒收过这尾鱼的实体（14/12 f0=3/5）。鱼确实咬了钩，
+	// 只是客户端画不出来：不再重派，但 14/4 照常结算，不能把渔获一起丢掉。
+	NoEntity bool
 }
 
 // stateFor 按 uid 取/建状态。
@@ -449,6 +488,14 @@ func (s *Server) biteDelayInWeather(st *FishState, weather fishingWeather, now t
 		return math.Max(0.05, cfg.fixed)
 	}
 	weatherDelay := s.weatherBiteDelayFactor(st, weather, now)
+	// 饵效控速（bite_pace_enabled）只替换非路亚族的采样后处理：乘对口分档位
+	// 因子与打窝压缩，按钓组族 clamp（底/浮 6~60s、海底钓 3~30s）。路亚窗口
+	// 与落水保护不动，节奏改走单轮判定概率（st.PaceLureProb）。
+	// 调用方需持有 st.mu（查鱼路径的 st 为本地对象，无并发）。
+	if st != nil && st.PaceKnown && s.paceEnabled() && !rigTypeLureFamily[st.RigType] {
+		return s.paceStandardBiteDelay(officialPushDelay(), weatherDelay, bonus.BiteSpeed,
+			st.PaceFactor, st.PaceGround, marineRigType(st.RigType), cfg.scale)
+	}
 	if st != nil && rigTypeLureFamily[st.RigType] {
 		d := (1.5 + rand.Float64()*(6.0-1.5)) * weatherDelay
 		return lureBiteDelay(d, bonus.BiteSpeed, cfg.lureMax, cfg.scale)
@@ -655,122 +702,386 @@ const (
 // （实测 461g 鱼被磨损账记成 6.57kg 拉力）。口径见 specs/changes/reel-wear-pull-unit/spec.md。
 const newtonPerKgf = 9.80665
 
-// fishPullK0 是逐鱼种拉力基值（=1kg 体重时的 k，N/kg），来自官服 14/14 抓包
-// A 级样本按 k0 = k − fishPullLnSlope·ln(w_kg) 反推；f8 = w_kg × (K0 + slope·ln(w_kg))。
-// 种内斜率 ~0.3–0.4，已用 perch/crucian/g_carp 多重量级样本钉死；样本与推导见
-// specs/changes/fish-pull-k-table/spec.md「Further Notes」。
+// fishPullParam 逐鱼种拉力参数：f8 = w_kg × (K0 + Slope·ln(w_kg))（牛）。
+// K0 = 1kg 体重时的 k（N/kg）；Slope = k 对 ln(w_kg) 的斜率。
+// 2026-11-16/17 断电抢救包 53 条 14/14 A 级样本（累计 84 条）发现鱼种分两类：
+//   - 恒 k 类（Slope=0）：海鱼与小型鱼，k 落在离散集合 {17.66, 18.64, 19.62,
+//     21.58, 22.56, 23.54, 25.53}，同种跨体重档 k 精确不变（coalfish/atl_cod
+//     702~5677g 恒 21.58、m_scorpius 205~1142g 恒 17.66、shemaya_cha/tiulka/
+//     menek 恒 18.64），疑似服务端曲线池直配幅值；
+//   - 变 k 类（Slope 0.23~0.59）：鲤科淡水鱼，k 随体重对数上行，斜率鱼种各异。
+//
+// Slope<0 = 单样本未标定斜率，回落全局 fishPullLnSlope（鲤科先验 0.35）。
+type fishPullParam struct {
+	K0    float64
+	Slope float64
+}
+
 const fishPullLnSlope = 0.35
 
-var fishPullK0 = map[string]float64{
-	"merlang":    21.1,
-	"b_gill":     20.4,
-	"taran":      18.8,
-	"g_carp":     18.5,
-	"piksha":     18.3,
-	"b_carp":     18.0,
-	"n.pike":     17.3,
-	"perch":      17.6,
-	"din_l_carp": 16.9,
-	"carp":       16.5,
-	"c.roach":    16.4,
-	"crucian":    15.05,
-	"c.carp":     13.7,
-	"s.bream":    13.0,
+var fishPullK0 = map[string]fishPullParam{
+	// —— 变 k 类（鲤科族，n≥3 跨度足够，自拟合 slope）——
+	"perch":   {K0: 17.60, Slope: 0.38}, // 9 样本 93~1070g
+	"carp":    {K0: 16.50, Slope: 0.49}, // 7 样本 1063~5710g
+	"crucian": {K0: 15.05, Slope: 0.35}, // 6 样本 193~743g
+	"c.carp":  {K0: 13.84, Slope: 0.45}, // 4 样本 140~1574g
+	"c.roach": {K0: 16.36, Slope: 0.23}, // 3 样本 150~713g
+	"rudd":    {K0: 19.24, Slope: 0.53}, // 4 样本 195~402g（2026-11-16 新实测）
+	"g_carp":  {K0: 18.79, Slope: 0.23}, // 5 样本 4880~21742g
+	"m_carp":  {K0: 16.27, Slope: 0.59}, // 4 样本 2312~5370g（新）；仅拟合参数、无单样本 f8 锚点（低置信，见 spec v2）
+	// —— 单样本（Slope<0 → 全局 0.35；鲤科按鲤科先验）——
+	"carp_ghost": {K0: 16.73, Slope: -1}, // 4513g（新）
+	"n_carp":     {K0: 16.53, Slope: -1}, // 4405g（新）
+	"kw_tench":   {K0: 18.68, Slope: -1}, // 987g（新）
+	"c_bleak":    {K0: 18.81, Slope: -1}, // 24g（新；ln 外推远，低置信）
+	"n.pike":     {K0: 17.30, Slope: -1},
+	"din_l_carp": {K0: 16.94, Slope: -1},
+	"b_carp":     {K0: 18.00, Slope: -1},
+	"s.bream":    {K0: 13.00, Slope: -1},
+	"merlang":    {K0: 21.10, Slope: -1}, // 252g 实测 k=20.60；海鱼疑似恒k，待第二样本
+	// —— 恒 k 类（海鱼/小型鱼，Slope=0）——
+	"coalfish":      {K0: 21.58, Slope: 0}, // 4 样本 702~3027g 精确恒
+	"atl_cod":       {K0: 21.58, Slope: 0}, // 2 样本 2674~5677g
+	"m_scorpius":    {K0: 17.66, Slope: 0}, // 5 样本 205~1142g
+	"shemaya_cha":   {K0: 18.64, Slope: 0}, // 4 样本 117~237g
+	"tiulka":        {K0: 18.64, Slope: 0}, // 6 样本 10~13g
+	"pumps_sunfish": {K0: 19.62, Slope: 0}, // 2 样本 52g（与 b_gill 同离散值）
+	"menek":         {K0: 18.64, Slope: 0}, // 6117g
+	"pollachius":    {K0: 22.56, Slope: 0}, // 2387g
+	"atl_herring":   {K0: 22.57, Slope: 0}, // 560g
+	"makrel":        {K0: 23.54, Slope: 0}, // 1891g
+	"cha_herring":   {K0: 25.53, Slope: 0}, // 114g（全表最高）
+	"taran":         {K0: 18.64, Slope: 0}, // 611g 实测 k 与离散值精确重合，v2 重估
+	"piksha":        {K0: 18.64, Slope: 0}, // 2975g 同上
+	"b_gill":        {K0: 19.62, Slope: 0}, // 113g 同上
 }
 
-// fishPullGroupK0 是未实测鱼种的习性组拉力基值（v1 推断，依据已实测样本呈现的
-// 梯度：同科体型单调、海水/洄游高于静水；推断组 ±1.5，见 spec「Further Notes」）。
-// 键 = 习性组名。
-var fishPullGroupK0 = map[string]float64{
-	"marine_gadid":    19.7, // 海水鳕科
-	"herb_carp":       18.2, // 大型草食鲤科
-	"migratory_roach": 18.8, // 洄游速游鲤科
-	"sunfish":         20.4, // 小型凶猛太阳鱼科
-	"predator":        17.5, // 梭形掠食者
-	"carp_mid":        16.7, // 中型力量鲤科
-	"roach_run":       16.4, // 拟鲤族
-	"still_carp":      15.0, // 静水小型鲤科
-	"pond_carp":       13.7, // 小型池塘鲤科
-	"weak_silver":     13.0, // 小型银色弱鱼
-	"salmonid":        18.0, // 鲑科（纯估计）
-	"sturgeon":        17.0, // 鲟科（纯估计）
-	"catfish":         16.0, // 鲶科（纯估计）
-	"flatfish":        16.0, // 比目鱼（纯估计）
+// fishPullGroupK0 是未实测鱼种的习性组拉力参数（v2：组值按组内实测成员标定，
+// 海鱼类组继承恒 k（Slope=0），鲤科组继承成员自拟合斜率；纯估计组保持全局
+// 斜率先验 0.35。离散 k 证据见 fish-pull-k-table spec「v2 增补」。
+var fishPullGroupK0 = map[string]fishPullParam{
+	"marine_gadid":    {K0: 21.58, Slope: 0},    // 鳕形目（恒k锚 coalfish/atl_cod 21.58；组员无须鳕/蓝鳕/魣鳕/长尾鳕/白姑鱼）
+	"marine_pelagic":  {K0: 22.57, Slope: 0},    // 鲱鲭中上层（恒k锚 atl_herring 22.57；组员西鲱/沙丁/竹刀/带鱼/月鱼）
+	"marine_rock":     {K0: 17.66, Slope: 0},    // 礁岩底栖/鮋杜父/鳗鳃类（恒k锚 m_scorpius 17.66；鳗/七鳃鳗/蟹虾/pinagor 低置信归入）
+	"small_forage":    {K0: 18.64, Slope: 0},    // 小型饵料鱼（恒k锚 tiulka/shemaya_cha 18.64；刺鱼/鮈/鱥/泥鳅/胡瓜鱼）
+	"apex":            {K0: 25.53, Slope: 0},    // 鲨/剑鱼/金枪鱼顶级（纯推断取离散上界 25.53，无实测）
+	"sunfish":         {K0: 19.62, Slope: 0},    // 太阳鱼科（恒k锚 b_gill/pumps_sunfish 19.62）
+	"migratory_roach": {K0: 18.64, Slope: 0},    // 洄游速游拟鲤（恒k锚 taran 18.64）
+	"herb_carp":       {K0: 18.79, Slope: 0.23}, // 大型草食/滤食鲤科（变k锚 g_carp 斜率 0.23；鳙鲢/胭脂鱼/鲃）
+	"roach_run":       {K0: 16.36, Slope: 0.23}, // 拟鲤族速游（变k锚 c.roach 斜率 0.23）
+	"still_carp":      {K0: 15.05, Slope: 0.35}, // 静水鳊鲫（变k锚 crucian {15.05, 0.35}）
+	"carp_mid":        {K0: 16.50, Slope: -1},   // 中型力量鲤科（K0 锚 carp 16.50，斜率先验 0.35；锦鲤系/丁鱥/鼓鱼）
+	"pond_carp":       {K0: 13.84, Slope: 0.45}, // 小型池塘鲤（变k锚 c.carp {13.84, 0.45}）
+	"predator":        {K0: 17.30, Slope: -1},   // 梭形掠食者（K0 锚 n.pike 17.30，斜率先验 0.35）
+	"weak_silver":     {K0: 13.00, Slope: -1},   // 小型银色弱鱼/贝类/虾蛙（变k锚 s.bream {13.00, 0.35}；crawfish 无拉力数据按体型归入）
+	"salmonid":        {K0: 18.00, Slope: -1},   // 鲑科（纯估计 18.0，无新数据；crawfish/pinagor 已按习性移出，见 spec v2.1 修正）
+	"sturgeon":        {K0: 17.00, Slope: -1},   // 鲟科（纯估计 17.0）
+	"catfish":         {K0: 16.00, Slope: -1},   // 鲶科（纯估计 16.0）
+	"flatfish":        {K0: 16.00, Slope: -1},   // 比目鱼（纯估计 16.0）
 }
 
-// fishPullSpeciesGroup 把未实测但高频的鱼种映射到习性组；缺省走 fallback。
+// fishPullAlias 皮肤/变种鱼种 → 宿主实测种：变种与宿主同属性，直接继承
+// 宿主逐鱼种参数（避免走组表引入斜率偏差）。
+var fishPullAlias = map[string]string{
+	"carp_albino":   "carp",
+	"carp_red":      "carp",
+	"common_carp":   "carp",
+	"l_carp":        "carp",
+	"l_carp_albino": "carp",
+	"l_carp_ghost":  "carp",
+	"midori_g":      "carp",
+	"r_carp":        "carp",
+	"r_carp_albino": "carp",
+	"r_carp_ghost":  "carp",
+	"g_carp_albino": "g_carp",
+	"m_carp_albino": "m_carp",
+	"m_carp_ghost":  "m_carp",
+	"m_carp_red":    "m_carp",
+	"n_carp_albino": "n_carp",
+	"n_carp_ghost":  "n_carp",
+}
+
+// fishPullSpeciesGroup 未实测鱼种 → 习性组（v2 起全覆盖 static 库 249 种，
+// 组值见 fishPullGroupK0；皮肤变种走 fishPullAlias 不在此表）。
 var fishPullSpeciesGroup = map[string]string{
-	"karasekarp":    "still_carp",
-	"din_m_carp":    "carp_mid",
-	"din_n_carp":    "carp_mid",
-	"n_carp":        "carp_mid",
-	"kohaku":        "carp_mid",
-	"o_ogon":        "carp_mid",
-	"n_asagi":       "carp_mid",
-	"yotsushiro":    "carp_mid",
-	"hi_utsri":      "carp_mid",
-	"m_goshiki":     "carp_mid",
-	"tench":         "carp_mid",
-	"kw_tench":      "carp_mid",
-	"c_barbel":      "carp_mid",
-	"bream":         "still_carp",
-	"wa_bream":      "still_carp",
-	"s.orfe":        "roach_run",
-	"e.chub":        "roach_run",
-	"shemaya":       "roach_run",
-	"syb_roach":     "roach_run",
-	"vobla":         "roach_run",
-	"lm_b_bass":     "predator",
-	"sm_bass":       "predator",
-	"sp_bass":       "predator",
-	"wh_bass":       "predator",
-	"s_bass":        "predator",
-	"hs_bass":       "predator",
-	"bp_bass":       "sunfish",
-	"black_crappie": "sunfish",
-	"warm":          "sunfish",
-	"riv_rb_trout":  "salmonid",
-	"sevan_trout":   "salmonid",
-	"palia_lud":     "salmonid",
-	"malma":         "salmonid",
-	"gc_smelt":      "salmonid",
-	"taimen":        "salmonid",
-	"os_grayling":   "salmonid",
-	"bh_carp":       "herb_carp",
-	"m_carp":        "carp_mid",
-	"coalfish":      "marine_gadid",
-	"pollachius":    "marine_gadid",
-	"menek":         "marine_gadid",
-	"p_sturgeon":    "sturgeon",
-	"sterlet":       "sturgeon",
-	"beluga":        "sturgeon",
-	"fhcatfish":     "catfish",
-	"ch_catfish":    "catfish",
-	"w_catfish":     "catfish",
-	"burbot":        "catfish",
-	"turbot":        "flatfish",
-	"sea_kambala":   "flatfish",
-	"lh_kambala":    "flatfish",
-	"asp":           "predator",
-	"ruffe":         "predator",
-	"ruffe_n":       "predator",
-	"zander":        "predator",
-	"g_shad":        "weak_silver",
-	"d_zubatka":     "predator",
-	"m_zubatka":     "predator",
+	"m_molva":             "marine_gadid",
+	"macrourus_b":         "marine_gadid",
+	"meagre":              "marine_gadid",
+	"merluza":             "marine_gadid",
+	"molva":               "marine_gadid",
+	"poutassou":           "marine_gadid",
+	"alfonsino":           "marine_pelagic",
+	"b_herring":           "marine_pelagic",
+	"b_scabbardfish":      "marine_pelagic",
+	"c_herring":           "marine_pelagic",
+	"centroloph_n":        "marine_pelagic",
+	"k_herring":           "marine_pelagic",
+	"lampris_g":           "marine_pelagic",
+	"s_saurus":            "marine_pelagic",
+	"sardina_p":           "marine_pelagic",
+	"ambl_h":              "marine_rock",
+	"ambl_r":              "marine_rock",
+	"bullhead_syb":        "marine_rock",
+	"c_lamprey":           "marine_rock",
+	"c_squid":             "marine_rock",
+	"chimaera":            "marine_rock",
+	"conger":              "marine_rock",
+	"ed_crab":             "marine_rock",
+	"eel":                 "marine_rock",
+	"fe_lamprey":          "marine_rock",
+	"himant_g":            "marine_rock",
+	"lophius_p":           "marine_rock",
+	"lycodes_e":           "marine_rock",
+	"lycodes_s":           "marine_rock",
+	"polyprion":           "marine_rock",
+	"red_fish":            "marine_rock",
+	"rk_crab":             "marine_rock",
+	"sebastes_m":          "marine_rock",
+	"sebastes_n":          "marine_rock",
+	"u_lamprey":           "marine_rock",
+	"zoarces_v":           "marine_rock",
+	"a_smelt":             "small_forage",
+	"barb_toni":           "small_forage",
+	"e_smelt":             "small_forage",
+	"golyan":              "small_forage",
+	"gudgeon":             "small_forage",
+	"l_minnow":            "small_forage",
+	"shemaya":             "small_forage",
+	"stickleback_ninesp":  "small_forage",
+	"stickleback_ss":      "small_forage",
+	"stickleback_threesp": "small_forage",
+	"syb_gudgeon":         "small_forage",
+	"trib_h":              "small_forage",
+	"vjun":                "small_forage",
+	"c_anguineus":         "apex",
+	"cetorhinus_m":        "apex",
+	"katran":              "apex",
+	"lamna_n":             "apex",
+	"somniosus_m":         "apex",
+	"thynnus_t":           "apex",
+	"x_gladius":           "apex",
+	"black_crappie":       "sunfish",
+	"bp_bass":             "sunfish",
+	"resfish":             "sunfish",
+	"warm":                "sunfish",
+	"white_crappie":       "sunfish",
+	"alb_barbel":          "herb_carp",
+	"bh_carp":             "herb_carp",
+	"bl_buffalo":          "herb_carp",
+	"buffalo":             "herb_carp",
+	"c_nase":              "herb_carp",
+	"chukuchan":           "herb_carp",
+	"s_carp":              "herb_carp",
+	"sh_barbel":           "herb_carp",
+	"dace":                "roach_run",
+	"e.chub":              "roach_run",
+	"kutum":               "roach_run",
+	"s.orfe":              "roach_run",
+	"sabrefish":           "roach_run",
+	"syb_elets":           "roach_run",
+	"syb_roach":           "roach_run",
+	"v_bream":             "roach_run",
+	"vobla":               "roach_run",
+	"vyrezub":             "roach_run",
+	"b_bream":             "still_carp",
+	"bream":               "still_carp",
+	"e_bream":             "still_carp",
+	"karasekarp":          "still_carp",
+	"wa_bream":            "still_carp",
+	"c_barbel":            "carp_mid",
+	"din_m_carp":          "carp_mid",
+	"din_n_carp":          "carp_mid",
+	"fwdrum":              "carp_mid",
+	"g_tench":             "carp_mid",
+	"hi_utsri":            "carp_mid",
+	"kohaku":              "carp_mid",
+	"m_goshiki":           "carp_mid",
+	"n_asagi":             "carp_mid",
+	"o_ogon":              "carp_mid",
+	"tench":               "carp_mid",
+	"yotsushiro":          "carp_mid",
+	"a.sleeper":           "predator",
+	"agar":                "predator",
+	"asp":                 "predator",
+	"barsch":              "predator",
+	"chan_m":              "predator",
+	"d_zubatka":           "predator",
+	"e.pikeperch":         "predator",
+	"hs_bass":             "predator",
+	"lm_b_bass":           "predator",
+	"m_zubatka":           "predator",
+	"p_zubatka":           "predator",
+	"ruffe":               "predator",
+	"ruffe_n":             "predator",
+	"s_bass":              "predator",
+	"sgar":                "predator",
+	"sm_bass":             "predator",
+	"sp_bass":             "predator",
+	"walleye":             "predator",
+	"wh_bass":             "predator",
+	"zander":              "predator",
+	"chlamys_isl":         "weak_silver",
+	"dreissena":           "weak_silver",
+	"freshwater_mussel":   "weak_silver",
+	"frog":                "weak_silver",
+	"g_shad":              "weak_silver",
+	"mytilus_ed":          "weak_silver",
+	"ostrea_ed":           "weak_silver",
+	"s_freaks":            "weak_silver",
+	"a_char":              "salmonid",
+	"a_grayling":          "salmonid",
+	"a_omul":              "salmonid",
+	"a_salmon":            "salmonid",
+	"b_omul":              "salmonid",
+	"bs_salmon":           "salmonid",
+	"chartus_kuoriius":    "salmonid",
+	"chavycha":            "salmonid",
+	"chir":                "salmonid",
+	"crawfish":            "weak_silver",
+	"dr_char":             "salmonid",
+	"gc_smelt":            "salmonid",
+	"golets_lev":          "salmonid",
+	"gorbusha":            "salmonid",
+	"k_salmon":            "salmonid",
+	"keta":                "salmonid",
+	"kijuch":              "salmonid",
+	"kunja":               "salmonid",
+	"l_salmon":            "salmonid",
+	"lenok_o":             "salmonid",
+	"lenok_t":             "salmonid",
+	"malma":               "salmonid",
+	"mikija":              "salmonid",
+	"muksun":              "salmonid",
+	"neiva":               "salmonid",
+	"nelma":               "salmonid",
+	"nerka":               "salmonid",
+	"onkor_m":             "salmonid",
+	"onkor_mg":            "salmonid",
+	"os_grayling":         "salmonid",
+	"palia_kr":            "salmonid",
+	"palia_lud":           "salmonid",
+	"peled":               "salmonid",
+	"pinagor":             "marine_rock",
+	"ripus":               "salmonid",
+	"riv_brown_trout":     "salmonid",
+	"riv_rb_trout":        "salmonid",
+	"salvel_l":            "salmonid",
+	"sevan_trout":         "salmonid",
+	"sig":                 "salmonid",
+	"sig_black":           "salmonid",
+	"sig_kuor":            "salmonid",
+	"sig_ludoga":          "salmonid",
+	"sig_o_l":             "salmonid",
+	"sig_ostr":            "salmonid",
+	"sig_p":               "salmonid",
+	"sig_valaam":          "salmonid",
+	"sig_vouksa":          "salmonid",
+	"sv_sig":              "salmonid",
+	"syb_vendace":         "salmonid",
+	"taimen":              "salmonid",
+	"tugun":               "salmonid",
+	"valyok":              "salmonid",
+	"vendace":             "salmonid",
+	"wfish":               "salmonid",
+	"zs_grayling":         "salmonid",
+	"beluga":              "sturgeon",
+	"ch_beluga":           "sturgeon",
+	"kaluga":              "sturgeon",
+	"l_sturgeon":          "sturgeon",
+	"osetr_balt":          "sturgeon",
+	"osetr_ship":          "sturgeon",
+	"p_sturgeon":          "sturgeon",
+	"r_sturgeon":          "sturgeon",
+	"st_sturgeon":         "sturgeon",
+	"sterlet":             "sturgeon",
+	"syb_sterlet":         "sturgeon",
+	"zs_sturgeon":         "sturgeon",
+	"a_catfish":           "catfish",
+	"burbot":              "catfish",
+	"ch_catfish":          "catfish",
+	"fhcatfish":           "catfish",
+	"w_catfish":           "catfish",
+	"w_catfish_a":         "catfish",
+	"halibut_b":           "flatfish",
+	"halibut_w":           "flatfish",
+	"hippoglos_p":         "flatfish",
+	"lh_kambala":          "flatfish",
+	"sea_kambala":         "flatfish",
+	"turbot":              "flatfish",
 }
 
-// fishPullK0For 返回鱼种拉力基值：实测种 → 习性组 → fallback（tunable 可覆盖）。
-func (s *Server) fishPullK0For(species string) float64 {
-	if k, ok := fishPullK0[species]; ok {
-		return k
+// fishPullGroupFightKey 是 f8 习性组 → f5/f6/f21 组键的跨层映射（PR #516
+// 复审 P2-1：组表声明的习性必须驱动全部搏斗层，f8 归组而 f5/f6/f21 落
+// default 属跨层漂移）。海组映射为 "marine" 且只在海图判定为真时生效——
+// 淡水图的 marine_rock 成员（鳗/七鳃鳗/杜父，见 loc_fish）回落词表，
+// 避免淡水鳗鱼吃 8.445/g 的海水耐力。
+var fishPullGroupFightKey = map[string]string{
+	"marine_gadid":    "marine",
+	"marine_pelagic":  "marine",
+	"marine_rock":     "marine",
+	"flatfish":        "marine",
+	"apex":            "apex",
+	"small_forage":    "small",
+	"sunfish":         "small",
+	"migratory_roach": "small",
+	"roach_run":       "small",
+	"weak_silver":     "small",
+	"herb_carp":       "cyprinid",
+	"still_carp":      "cyprinid",
+	"carp_mid":        "cyprinid",
+	"pond_carp":       "cyprinid",
+	"predator":        "ambush",
+	"salmonid":        "salmonid",
+	"sturgeon":        "sturgeon",
+	"catfish":         "catfish",
+}
+
+// fishPullAliasHost 皮肤变种 → 宿主实测种（一层别名，无环）；非别名原样
+// 返回。f5/f6 显式表与组键判定经此继承宿主习性，与 f8 的 fishPullParamFor
+// 同源（PR #516 复审 P2-2：别名不得只继承 f8）。
+func fishPullAliasHost(species string) string {
+	if host, ok := fishPullAlias[strings.ToLower(strings.TrimSpace(species))]; ok {
+		return host
+	}
+	return species
+}
+
+// fightGroupKeyFromPullGroup 组表直查：f8 组表声明的习性组决定 f5/f6/f21
+// 组键，词表只兜底未入组鱼种。海组（映射值 marine）交回调用方按海图判定，
+// 返回 ok=false；淡水判定下的海组成员维持词表既有口径。
+func fightGroupKeyFromPullGroup(species string) (string, bool) {
+	g, ok := fishPullSpeciesGroup[fishPullAliasHost(species)]
+	if !ok {
+		return "", false
+	}
+	key, ok := fishPullGroupFightKey[g]
+	if !ok || key == "marine" {
+		return "", false
+	}
+	return key, true
+}
+
+// fishPullParamFor 返回鱼种拉力参数：皮肤变种（别名）→ 实测种 → 习性组 →
+// fallback。组表 Slope 按组内实测成员标定（海鱼类 0、鲤科类 0.23~0.45），
+// 先验组 Slope=-1 回落全局 fishPullLnSlope；fallback Slope=-1 同。
+func (s *Server) fishPullParamFor(species string) fishPullParam {
+	if host := fishPullAliasHost(species); host != species {
+		return s.fishPullParamFor(host) // 皮肤变种继承宿主实测参数（一层别名，无环）
+	}
+	if p, ok := fishPullK0[species]; ok {
+		return p
 	}
 	if g, ok := fishPullSpeciesGroup[species]; ok {
-		if k, ok := fishPullGroupK0[g]; ok {
-			return k
+		if p, ok := fishPullGroupK0[g]; ok {
+			return p
 		}
 	}
-	return s.tunableF("fish_pull_fallback_k", 17.5)
+	return fishPullParam{K0: s.tunableF("fish_pull_fallback_k", 17.5), Slope: -1}
+}
+
+// fishPullK0For 返回鱼种拉力基值（K0）；保留给日志与显示层使用。
+func (s *Server) fishPullK0For(species string) float64 {
+	return s.fishPullParamFor(species).K0
 }
 
 // fishFightPullFor 计算 obj27#8 拉力（牛）：
@@ -778,20 +1089,51 @@ func (s *Server) fishPullK0For(species string) float64 {
 // （specs/changes/fish-pull-k-table/spec.md）。官方 k 无 archetype 形状，
 // 因此 profile 不再参与力的缩放；RolledFish.Force 手动覆盖与
 // fight_power_scale 应急缩放保留。
+func (s *Server) fightLegacyModel() bool {
+	return s.tunableF("fight_legacy_model", 0) != 0
+}
+
+func (s *Server) fightOfficialStrength() bool {
+	return s.tunableF("fight_official_strength", 0) != 0
+}
+
+func (s *Server) fishFightGroupFallback() bool {
+	return s.tunableF("fish_fight_group_fallback", 1) != 0
+}
+
 func (s *Server) fishFightPullFor(f *RolledFish) float64 {
 	if f == nil {
 		return 0
 	}
 	pull := f.Force
+	if s.fightLegacyModel() && !s.fightOfficialStrength() {
+		if pull <= 0 {
+			pull = verifiedForcePerGram * float64(f.WeightG)
+		}
+		if k := s.tunableF("fight_power_scale", 1.0); k > 0 && k != 1.0 {
+			pull = math.Max(0.5, math.Round(pull*k*10000)/10000)
+		}
+		profile := s.fishFightProfileFor(f)
+		return math.Max(0.5, math.Round(pull*profile.ForceScale*10000)/10000)
+	}
 	if pull <= 0 {
 		wKg := math.Max(0.01, float64(f.WeightG)/1000)
-		slope := s.tunableF("fish_pull_ln_slope", fishPullLnSlope)
-		pull = wKg * (s.fishPullK0For(f.Species) + slope*math.Log(wKg))
+		p := s.fishPullParamFor(f.Species)
+		slope := p.Slope
+		if slope < 0 {
+			slope = s.tunableF("fish_pull_ln_slope", fishPullLnSlope)
+		}
+		pull = wKg * (p.K0 + slope*math.Log(wKg))
 	}
 	if k := s.tunableF("fight_power_scale", 1.0); k > 0 && k != 1.0 {
-		pull = math.Max(0.5, math.Round(pull*k*10000)/10000)
+		// 与主路径同为 0.05N 浮点保护下限（PR #516 复审 P2-3）：官方 10g
+		// 棱鲱 f8=0.186N，scale=0.5 应得 0.093N，0.5N 旧下限会把小鱼抬回。
+		pull = math.Max(0.05, math.Round(pull*k*10000)/10000)
 	}
-	return math.Max(0.5, math.Round(pull*10000)/10000)
+	// 官方无 0.5N 下限：2026-11-16 抓包 10g 棱鲱 f8=0.186N、24g 欧鲌 0.424N。
+	// 下限只防浮点归零（最小 wKg 0.01kg×K0≈0.19N，实际到不了），legacy 分支
+	// 的旧 0.5N 下限保持不动。
+	return math.Max(0.05, math.Round(pull*10000)/10000)
 }
 
 // fishFightPullKgfFor 把 27.f8 的鱼拉力（牛）换算成公斤力，供与渔轮泄力、锁轮承力
@@ -937,6 +1279,10 @@ func (s *Server) rollFishWithRules(loc, bait string, gearCapKg float64, bonus fi
 	if c.baits == nil {
 		c.baits = []string{bait}
 	}
+	// 硬性鱼口门剔空本图名册时置位：这种杆必须空竿重排，不能落到
+	// 内置鱼池兜底去捞不属于本图的鱼。
+	gateBlocked := false
+	c.gateBlocked = &gateBlocked
 	if s.tunableF("fish_bait_rules_enabled", 0) == 1 {
 		if s.DB != nil && s.cachedResolveStatLoc(s.dbCtx(), c, loc) == "" {
 			return s.rollFishPoolsWithRules(loc, gearCapKg, bonus, c)
@@ -949,6 +1295,9 @@ func (s *Server) rollFishWithRules(loc, bait string, gearCapKg float64, bonus fi
 	if s.DB != nil {
 		if f := s.rollFishFromDBWithRules(loc, bait, gearCapKg, bonus, c); f != nil {
 			return f
+		}
+		if gateBlocked {
+			return nil
 		}
 		// 已知水域的鱼群无法匹配时保持空竿。
 		if roster, err := s.cachedLocRoster(s.dbCtx(), c, s.cachedResolveStatLoc(s.dbCtx(), c, loc)); err == nil && len(roster) > 0 {
@@ -1021,6 +1370,36 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 			}
 		}
 	}
+	// 硬性鱼口资格门（bite_gate_enabled，默认关）：拟饵不喂非掠食鱼、
+	// 天然饵按攻略+生态双票、水层超界只留极小杂口。剔空整杆走
+	// 「本轮无符合条件的鱼」重排。空因写进 c.emptyReason（诊断日志用）。
+	markEmpty := func(reason string) {
+		if c.emptyReason != nil {
+			*c.emptyReason = reason
+		}
+	}
+	if gate := s.biteGateConfig(); gate.enabled {
+		keys, wts = s.applyBiteGates(cctx, keys, wts, c, gate, statLoc)
+		if len(keys) == 0 {
+			markEmpty("食性/水层硬门")
+			if c.gateBlocked != nil {
+				*c.gateBlocked = true
+			}
+			return nil
+		}
+	}
+	// 区域固定鱼种名册（fish_zone，后台可编辑，默认无配置=不限制）：
+	// 落点命中独占区只出名单鱼种，命中增益区名单内加权、名单外打折。
+	if zk, zw, hit := s.applyFishZoneRoster(cctx, statLoc, keys, wts, c); hit {
+		keys, wts = zk, zw
+		if len(keys) == 0 {
+			markEmpty("区域名册（独占区无交集）")
+			if c.gateBlocked != nil {
+				*c.gateBlocked = true
+			}
+			return nil
+		}
+	}
 	interests := map[string]float64{}
 	if strict {
 		base := map[string]float64{}
@@ -1029,6 +1408,7 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 		}
 		keys, wts = s.filterFishBaitSet(statLoc, c.baits, keys, wts, c.now, c)
 		if len(keys) == 0 {
+			markEmpty("饵料规则（strict）")
 			return nil
 		}
 		for i, key := range keys {
@@ -1040,6 +1420,7 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 	if distribution && (c.query == nil || !c.query.regional) {
 		applyFishDistribution(statLoc, keys, wts, c)
 		if !slices.ContainsFunc(wts, func(w float64) bool { return w > 0 }) {
+			markEmpty("分布散布（本时段本格无鱼）")
 			return nil
 		}
 	}
@@ -1153,7 +1534,7 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 					return mapProfHeavyDraw(prof.heavyChance, sampleOnce, rand.Float64)
 				}
 			}
-			w = int64(applyTrophyLuck(sample(), bonus.TrophyLuck, sample))
+			w = int64(s.applyRollTrophyLuck(sample(), bonus.TrophyLuck, sample))
 		}
 		if w == 0 {
 			for i, candidate := range keys {
@@ -1191,6 +1572,10 @@ func (s *Server) rollFishFromDBWithRules(loc, bait string, gearCapKg float64, bo
 		if baitHit {
 			s.log.Info("roll_from_db 命中饵效", "鱼种", key, "重量", w, "tier", tiers[key])
 		}
+		// 咬钩落点审计：世界坐标 + 40m 网格 + 命中的区域名册（后台划区对账用）。
+		// resolveFishZone 与 applyFishZoneRoster 同源（缓存复用），纯查不改判鱼结果。
+		s.log.Info("咬钩落点", "鱼种", key, "x", math.Round(c.x), "z", math.Round(c.z),
+			"网格", fishArea(statLoc, c), "区域", zoneHitNote(s.fishZonesFor(cctx, statLoc), c))
 		if s.huntStateEnabled() && c.uid > 0 {
 			s.log.Info("发鱼阶段", "uid", c.uid, "loc", c.loc, "spot", c.spot,
 				"stage", s.fishHuntStageName(huntReady.Mode, huntReady.Stage), "A", roundTo(huntReady.A, 3),
@@ -1260,6 +1645,13 @@ func (s *Server) sampleWeightDB(ctx context.Context, key string, modeMult, scale
 	if s.tunableF("grade_ratio_enabled", 1) == 1 {
 		settle := s.cachedSettleStatics(ctx, c, key)
 		ratioLines := cachedGradeLines{val: &settle[0], trophy: &settle[1], blue: &settle[2]}
+		// 未达标档下界：species_weight.min_g 优先（官服口径），未登记时退回
+		// 达标线 15% 钳到 [1,50] g 的兜底。
+		if minG, ok := s.cachedSpeciesMinG(ctx, c, key); ok {
+			ratioLines.minG = &minG
+		} else if floor := belowGradeFloorFromVal(settle[0]); floor > 0 {
+			ratioLines.minG = &floor
+		}
 		if w, ok := s.sampleWeightByGradeRatio(ratioLines, modeMult, scale, capG, c.mapLevel); ok {
 			return w
 		}
@@ -1317,6 +1709,22 @@ type fishGradeRatioModel struct {
 	total, scale, capG float64
 }
 
+// belowGradeFloorFromVal 由达标线推「未达标」档兜底下界：达标线的 15%，
+// 钳到 [1, 50] g。达标线未知（≤0）时返回 0 表示无兜底。
+func belowGradeFloorFromVal(valG int64) int64 {
+	if valG <= 0 {
+		return 0
+	}
+	f := int64(math.Round(float64(valG) * 0.15))
+	if f < 1 {
+		f = 1
+	}
+	if f > 50 {
+		f = 50
+	}
+	return f
+}
+
 // gradeRatioModel 展开四档权重。mapLevel 是该图钓鱼熟练度等级（可选，缺省 0=原版口径）：
 // 等级越高，「未达标」份额越低，让出的份额补给「合格」，四档合计不变。
 func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float64, mapLevel ...int) (fishGradeRatioModel, bool) {
@@ -1337,7 +1745,15 @@ func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float
 	if l.blue != nil {
 		supf = float64(*l.blue)
 	}
-	lo := s.spawnFloorG(vf)
+	// 下界先按官服口径（min_g 优先，缺失时 15% 钳 [1,50] g），再用本服
+	// spawn_min_ratio 的硬下限压顶——本服更狠时才生效，ratio=0 完全回落到官服口径。
+	lo := float64(belowGradeFloorFromVal(int64(math.Round(vf))))
+	if l.minG != nil && *l.minG > 0 && float64(*l.minG) < vf {
+		lo = float64(*l.minG)
+	}
+	if f := s.spawnFloorG(vf); f > lo {
+		lo = f
+	}
 	bands := make([]gradeRatioBand, 0, 4)
 	if vf > lo {
 		bands = append(bands, gradeRatioBand{1, lo, vf}) // 未达标
@@ -1392,16 +1808,14 @@ func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float
 		3: s.tunableF("grade_pct_trophy", 9),
 		4: s.tunableF("grade_pct_super", 0.5),
 	}
+	// 熟练度让出的「未达标」份额补给合格档（四档合计保持 100）。
 	if shift := belowBase - belowPct; shift > 0 {
 		w[2] += shift
 	}
-	// 饵效命中：把一部分"合格"份额挪给奖杯，模拟大饵更招大鱼。
-	if modeMult > 1.0 {
-		shift := math.Min(w[2]*0.5, w[2]*(modeMult-1)*0.5)
-		w[2] -= shift
-		w[3] += shift
-	}
-	usable := make([]gradeRatioBand, 0, len(bands))
+	usable := make([]gradeRatioBand, 0, len(bands)) // 档位比例是后台配置的绝对占比：饵效倍率只影响鱼种和体重分布，
+	// 不得再把“合格”份额挪给“奖杯”，否则实际上星率会高于面板显示值。
+	_ = modeMult
+
 	wts := make([]float64, 0, len(bands))
 	total := 0.0
 	for _, b := range bands {
@@ -1561,6 +1975,12 @@ func (s *Server) rollFishPoolsWithRules(loc string, gearCapKg float64, bonus fis
 		keys[i] = p.species
 		wts[i] = s.fishBiteEnvironmentWeight(s.dbCtx(), p.species, c)
 	}
+	if gate := s.biteGateConfig(); gate.enabled {
+		keys, wts = s.applyBiteGates(s.dbCtx(), keys, wts, c, gate, "")
+		if len(keys) == 0 {
+			return nil
+		}
+	}
 	if !slices.ContainsFunc(wts, func(w float64) bool { return w > 0 }) {
 		return nil
 	}
@@ -1616,7 +2036,7 @@ func (s *Server) rollFishPoolsWithRules(loc string, gearCapKg float64, bonus fis
 		upper = math.Min(upper, capG/scale)
 	}
 	sample := func() float64 { return triangular(minG, maxG, mode, upper) }
-	w := applyTrophyLuck(sample(), bonus.TrophyLuck, sample)
+	w := s.applyRollTrophyLuck(sample(), bonus.TrophyLuck, sample)
 	if w == 0 {
 		return nil
 	}
@@ -1658,6 +2078,15 @@ func applyTrophyLuck(weight, luck float64, sample func() float64) float64 {
 		return math.Max(weight, sample())
 	}
 	return weight
+}
+
+// applyRollTrophyLuck 统一按发鱼模式决定奖杯幸运是否参与；档位比例是总开关，
+// 开启后任何旧加成都不能改写配置的四档份额。
+func (s *Server) applyRollTrophyLuck(weight, luck float64, sample func() float64) float64 {
+	if s.gradeRatioEnabled() {
+		return weight
+	}
+	return applyTrophyLuck(weight, luck, sample)
 }
 
 func triangular(min, max, mode float64, upperBounds ...float64) float64 {
@@ -1707,6 +2136,8 @@ type fishStatics struct {
 	f14 map[int64]float64
 	f15 map[int64]float64
 	f17 map[int64]float64
+	f16 float64 // 激进度/挣脱概率：官方逐鱼种常数（0.13~1.0）
+	f18 float64 // 官方逐鱼种常数（既有种落表时未采到差异，显式 1 维持现行为）
 	f20 float64
 	f9  [2]float64 // A, p
 	f10 [2]float64
@@ -1717,51 +2148,289 @@ type fishStatics struct {
 var officialSpeciesStatics = map[string]*fishStatics{
 	"bream": {
 		f13: map[int64]float64{2: 0.35}, f14: map[int64]float64{2: 2.0}, f15: map[int64]float64{2: 50.0},
-		f17: map[int64]float64{2: 0.8406126}, f20: 0.9978698,
+		f16: 1, f17: map[int64]float64{2: 0.8406126}, f18: 1, f20: 0.9978698,
 		f9: [2]float64{0.159245, 0.2656}, f10: [2]float64{0.153964, 0.2191},
 		f11: [2]float64{0.0991065, 0.2604}, f19: [2]float64{1.60587e-05, 0.7986},
 	},
 	"c.carp": {
 		f13: map[int64]float64{1: 0.25, 2: 0.35}, f14: map[int64]float64{1: 0.5, 2: 0.5},
-		f15: map[int64]float64{1: 4.0, 2: 4.0}, f17: map[int64]float64{1: 0.8406168, 2: 0.8406168},
-		f20: 0.9978698,
-		f9:  [2]float64{0.485972, 0.1722}, f10: [2]float64{0.215219, 0.2493},
+		f15: map[int64]float64{1: 4.0, 2: 4.0},
+		f16: 1, f17: map[int64]float64{1: 0.8406168, 2: 0.8406168}, f18: 1, f20: 0.9978698,
+		f9: [2]float64{0.485972, 0.1722}, f10: [2]float64{0.215219, 0.2493},
 		f11: [2]float64{0.227746, 0.1307}, f19: [2]float64{3.18019e-05, 0.7000},
 	},
 	"c.roach": {
 		f13: map[int64]float64{1: 0.30, 2: 0.15}, f14: map[int64]float64{1: 0.6, 2: 0.7},
-		f15: map[int64]float64{1: 3.0, 2: 15.0}, f17: map[int64]float64{1: 0.8406168, 2: 0.8406168},
-		f20: 0.9978698,
-		f9:  [2]float64{0.414243, 0.2656}, f10: [2]float64{0.369253, 0.2191},
+		f15: map[int64]float64{1: 3.0, 2: 15.0},
+		f16: 1, f17: map[int64]float64{1: 0.8406168, 2: 0.8406168}, f18: 1, f20: 0.9978698,
+		f9: [2]float64{0.414243, 0.2656}, f10: [2]float64{0.369253, 0.2191},
 		f11: [2]float64{0.139494, 0.2604}, f19: [2]float64{1.78540e-05, 0.7986},
 	},
 	"crucian": {
 		f13: map[int64]float64{1: 0.25, 2: 0.35}, f14: map[int64]float64{1: 0.5, 2: 0.5},
-		f15: map[int64]float64{1: 4.0, 2: 4.0}, f17: map[int64]float64{1: 0.8406168, 2: 0.8406168},
-		f20: 0.9978698,
-		f9:  [2]float64{0.452706, 0.1941}, f10: [2]float64{0.233332, 0.2355},
+		f15: map[int64]float64{1: 4.0, 2: 4.0},
+		f16: 1, f17: map[int64]float64{1: 0.8406168, 2: 0.8406168}, f18: 1, f20: 0.9978698,
+		f9: [2]float64{0.452706, 0.1941}, f10: [2]float64{0.233332, 0.2355},
 		f11: [2]float64{0.206706, 0.1482}, f19: [2]float64{3.18023e-05, 0.7000},
 	},
 	"e.chub": {
 		f13: map[int64]float64{1: 0.35, 2: 0.45}, f14: map[int64]float64{1: 0.6, 2: 0.6},
-		f15: map[int64]float64{1: 6.0, 2: 6.0}, f17: map[int64]float64{1: 0.8406126, 2: 0.7030094},
-		f20: 0.9978698,
-		f9:  [2]float64{2.77068, 0.0700}, f10: [2]float64{0.725204, 0.1019},
+		f15: map[int64]float64{1: 6.0, 2: 6.0},
+		f16: 1, f17: map[int64]float64{1: 0.8406126, 2: 0.7030094}, f18: 1, f20: 0.9978698,
+		f9: [2]float64{2.77068, 0.0700}, f10: [2]float64{0.725204, 0.1019},
 		f11: [2]float64{0.27588, 0.1533}, f19: [2]float64{1.01401e-04, 0.5211},
 	},
 	"perch": {
 		f13: map[int64]float64{1: 0.15, 2: 0.24}, f14: map[int64]float64{1: 0.4, 2: 0.5},
-		f15: map[int64]float64{1: 40.0, 2: 40.0}, f17: map[int64]float64{1: 0.8995978, 2: 0.8995978},
-		f20: 0.9979957,
-		f9:  [2]float64{0.589176, 0.2371}, f10: [2]float64{0.182802, 0.2936},
+		f15: map[int64]float64{1: 40.0, 2: 40.0},
+		f16: 1, f17: map[int64]float64{1: 0.8995978, 2: 0.8995978}, f18: 1, f20: 0.9979957,
+		f9: [2]float64{0.589176, 0.2371}, f10: [2]float64{0.182802, 0.2936},
 		f11: [2]float64{0.202101, 0.2187}, f19: [2]float64{3.18016e-05, 0.7000},
 	},
 	"s.bream": {
 		f13: map[int64]float64{2: 0.30}, f14: map[int64]float64{2: 1.2}, f15: map[int64]float64{2: 13.0},
-		f17: map[int64]float64{2: 0.8406126}, f20: 0.9978698,
+		f16: 1, f17: map[int64]float64{2: 0.8406126}, f18: 1, f20: 0.9978698,
 		f9: [2]float64{0.160663, 0.2656}, f10: [2]float64{0.119378, 0.2191},
 		f11: [2]float64{0.0792359, 0.2604}, f19: [2]float64{1.77994e-05, 0.7986},
 	},
+	// 2026-11-13 落表 8 种：19 条官方 14/14 抓包逐种提炼
+	// （specs/changes/fight-statics-official-tables/spec.md，tmp_analysis/extract 解码）。
+	// f13/f14/f15/f17 按档 gradeMapVal（单档样本存样本档位，缺档回落同值）；
+	// f9/f10/f11 多样本 pow 最小二乘拟合（g_carp 5 样本）、单样本存常数（p=0，待补包改 pow）；
+	// f16/f18/f20 逐鱼种常数。f19 仅 taran 有浮钓真值（0.00204695@611g），
+	// 其余样本均为非浮钓 rig（官方非浮钓 f19 恒 1，buildFish27 按钓法覆盖），
+	// 种级 f19 留零走 fallbackFightStatics 体重插值，浮钓族口径不回退。
+	"g_carp": {
+		f13: map[int64]float64{2: 0.60}, f14: map[int64]float64{2: 1.20}, f15: map[int64]float64{2: 6.0},
+		f16: 1, f17: map[int64]float64{2: 0.945041}, f18: 0.950344, f20: 0.999763,
+		f9: [2]float64{0.396833, 0.178503}, f10: [2]float64{1.218483, 0.035711},
+		f11: [2]float64{0.251756, 0.120613},
+	},
+	"b_carp": {
+		f13: map[int64]float64{2: 0.65}, f14: map[int64]float64{2: 1.20}, f15: map[int64]float64{2: 6.0},
+		f16: 1, f17: map[int64]float64{2: 0.945114}, f18: 0.950416, f20: 0.999765,
+		f9: [2]float64{1.92761, 0}, f10: [2]float64{1.67074, 0}, f11: [2]float64{0.731901, 0},
+	},
+	"carp": {
+		f13: map[int64]float64{1: 0.20}, f14: map[int64]float64{1: 1.00}, f15: map[int64]float64{1: 6.0},
+		f16: 1, f17: map[int64]float64{1: 0.927123}, f18: 0.944333, f20: 0.999774,
+		f9: [2]float64{1.46609, 0}, f10: [2]float64{1.06575, 0}, f11: [2]float64{0.633218, 0},
+	},
+	"n.pike": {
+		f13: map[int64]float64{2: 0.50}, f14: map[int64]float64{2: 1.00}, f15: map[int64]float64{2: 20.0},
+		f16: 1, f17: map[int64]float64{2: 0.973469}, f18: 0.993922, f20: 0.999839,
+		f9: [2]float64{4.46105, 0}, f10: [2]float64{1.41526, 0}, f11: [2]float64{1.09221, 0},
+	},
+	"merlang": {
+		f13: map[int64]float64{1: 0.50}, f14: map[int64]float64{1: 25.0}, f15: map[int64]float64{1: 200.0},
+		f16: 0.251768, f17: map[int64]float64{1: 0.947264}, f18: 0.941456, f20: 0.99973,
+		f9: [2]float64{4.60922, 0}, f10: [2]float64{1.29599, 0}, f11: [2]float64{1.06092, 0},
+	},
+	"piksha": {
+		f13: map[int64]float64{2: 0.50}, f14: map[int64]float64{2: 20.0}, f15: map[int64]float64{2: 250.0},
+		f16: 0.129192, f17: map[int64]float64{2: 0.994663}, f18: 0.99352, f20: 0.999811,
+		f9: [2]float64{5.15528, 0}, f10: [2]float64{1.86211, 0}, f11: [2]float64{1.13106, 0},
+	},
+	"taran": {
+		f13: map[int64]float64{2: 0.40}, f14: map[int64]float64{2: 0.80}, f15: map[int64]float64{2: 16.0},
+		f16: 1, f17: map[int64]float64{2: 0.692334}, f18: 1, f20: 0.999452,
+		f9: [2]float64{2.47531, 0}, f10: [2]float64{1.48324, 0}, f11: [2]float64{0.734414, 0},
+		f19: [2]float64{0.00204695, 0},
+	},
+	"b_gill": {
+		f13: map[int64]float64{1: 0.45}, f14: map[int64]float64{1: 0.45}, f15: map[int64]float64{1: 10.0},
+		f16: 1, f17: map[int64]float64{1: 0.94152}, f18: 0.929121, f20: 0.999804,
+		f9: [2]float64{2.98462, 0}, f10: [2]float64{1.06095, 0}, f11: [2]float64{0.737278, 0},
+	},
+}
+
+// fishGroupFightStatics 未实测鱼种的习性组兜底静态参数（搏鱼脱钩方案 §五B /
+// P3 §五）：海水组 = merlang+piksha 两样本均值（鳕科/鲽科细分待 P3 锚点补抓），
+// 鲤科组 f9 沿用 g_carp pow、其余取方案约值与鲤科锚点均值。其余组按常见
+// 体型/行为补组值：鲑科会冲、伏击鱼会突然发力、鲶/鲟沉重、鳗鱼持续扭动、
+// 小型鱼动作碎。组值是经验标定，不等于官服逐鱼种真值；拿到官方 14/14
+// 样本后应由 officialSpeciesStatics 逐种覆盖。
+var fishGroupFightStatics = map[string]*fishStatics{
+	"marine": {
+		f13: map[int64]float64{1: 0.50}, f14: map[int64]float64{1: 22.5}, f15: map[int64]float64{1: 225.0},
+		f16: 0.19048, f17: map[int64]float64{1: 0.970964}, f18: 0.967488, f20: 0.9997705,
+		f9: [2]float64{4.88225, 0}, f10: [2]float64{1.57905, 0}, f11: [2]float64{1.09599, 0},
+	},
+	"cyprinid": {
+		f13: map[int64]float64{1: 0.35}, f14: map[int64]float64{1: 1.00}, f15: map[int64]float64{1: 6.0},
+		f16: 1, f17: map[int64]float64{1: 0.93}, f18: 0.948364, f20: 0.999767,
+		f9: [2]float64{0.401, 0.179}, f10: [2]float64{1.6, 0}, f11: [2]float64{0.71, 0},
+	},
+	// 鲑科：中速持续发力，伴随短促冲刺；低于海鱼的外冲幅度，但明显高于
+	// 小鲫鱼兜底。
+	"salmonid": {
+		f13: map[int64]float64{1: 0.35, 2: 0.35}, f14: map[int64]float64{1: 1.20, 2: 1.20},
+		f15: map[int64]float64{1: 60.0, 2: 60.0},
+		f16: 0.70, f17: map[int64]float64{1: 0.75, 2: 0.75}, f18: 0.96, f20: 0.9995,
+		f9: [2]float64{3.80, 0}, f10: [2]float64{1.20, 0}, f11: [2]float64{0.85, 0},
+	},
+	// 伏击鱼：平时沉稳，受惊后短距离爆发；动作幅度比鲑科大。
+	"ambush": {
+		f13: map[int64]float64{1: 0.18, 2: 0.24}, f14: map[int64]float64{1: 0.70, 2: 0.70},
+		f15: map[int64]float64{1: 50.0, 2: 50.0},
+		f16: 0.90, f17: map[int64]float64{1: 0.80, 2: 0.80}, f18: 0.98, f20: 0.9995,
+		f9: [2]float64{3.20, 0}, f10: [2]float64{1.10, 0}, f11: [2]float64{0.80, 0},
+	},
+	// 鲶科：低速大扭矩，冲刺少但持续拉拽明显。
+	"catfish": {
+		f13: map[int64]float64{1: 0.35, 2: 0.35}, f14: map[int64]float64{1: 1.50, 2: 1.50},
+		f15: map[int64]float64{1: 60.0, 2: 60.0},
+		f16: 0.60, f17: map[int64]float64{1: 0.80, 2: 0.80}, f18: 0.95, f20: 0.9995,
+		f9: [2]float64{3.50, 0}, f10: [2]float64{1.20, 0}, f11: [2]float64{0.90, 0},
+	},
+	// 鲟科：重量级、持续强拉，动作不快但很难收线。
+	"sturgeon": {
+		f13: map[int64]float64{1: 0.40, 2: 0.40}, f14: map[int64]float64{1: 2.00, 2: 2.00},
+		f15: map[int64]float64{1: 80.0, 2: 80.0},
+		f16: 0.70, f17: map[int64]float64{1: 0.80, 2: 0.80}, f18: 0.95, f20: 0.9995,
+		f9: [2]float64{4.00, 0}, f10: [2]float64{1.30, 0}, f11: [2]float64{1.00, 0},
+	},
+	// 鳗鱼：持续扭动、方向变化多，单次拉力不大。
+	"eel": {
+		f13: map[int64]float64{1: 0.30, 2: 0.30}, f14: map[int64]float64{1: 0.80, 2: 0.80},
+		f15: map[int64]float64{1: 30.0, 2: 30.0},
+		f16: 0.80, f17: map[int64]float64{1: 0.80, 2: 0.80}, f18: 0.95, f20: 0.9995,
+		f9: [2]float64{3.00, 0}, f10: [2]float64{1.00, 0}, f11: [2]float64{0.70, 0},
+	},
+	// 小型鱼：动作碎、幅度小，但不应继续掉进大鱼的参数里。
+	"small": {
+		f13: map[int64]float64{1: 0.25, 2: 0.30}, f14: map[int64]float64{1: 0.40, 2: 0.40},
+		f15: map[int64]float64{1: 8.0, 2: 8.0},
+		f16: 1.0, f17: map[int64]float64{1: 0.84, 2: 0.84}, f18: 0.95, f20: 0.9995,
+		f9: [2]float64{2.80, 0}, f10: [2]float64{1.00, 0}, f11: [2]float64{0.70, 0},
+	},
+	// 鲨鱼/顶级掠食者：外冲和持续拉力都按海鱼最高档。
+	"apex": {
+		f13: map[int64]float64{1: 0.50}, f14: map[int64]float64{1: 22.5}, f15: map[int64]float64{1: 225.0},
+		f16: 0.19048, f17: map[int64]float64{1: 0.970964}, f18: 0.967488, f20: 0.9997705,
+		f9: [2]float64{4.88225, 0}, f10: [2]float64{1.57905, 0}, f11: [2]float64{1.09599, 0},
+	},
+	// 未归组鱼种：给中性偏强的兜底，不再使用小鲫鱼 f14=0.5/f15=4。
+	"default": {
+		f13: map[int64]float64{1: 0.30, 2: 0.35}, f14: map[int64]float64{1: 0.80, 2: 0.80},
+		f15: map[int64]float64{1: 20.0, 2: 20.0},
+		f16: 0.90, f17: map[int64]float64{1: 0.84, 2: 0.84}, f18: 0.95, f20: 0.9995,
+		f9: [2]float64{2.50, 0}, f10: [2]float64{0.90, 0}, f11: [2]float64{0.60, 0},
+	},
+}
+
+// reloadMarineFishKeys 从静态库加载海图鱼种集合。海图经 loc_alias 解析
+// （level_012_north_sea → 挪威海，唯一海图），该图鱼种与 17 张淡水图零交叉
+// （2026-11-15 实查 static.sqlite3），海图鱼种即纯海水集合。集合为空或查询
+// 失败时保留 nil，fishMarineGroupHit 回退词表判定，不阻断启动。
+func (s *Server) reloadMarineFishKeys(ctx context.Context) (int, error) {
+	if s == nil || s.DB == nil {
+		return 0, nil
+	}
+	rows, err := s.DB.SQL.QueryContext(ctx, `
+		SELECT DISTINCT f.fish_key
+		FROM loc_fish f
+		JOIN loc_alias a ON a.loc = f.loc
+		WHERE a.alias = 'level_012_north_sea'`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	keys := make(map[string]bool, 64)
+	for rows.Next() {
+		var key string
+		if rows.Scan(&key) == nil && strings.TrimSpace(key) != "" {
+			keys[strings.ToLower(strings.TrimSpace(key))] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(keys) == 0 {
+		return 0, fmt.Errorf("loc_fish/loc_alias 无海图鱼种，海水组回退词表判定")
+	}
+	s.marineFishMu.Lock()
+	s.marineFishKeys = keys
+	s.marineFishMu.Unlock()
+	return len(keys), nil
+}
+
+// fishMarineGroupHit 海水组兜底判定（搏鱼脱钩方案 §五B 的归组输入）：
+// 优先静态库海图归属——词表是手写关键词，北海鱼种 meagre/x_gladius/m_zubatka
+// 等不在表内（zubatka 反被归进淡水 small 组），今晚 2026-11-15 四次 f0=2 脱钩
+// 全部栽在这里；词表 marine 命中兜底静态库未收录的海鱼。marineFishKeys 为
+// nil（静态库不可用）时纯词表，行为与落表前一致。
+func (s *Server) fishMarineGroupHit(species string) bool {
+	sp := strings.ToLower(strings.TrimSpace(species))
+	if s != nil {
+		s.marineFishMu.RLock()
+		hit := s.marineFishKeys != nil && s.marineFishKeys[sp]
+		s.marineFishMu.RUnlock()
+		if hit {
+			return true
+		}
+	}
+	return fishFightArchetypeFor(species) == fishFightArchetypes["marine"]
+}
+
+// fishCurveArchetypeFor 曲线池/耐力层的海图归属兜底：词表把海鱼落进
+// default/small 两个通用桶时改归 marine（官方 merlang 曲线池、耐力倍率
+// 1.18），与搏鱼脱钩方案 §五B「组键也回退 CurvePool」同口径；
+// apex/catfish/sturgeon 等专属词表携带刻意的家族特化，不覆盖。
+func fishCurveArchetypeFor(species string, marine bool) fishFightArchetype {
+	if !marine {
+		// 淡水判定：f8 组表直查优先（与 fishFightGroupKeyFor 同源），
+		// 词表兜底未入组鱼种。
+		if key, ok := fightGroupKeyFromPullGroup(species); ok {
+			return fishFightArchetypes[key]
+		}
+		return fishFightArchetypeFor(species)
+	}
+	arch := fishFightArchetypeFor(species)
+	if arch == fishFightArchetypes["default"] || arch == fishFightArchetypes["small"] {
+		return fishFightArchetypes["marine"]
+	}
+	return arch
+}
+
+// fishFightGroupKeyFor 把鱼种映射到习性组。海图归属优先；其余先查 f8 组表
+// 直查（PR #516 复审 P2-1：组表声明习性驱动全层），词表兜底未入组鱼种。
+// 未知鱼种落 default 中性组，不再落小鲫鱼 fallback。
+func fishFightGroupKeyFor(species string, marine bool) string {
+	if marine {
+		return "marine"
+	}
+	if key, ok := fightGroupKeyFromPullGroup(species); ok {
+		return key
+	}
+	switch fishFightArchetypeFor(species) {
+	case fishFightArchetypes["marine"]:
+		return "marine"
+	case fishFightArchetypes["cyprinid"]:
+		return "cyprinid"
+	case fishFightArchetypes["salmonid"]:
+		return "salmonid"
+	case fishFightArchetypes["ambush"]:
+		return "ambush"
+	case fishFightArchetypes["catfish"]:
+		return "catfish"
+	case fishFightArchetypes["sturgeon"]:
+		return "sturgeon"
+	case fishFightArchetypes["eel"]:
+		return "eel"
+	case fishFightArchetypes["small"]:
+		return "small"
+	case fishFightArchetypes["apex"]:
+		return "apex"
+	default:
+		return "default"
+	}
+}
+
+// fishGroupStaticsFor 返回鱼种所属习性组的搏鱼静态参数。所有鱼种都至少
+// 命中一个组，只有官方逐鱼种表优先于本函数。
+func fishGroupStaticsFor(species string, marine bool) *fishStatics {
+	return fishGroupFightStatics[fishFightGroupKeyFor(species, marine)]
 }
 
 // staticPow 计算 A*w^p，重量单位为克。
@@ -1845,14 +2514,31 @@ func (s *Server) fishStaminaForProfile(f *RolledFish, profile fishFightProfile) 
 		return 0
 	}
 	weightG := float64(f.WeightG)
+	if s.fightLegacyModel() && !s.fightOfficialStrength() {
+		stamina := f.Stamina
+		if stamina <= 0 {
+			stamina = verifiedStaminaPerGram * float64(f.WeightG)
+		}
+		if scale := s.tunableF("fish_stamina_scale", defaultFishStaminaScale); scale > 0 {
+			stamina *= scale
+		}
+		return stamina * profile.StaminaScale
+	}
 	stamina := f.Stamina
 	if stamina <= 0 {
 		// 实测种走官方每克均值（A 级样本，specs/changes/fish-official-data-tables/spec.md），
 		// 官方 f8/f5 都没有 archetype 形状，直接 rate×体重，不再乘 StaminaScale；
 		// 官方种内散布 ±13%~57%（g_carp 最大），均值表把个体误差压回散布带。
 		// 未实测种维持旧口径（2.388/g × archetype 耐力倍率）。
-		if rate, ok := fishStaminaRatePerGram[f.Species]; ok {
+		if rate, ok := fishStaminaRatePerGram[fishPullAliasHost(f.Species)]; ok {
 			stamina = rate * float64(f.WeightG)
+		} else if s.fishFightGroupFallback() {
+			if rate := fishStaminaRateGroupFor(f.Species, s.fishMarineGroupHit(f.Species)); rate > 0 {
+				// 组兜底同官方口径：直接 rate×体重，不乘 StaminaScale。
+				stamina = rate * float64(f.WeightG)
+			} else {
+				stamina = verifiedStaminaPerGram * float64(f.WeightG) * profile.StaminaScale
+			}
 		} else {
 			stamina = verifiedStaminaPerGram * float64(f.WeightG) * profile.StaminaScale
 		}
@@ -1875,24 +2561,42 @@ func (s *Server) fishStaminaForProfile(f *RolledFish, profile fishFightProfile) 
 	return stamina
 }
 
-// fishStaminaRatePerGram 是官方 14/14 抓包实测鱼种的 f5 每克均值（2026-11-11，
-// 31 样本；见 specs/changes/fish-official-data-tables/spec.md）。海钓两科的
-// 官方值远高于旧版常数 2.388（merlang 10.5 / piksha 6.4）。
+// fishStaminaRatePerGram 是官方 14/14 抓包实测鱼种的 f5 每克均值（2026-11-11
+// 31 样本 + 2026-11-16/17 断电抢救包 53 样本；见
+// specs/changes/fish-official-data-tables/spec.md 与 fish-pull-k-table v2）。
+// 海钓科目的官方值远高于旧版常数 2.388（merlang 10.5 / 鲭鲱类 11.7~19.3）。
+// 每克均值本身随体重下行（crucian 193g 2.79 → 611g 1.78），此处为样本均值口径。
 var fishStaminaRatePerGram = map[string]float64{
-	"merlang":    10.50,
-	"piksha":     6.39,
-	"s.bream":    5.87,
-	"b_gill":     4.07,
-	"taran":      3.55,
-	"din_l_carp": 2.77,
-	"n.pike":     2.76,
-	"perch":      2.75,
-	"c.carp":     2.52,
-	"c.roach":    2.51,
-	"g_carp":     2.44,
-	"crucian":    2.29,
-	"carp":       2.10,
-	"b_carp":     2.09,
+	"cha_herring":   19.29,
+	"makrel":        17.84,
+	"atl_herring":   11.71,
+	"shemaya_cha":   8.84,
+	"coalfish":      8.98,
+	"merlang":       10.50,
+	"pollachius":    7.52,
+	"menek":         7.37,
+	"atl_cod":       6.79,
+	"piksha":        6.39,
+	"s.bream":       5.87,
+	"pumps_sunfish": 4.75,
+	"b_gill":        4.07,
+	"m_scorpius":    3.98,
+	"rudd":          3.47,
+	"taran":         3.55,
+	"tiulka":        2.92,
+	"din_l_carp":    2.77,
+	"c_bleak":       2.84,
+	"n.pike":        2.76,
+	"perch":         2.69,
+	"c.carp":        2.78,
+	"c.roach":       2.51,
+	"g_carp":        2.44,
+	"crucian":       2.29,
+	"carp_ghost":    2.32,
+	"carp":          2.10,
+	"b_carp":        2.09,
+	"kw_tench":      2.08,
+	"n_carp":        1.98,
 }
 
 // fishF6Table 是官方实测鱼种的 f6 抗疲劳系数（0.05 步进量化值）。语义：
@@ -1925,27 +2629,85 @@ var fishF6Step = map[string]struct {
 	"crucian": {AboveG: 450, F6: 0.60},
 }
 
-// fishF6For 返回本鱼 f6：实测种量化表（含体重台阶）→ 旧版校准常数 fallback，
-// 再叠本地「鱼搏斗自耗」= 总倍率(fish_fatigue_scale) × 行为型档(fishFightArchetype.Fatigue)。
+// fishStaminaRateGroupFor 未实测鱼种的 f5 每克组均值：海水组 8.445
+// （merlang 10.50 与 piksha 6.39 均值）、鲤科组 2.5（方案约值）；
+// 未命中返回 0 走旧口径。marine 由调用方按海图归属/词表判定，鲤科组
+// 仍走 fishFightArchetypeFor 词表。
+// fishStaminaRateGroup 未实测鱼种的 f5 每克组均值。海鱼 8.445 来自
+// merlang/piksha 两样本；其余为经验估计：鲑科/伏击鱼高于静水小鲫鱼，
+// 鲶/鲟更耐拉，鳗鱼和小型鱼偏低。
+var fishStaminaRateGroup = map[string]float64{
+	"marine":   8.445,
+	"apex":     8.445,
+	"cyprinid": 2.50,
+	"salmonid": 3.00,
+	"ambush":   2.75,
+	"catfish":  3.20,
+	"sturgeon": 3.50,
+	"eel":      2.80,
+	"small":    2.50,
+	"default":  2.60,
+}
+
+func fishStaminaRateGroupFor(species string, marine bool) float64 {
+	return fishStaminaRateGroup[fishFightGroupKeyFor(species, marine)]
+}
+
+// fishF6Group 未实测鱼种的 f6 组兜底。值越高越耐疲劳；海鱼/鲶/鲟偏低，
+// 伏击鱼和小型鱼偏高。
+var fishF6Group = map[string]float64{
+	"marine":   0.50,
+	"apex":     0.50,
+	"cyprinid": 0.55,
+	"salmonid": 0.60,
+	"ambush":   0.65,
+	"catfish":  0.50,
+	"sturgeon": 0.50,
+	"eel":      0.50,
+	"small":    0.50,
+	"default":  0.55,
+}
+
+// fishF6For 返回本鱼 f6：实测种量化表（含体重台阶）→ 习性组兜底。
 func (s *Server) fishF6For(f *RolledFish) float64 {
+	v := s.fishF6BaseFor(f)
+	if scale := s.tunableF("fish_f6_scale", 1); scale > 0 && scale != 1 {
+		v *= scale
+		if v > 1 {
+			v = 1
+		}
+		if v < 0.05 {
+			v = 0.05
+		}
+	}
+	// 本地「鱼搏斗自耗」：总倍率(fish_fatigue_scale) × 行为型档(fishFightArchetype.Fatigue)。
 	species := ""
 	if f != nil {
 		species = f.Species
 	}
-	scale := fishFatigueEffectiveScale(species, s.fishFatigueScale(), s.fishFatigueProfileScale())
-	return applyFishFatigueScale(s.fishF6BaseFor(f), scale)
+	if fatigue := fishFatigueEffectiveScale(species, s.fishFatigueScale(), s.fishFatigueProfileScale()); fatigue > 0 {
+		v = applyFishFatigueScale(v, fatigue)
+	}
+	return v
 }
 
-// fishF6BaseFor 官方口径的 f6（未叠本地自耗倍率）。
 func (s *Server) fishF6BaseFor(f *RolledFish) float64 {
 	if f == nil {
 		return s.fishInitialStaminaRatio()
 	}
-	if v, ok := fishF6Table[f.Species]; ok {
-		if step, ok := fishF6Step[f.Species]; ok && f.WeightG >= step.AboveG {
+	if s.fightLegacyModel() && !s.fightOfficialStrength() {
+		return s.fishInitialStaminaRatio()
+	}
+	if v, ok := fishF6Table[fishPullAliasHost(f.Species)]; ok {
+		if step, ok := fishF6Step[fishPullAliasHost(f.Species)]; ok && f.WeightG >= step.AboveG {
 			return step.F6
 		}
 		return v
+	}
+	if s.fishFightGroupFallback() {
+		if v, ok := fishF6Group[fishFightGroupKeyFor(f.Species, s.fishMarineGroupHit(f.Species))]; ok {
+			return v
+		}
 	}
 	return s.fishInitialStaminaRatio()
 }
@@ -1958,6 +2720,58 @@ func (s *Server) fishInitialStaminaRatio() float64 {
 	return math.Max(0.05, math.Min(1.0, ratio))
 }
 
+// fish27Statics 汇聚 27 对象 f9~f20 静态参数（f7/f12 官方恒 0，不在列）。
+type fish27Statics struct {
+	f9, f10, f11  float64
+	f13, f14, f15 float64
+	f16, f17, f18 float64
+	f19, f20      float64
+}
+
+// fight27StaticsFor 三层回退：实测种（officialSpeciesStatics）→ 习性组
+// （fishGroupStaticsFor，marine 由调用方按海图归属/词表判定）→ 旧
+// fallbackFightStatics（保持现状可回滚）。f19 特例：只有浮钓族生效
+// （buildFish27 对其余钓法强制 1）；taran 有浮钓真值，其余落表种样本均为
+// 非浮钓 rig，种级 f19 留零时沿用 fallback 的体重插值（与落表前浮钓行为
+// 逐字节一致）。
+func fight27StaticsFor(species string, w float64, grade int64, marine bool) fish27Statics {
+	return fight27StaticsForMode(species, w, grade, marine, true)
+}
+
+func fight27StaticsForMode(species string, w float64, grade int64, marine, groupFallback bool) fish27Statics {
+	src := officialSpeciesStatics[species]
+	if src == nil && groupFallback {
+		src = fishGroupStaticsFor(species, marine)
+	}
+	if src != nil {
+		out := fish27Statics{
+			f9:  staticPow(src.f9, w),
+			f10: staticPow(src.f10, w),
+			f11: staticPow(src.f11, w),
+			f13: gradeMapVal(src.f13, grade),
+			f14: gradeMapVal(src.f14, grade),
+			f15: gradeMapVal(src.f15, grade),
+			f16: src.f16,
+			f17: gradeMapVal(src.f17, grade),
+			f18: src.f18,
+			f20: src.f20,
+		}
+		if src.f19[0] > 0 {
+			out.f19 = staticPow(src.f19, w)
+		} else {
+			out.f19 = fallbackFightStatics(w)[19]
+		}
+		return out
+	}
+	fb := fallbackFightStatics(w)
+	return fish27Statics{
+		f9: fb[9], f10: fb[10], f11: fb[11],
+		f13: fb[13], f14: fb[14], f15: fb[15],
+		f16: fb[16], f17: fb[17], f18: fb[18],
+		f19: fb[19], f20: fb[20],
+	}
+}
+
 // buildFish27 构造 27 判鱼对象。
 // rigType 决定 27.f19 口径：官方真服抓包（2026-11-10/11，11 个 14/14）显示
 // 沉底/海钓/路亚的 f19 恒为 1.0（精确值 0x3f800000），浮钓族则是 0.001~0.0024
@@ -1968,28 +2782,11 @@ func (s *Server) fishInitialStaminaRatio() float64 {
 // 用于浮钓静置不上钩的应急恢复）。
 func (s *Server) buildFish27(f *RolledFish, hookGUID, gearGuid string, rigType int64) *proto.Value {
 	w := float64(f.WeightG)
-	st := officialSpeciesStatics[f.Species]
-	var f9, f10, f11, f12v, f13v, f14v, f15v, f16v, f17v, f18v, f19v, f20v float64
-	if st != nil {
-		f9 = staticPow(st.f9, w)
-		f10 = staticPow(st.f10, w)
-		f11 = staticPow(st.f11, w)
-		f13v = gradeMapVal(st.f13, f.Grade)
-		f14v = gradeMapVal(st.f14, f.Grade)
-		f15v = gradeMapVal(st.f15, f.Grade)
-		f12v = 0
-		f16v = 1
-		f17v = gradeMapVal(st.f17, f.Grade)
-		f18v = 1
-		f19v = staticPow(st.f19, w)
-		f20v = st.f20
-	} else {
-		fb := fallbackFightStatics(w)
-		f9, f10, f11 = fb[9], fb[10], fb[11]
-		f12v, f13v, f14v, f15v = fb[12], fb[13], fb[14], fb[15]
-		f16v, f17v, f18v = fb[16], fb[17], fb[18]
-		f19v, f20v = fb[19], fb[20]
-	}
+	st := fight27StaticsForMode(f.Species, w, f.Grade, s.fishMarineGroupHit(f.Species), s.fishFightGroupFallback())
+	f9, f10, f11 := st.f9, st.f10, st.f11
+	f12v, f13v, f14v, f15v := 0.0, st.f13, st.f14, st.f15
+	f16v, f17v, f18v := st.f16, st.f17, st.f18
+	f19v, f20v := st.f19, st.f20
 	if !floatRigTypes[rigType] || s.tunableF("float_f19_force_one", 0) != 0 {
 		f19v = 1
 	}
@@ -2047,7 +2844,7 @@ func (s *Server) buildFish27(f *RolledFish, hookGUID, gearGuid string, rigType i
 		18: proto.F32(float32(f18v)),
 		19: proto.F32(float32(f19v)),
 		20: proto.F32(float32(f20v)),
-		21: s.buildFightCurves(f.Species, pull),
+		21: s.buildFightCurvesForFish(f, pull),
 		22: proto.Str(f22),
 		23: proto.Guid(hook),
 		24: proto.Null(),
@@ -2221,6 +3018,8 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	}
 	now := time.Now()
 	bonus := s.fishingBonus(sess.pushCtx(), sess.Userid, st.RigType, st.GearGuid)
+	// 饵效控速：新杆（resetCast）按当前饵重算对口分；补排/脱钩重排复用本杆缓存。
+	pace := s.computePaceState(sess, st, resetCast)
 	st.mu.Lock()
 	if completedCatchPending(st) {
 		st.mu.Unlock()
@@ -2241,6 +3040,12 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 	st.CastActive = true
 	st.Resolved = false
 	st.Pending = nil
+	// 新一杆/重排都会清掉多钩队列：额外鱼属于上一杆的在途鱼，
+	// 留着会在下一杆凭旧钩位凭空出现。Batch 同理——上一杆的渔获若没等到
+	// 14/5/14/6 就被新抛投顶掉，说明玩家放弃了入护/放生，不能留到下一杆。
+	st.Extra = nil
+	st.Batch = nil
+	st.HoldMulti = false
 	st.hookedChatFishGUID = ""
 	st.PendingRepush = 0
 	st.LuckRepush = 0
@@ -2264,6 +3069,7 @@ func (s *Server) scheduleBiteState(sess *Session, st *FishState, preserveHooked,
 		st.NeedBite = false
 	}
 	st.Bonus = bonus
+	st.storePaceState(pace)
 	delay := s.biteDelayInWeather(st, sess.weatherAt(st.Loc, now), now, bonus)
 	delay *= s.hookBiteDelayFactorForRig(sess.pushCtx(), sess.Userid, st.GearGuid)
 	s.armBiteTimerLocked(sess.Userid, st, now.Add(time.Duration(delay*float64(time.Second))))
@@ -2297,6 +3103,9 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 	if sess != nil {
 		sess.updateHappyHour(time.Now(), false)
 	}
+	// 饵效控速惰性补算：重启恢复的杆 PaceKnown=false，触发前补一次节奏因子，
+	// 防止恢复后的杆按中性因子（无节奏控制）判鱼。
+	s.ensurePaceState(sess, st)
 	st.mu.Lock()
 	if ticket.generation != st.castGeneration || ticket.sequence != st.biteTicket {
 		st.mu.Unlock()
@@ -2330,7 +3139,8 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 		base = st.FallTs
 	}
 	lure := rigTypeLureFamily[st.RigType]
-	floor := biteFloorDelay(s.effectiveBiteDelaySettings(st), lure)
+	floorCfg := s.effectiveBiteDelaySettings(st)
+	floor := s.paceFloorShrink(floorCfg, st, lure, biteFloorDelay(floorCfg, lure))
 	minWait := time.Second
 	if lure {
 		minWait = 500 * time.Millisecond
@@ -2373,6 +3183,7 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 		f.Drift = st.LureMotionMask&lureMotionDriftBit != 0
 		f.CastM = st.CastM
 		f.IsNight = worldIsNight(now.Unix())
+		f.BiteUnix = now.Unix()
 		if !f.BaitsKnown {
 			f.BaitGUIDs, f.BaitsKnown = s.biteBaitSnapshot(s.dbCtx(), st.GearGuid)
 		}
@@ -2401,6 +3212,10 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 	}
 	// 窝料死窝闸门：同一格子堆超过 15 份开始压开口率，22 份以上不排咬钩。
 	probability *= s.groundbaitBiteGate(s.dbCtx(), uid, st.Loc, x, z, hasPos, st.Spot, st.RigType)
+	// 饵效控速：单轮判定概率按对口分三档（路亚轮单独一套参数）。
+	// 受当前开关门控（审查 P2-1）：运行中热关闭后，残留的 st.PaceKnown
+	// 不得继续压低本杆开口率。
+	probability *= s.rodPaceProb(st)
 	if rand.Float64() >= probability {
 		s.log.Info("鱼口未命中，继续等待", "rod", shortGUID(st.GearGuid), "rig_type", st.RigType)
 		s.emptyWeatherBiteLocked(sess, st, now)
@@ -2412,18 +3227,46 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 	lureLayer, lureAction, lureMask := st.LureLayer, st.LureAction, st.LureMotionMask
 	lureSpeed := st.ReelSetting
 	boatOn, boatKnown := st.onBoatLocked(now.Unix())
-	f := s.rollFishForRig(s.dbCtx(), uid, st.GearGuid, st.Loc, st.Bait, st.Bonus, fishRollContext{
-		x: x, z: z, hasPos: hasPos, spot: st.Spot, depthCM: baitDepthCM,
-		lureLayer: lureLayer, lureAction: lureAction, lureMask: lureMask, lureSpeed: lureSpeed, rigType: rigType,
-		onBoat: boatOn, boatKnown: boatKnown,
-		now: now, weather: sess.weatherAt(st.Loc, now), happyBite: sess.currentHappyHour().BiteBonus,
-	})
+	buildRollCtx := func(pity bool) fishRollContext {
+		var reason string
+		return fishRollContext{
+			x: x, z: z, hasPos: hasPos, spot: st.Spot, depthCM: baitDepthCM,
+			lureLayer: lureLayer, lureAction: lureAction, lureMask: lureMask, lureSpeed: lureSpeed, rigType: rigType,
+			onBoat: boatOn, boatKnown: boatKnown, pityEnv: pity,
+			emptyReason: &reason,
+			now:         now, weather: sess.weatherAt(st.Loc, now), happyBite: sess.currentHappyHour().BiteBonus,
+		}
+	}
+	rollCtx := buildRollCtx(false)
+	f := s.rollFishForRig(s.dbCtx(), uid, st.GearGuid, st.Loc, st.Bait, st.Bonus, rollCtx)
 	if f == nil {
-		s.log.Info("本轮无符合条件的鱼，继续等待", "rod", shortGUID(st.GearGuid), "rig_type", st.RigType)
+		st.EmptyStreak++
+		// 保底杂口（bite_gate_pity_rounds，0=关）：连续空杆后放宽环境类因素重掷一次，
+		// 食性硬门不动——泥鳅依然不攻亮片，只是「鱼群不在/水层不对」不再死寂。
+		if pityN := int(s.tunableF("bite_gate_pity_rounds", 0)); pityN > 0 && st.EmptyStreak >= pityN {
+			pityCtx := buildRollCtx(true)
+			if f = s.rollFishForRig(s.dbCtx(), uid, st.GearGuid, st.Loc, st.Bait, st.Bonus, pityCtx); f != nil {
+				st.EmptyStreak = 0
+				s.log.Info("保底杂口", "rod", shortGUID(st.GearGuid), "鱼种", f.Species, "连续空轮", pityN)
+			}
+		}
+	}
+	if f == nil {
+		// 空轮也带落点、区域命中与空因：后台对账用，不推玩家提示。
+		rollC := fishRollContext{x: x, z: z, hasPos: hasPos}
+		zoneNote := zoneHitNote(s.fishZonesFor(s.dbCtx(), st.Loc), rollC)
+		reason := "概率/权重全零"
+		if rollCtx.emptyReason != nil && *rollCtx.emptyReason != "" {
+			reason = *rollCtx.emptyReason
+		}
+		s.log.Info("本轮无符合条件的鱼，继续等待", "rod", shortGUID(st.GearGuid), "rig_type", st.RigType,
+			"x", math.Round(x), "z", math.Round(z), "网格", fishArea(st.Loc, rollC), "区域", zoneNote, "空因", reason,
+			"连续空轮", st.EmptyStreak)
 		s.emptyWeatherBiteLocked(sess, st, now)
 		st.mu.Unlock()
 		return
 	}
+	st.EmptyStreak = 0
 	// 鱼吃口扣份：窝被吃薄，死窝会自己缓过来（设计稿第 6 节）。
 	s.groundbaitConsumeBite(s.dbCtx(), uid, st.Loc, x, z, hasPos, st.Spot, s.tunableF("groundbait_consume_bite", 0.20))
 	if !f.BaitsKnown {
@@ -2439,13 +3282,44 @@ func (s *Server) onRodBiteTimerTicket(uid int64, st *FishState, ticket fishingTi
 	f.Drift = lureMask&lureMotionDriftBit != 0
 	f.CastM = st.CastM
 	f.IsNight = worldIsNight(now.Unix())
+	f.BiteUnix = now.Unix()
 	f.QualBait = s.qualificationMountedBait(s.dbCtx(), f.BaitGUIDs)
+	// 多钩钓组：主鱼定下来后，其余已挂饵的钩位各自掷骰。
+	// 闸门在 rollExtraFishForRig 内部完成，返回的鱼已经绑定各自钩位。
+	cfg := s.multiHookConfig()
+	extras := s.rollExtraFishForRig(s.dbCtx(), uid, st.GearGuid, st.Loc, st.Bait, st.Bonus, rollCtx, f, cfg)
+	if len(extras) > 0 {
+		s.applyMultiHookPullBudget(append([]*RolledFish{f}, extras...),
+			s.multiHookStrengthKg(s.dbCtx(), uid, st.GearGuid), cfg.PullK)
+		s.log.Info("多钩同杆出鱼", "rod", shortGUID(st.GearGuid), "主鱼_g", f.WeightG,
+			"额外", len(extras), "额外_g", extraWeights(extras))
+	}
+	st.Extra = extras
+	st.HoldMulti = false
 	st.Pending = f
 	st.PendingRepush = 0
 	gear, generation := st.GearGuid, st.castGeneration
 	st.mu.Unlock()
 
 	s.pushPendingBite(sess, st, f, gear, generation)
+	if !s.extraEntityPushEnabled() || s.extraPushDeferredOnStrike() {
+		// 额外鱼实体默认不派（见 extraEntityPushEnabled：客户端只有一条鱼模型，
+		// 派了也看不见，还会把主鱼挤出搏鱼态）；需要派时也等刺鱼确认后再补。
+		s.deferExtrasUntilStrike(st, gear)
+	} else {
+		s.pushExtraFish(sess, st, gear, rigType)
+	}
+}
+
+// extraWeights 汇总额外鱼重量，仅用于日志。
+func extraWeights(fish []*RolledFish) []int64 {
+	out := make([]int64, 0, len(fish))
+	for _, f := range fish {
+		if f != nil {
+			out = append(out, f.WeightG)
+		}
+	}
+	return out
 }
 
 // repushPending14_14 在 14/12 f0=3 时于 6 秒后重推同一尾 pending 鱼，
@@ -2815,8 +3689,10 @@ var _ = wiregen.MakeObj
 // ---- 鱼搏斗自耗（本地 mod，0.9.57）----
 //
 // 客户端疲劳积分器（docs/analysis-fish-fight-physics-fish-stamina-2026-11-07.md）：
-//   疲劳 += (1 - f6) × 5 × 倍率 × 挣扎功率 × dt
-//   力量比 = clamp(1 - (疲劳/容量)^2, 0.1, 1)
+//
+//	疲劳 += (1 - f6) × 5 × 倍率 × 挣扎功率 × dt
+//	力量比 = clamp(1 - (疲劳/容量)^2, 0.1, 1)
+//
 // 也就是说 fish 27.f6 是「抗疲劳系数」：(1-f6) 越大，鱼自己的挣扎越耗它体力。
 // 服务端能合法影响的只有 f6（f5 只改总力气体量），所以这里用 fish_fatigue_scale
 // 直接压缩 (1-f6)：scale=1 与官方抓包完全一致，>1 让鱼搏斗更耗体力。
@@ -2850,7 +3726,9 @@ func (s *Server) fishFatigueScale() float64 {
 }
 
 // fishFatigueEffectiveScale 合成最终自耗倍率：
-//   总倍率(fish_fatigue_scale) × (1 + (行为型档-1) × 行为型开关)
+//
+//	总倍率(fish_fatigue_scale) × (1 + (行为型档-1) × 行为型开关)
+//
 // 开关为 0 时恒等于总倍率（默认即官服口径），设 1 才启用完整的行为型差异。
 func fishFatigueEffectiveScale(species string, global, profileScale float64) float64 {
 	if global <= 0 {

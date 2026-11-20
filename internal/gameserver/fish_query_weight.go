@@ -35,8 +35,8 @@ func (d fishWeightLaw) survival(weight float64) float64 {
 
 func (d fishWeightLaw) retainedMass(minimumG int64, luck float64) float64 {
 	if d.roundedSurvival != nil {
-		q := d.roundedSurvival(minimumG)
-		return q * (1 + clampFloat(luck, 0, 1)*(1-q))
+		// 档位比例模式按配置绝对占比，TrophyLuck 不得把高档概率二次放大。
+		return d.roundedSurvival(minimumG)
 	}
 	if d.scale <= 0 || d.mass == nil || d.upper <= d.lower {
 		return 0

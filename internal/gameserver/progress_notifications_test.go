@@ -203,11 +203,11 @@ func TestProgressNotificationsRequireRealLevelChange(t *testing.T) {
 		oldLevel, oldXP, weight, gain int64
 		wantLevel, wantUpgrades       int64
 	}{
-		{"below_boundary", 5, baseXp(6) - 401, 1120, 400, 5, 0},
-		{"exact_boundary", 5, baseXp(6) - 400, 1120, 400, 6, 1},
-		{"multiple_levels", 1, 0, 11208, 4000, 6, 1},
-		{"level_50_without_boundary", 50, baseXp(50) + 10, 1120, 400, 50, 0},
-		{"maximum_level", maxLevel, baseXp(maxLevel) + 10, 1120, 400, maxLevel, 0},
+		{"below_boundary", 5, baseXp(6) - 458, 1120, 457, 5, 0},
+		{"exact_boundary", 5, baseXp(6) - 457, 1120, 457, 6, 1},
+		{"multiple_levels", 1, 0, 9000, 3672, 6, 1},
+		{"level_50_without_boundary", 50, baseXp(50) + 10, 1120, 457, 50, 0},
+		{"maximum_level", maxLevel, baseXp(maxLevel) + 10, 1120, 457, maxLevel, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := newProgressSrv(t)
@@ -251,7 +251,7 @@ func TestProgressNotificationsAccumulateAndDoNotReplayLevelUp(t *testing.T) {
 		if i == 3 {
 			wantLevel, wantUpgrades = 6, 1
 		}
-		assertProgressNotificationLevel(t, sess, wantLevel, baseXp(5)+400*i)
+		assertProgressNotificationLevel(t, sess, wantLevel, baseXp(5)+457*i)
 		assertProgressCatchProfile(t, result, wantLevel)
 		assertProgressCatchLevelGain(t, result, int64(wantUpgrades))
 		if got := progressNotificationCount(progressNotificationBatch(t, sess, received), 6); got != wantUpgrades {
@@ -259,7 +259,7 @@ func TestProgressNotificationsAccumulateAndDoNotReplayLevelUp(t *testing.T) {
 		}
 	}
 	result := progressNotificationCatch(t, sess, fish)
-	assertProgressNotificationLevel(t, sess, 6, baseXp(5)+1200)
+	assertProgressNotificationLevel(t, sess, 6, baseXp(5)+1371)
 	assertProgressCatchProfile(t, result, 6)
 	assertProgressCatchLevelGain(t, result, 0)
 	if got := progressNotificationCount(progressNotificationBatch(t, sess, received), 6); got != 0 {
@@ -271,7 +271,7 @@ func TestProgressNotificationsAccumulateAndDoNotReplayLevelUp(t *testing.T) {
 	restarted.SetDB(db)
 	next, nextReceived := progressNotificationSession(t, restarted, 1703)
 	result = progressNotificationCatch(t, next, fish)
-	assertProgressNotificationLevel(t, next, 6, baseXp(5)+1200)
+	assertProgressNotificationLevel(t, next, 6, baseXp(5)+1371)
 	assertProgressCatchProfile(t, result, 6)
 	assertProgressCatchLevelGain(t, result, 0)
 	if got := progressNotificationCount(progressNotificationBatch(t, next, nextReceived), 6); got != 0 {
@@ -304,7 +304,7 @@ func TestProgressNotificationsPersonalRecordDoesNotMeanLevelUp(t *testing.T) {
 			if err != nil || receipt == nil || !receipt.replayed || receipt.isRecord != tc.isRecord || receipt.prevBest != tc.previousBest {
 				t.Fatalf("个人纪录事实不符: receipt=%+v err=%v", receipt, err)
 			}
-			assertProgressNotificationLevel(t, sess, 50, baseXp(50)+410)
+			assertProgressNotificationLevel(t, sess, 50, baseXp(50)+467)
 			assertProgressCatchProfile(t, result, 50)
 			assertProgressCatchLevelGain(t, result, 0)
 			if got := progressNotificationCount(progressNotificationBatch(t, sess, received), 6); got != 0 {
