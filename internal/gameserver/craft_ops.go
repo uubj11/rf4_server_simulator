@@ -1042,9 +1042,11 @@ func hCraft(ctx *Ctx) ([]byte, bool) {
 			if !containsGUID(touched, entry.EchoGUID) {
 				touched = append(touched, entry.EchoGUID)
 			}
-			// 产量按鱼重计件（官服语义 512g→1 块、3.4kg→3 块），不按定义
-			// 单位量折算——fish_pieces 单位量 30，按单位折会一刀 30 块。
-			if qerr := rewriteCraftOutputQty(producedRow, cutFishPiecesForWeightG(entry.WeightG)); qerr != nil {
+			// 产量按本服连续出肉率（fishPieceCountForWeight）计件：25kg 以下
+			// 出肉率 28%→45% 线性上升，每块 7g；不按定义单位量折算
+			// （fish_pieces 单位量 30，按单位折会一刀 30 块）。官服阶梯
+			// cutFishPiecesForWeightG 仅作参照保留，不再参与产出。
+			if qerr := rewriteCraftOutputQty(producedRow, fishPieceCountForWeight(entry.WeightG)); qerr != nil {
 				return fail("鱼块产量改写失败", "err", qerr)
 			}
 		} else {

@@ -45,7 +45,7 @@ func craftOKSlots(t *testing.T, srv *Server, uid int64, recipe string, slots []c
 }
 
 // seedKeepnetFishWeightG 与 seedKeepnetFish 同构，但鱼重可指定（克）：
-// 切鱼产量按鱼重阶梯（cutFishPiecesForWeightG），固定 1200g 测不出阶梯。
+// 切鱼产量按本服连续出肉率（fishPieceCountForWeight），固定 1200g 测不出差异。
 func seedKeepnetFishWeightG(t *testing.T, db *store.DB, uid int64, guid, species string, weightG int64) {
 	t.Helper()
 	if _, err := db.SQL.Exec(`
@@ -60,7 +60,7 @@ func seedKeepnetFishWeightG(t *testing.T, db *store.DB, uid int64, guid, species
 // TestCraftCutFishConsumesSelectedKeepnetFish 切鱼块必须吃掉选中的那尾鱼：
 // 配方表零材料（craft_bait_cut_fish materials_json=[]），材料槽 guid 直接指向
 // 鱼护 echo guid。不接线时会零成本无限产出（2026-11-13 实机白嫖实测）。
-// 官服产量按鱼重阶梯（cutFishPiecesForWeightG）：1200g 的鱼整 1 块，不按
+// 本服产量按连续出肉率（fishPieceCountForWeight）：1200g 出 49 块，不按
 // 定义单位量 30 折算。
 func TestCraftCutFishConsumesSelectedKeepnetFish(t *testing.T) {
 	db := openRecipeTestDB(t)
@@ -80,14 +80,13 @@ func TestCraftCutFishConsumesSelectedKeepnetFish(t *testing.T) {
 	if keepnetGUIDs(t, db, uid)[fishGUID] {
 		t.Fatal("选中的鱼应已从鱼护移除")
 	}
-	if got := countOfItem(t, srv, ctx0, uid, "fish_pieces"); got != 1 {
-		t.Fatalf("1200g 的鱼应产出 1 块（按鱼重计件），实得 %d", got)
+	if got := countOfItem(t, srv, ctx0, uid, "fish_pieces"); got != 49 {
+		t.Fatalf("1200g 的鱼应产出 49 块（连续出肉率 28.8%%），实得 %d", got)
 	}
 }
 
-// TestCraftCutFishPiecesScaleWithWeight 官服切鱼产量随鱼重阶梯：约整公斤
-// 每公斤 1 块、不足 1 公斤 1 块（社区实测 512g→1、2kg→2、3.4kg→3，
-// 2026-11-13 检索，见 spec 证据节）。3400g→3 块、700g→1 块。
+// TestCraftCutFishPiecesScaleWithWeight 本服切鱼产量随鱼重连续增长：
+// 3400g→147 块、700g→28 块（出肉率 30.3%% / 28.4%%，每块 7g）。
 func TestCraftCutFishPiecesScaleWithWeight(t *testing.T) {
 	db := openRecipeTestDB(t)
 	srv := newSkillsCraftServer(t, db)
@@ -101,8 +100,8 @@ func TestCraftCutFishPiecesScaleWithWeight(t *testing.T) {
 		weightG int64
 		pieces  int64
 	}{
-		{"c1a00000000000000000000000000031", 3400, 3},
-		{"c1a00000000000000000000000000032", 700, 1},
+		{"c1a00000000000000000000000000031", 3400, 147},
+		{"c1a00000000000000000000000000032", 700, 28},
 	} {
 		seedKeepnetFishWeightG(t, db, uid, c.guid, "s.orfe", c.weightG)
 		slots := []craftSlot{{ItemID: "bait_fishForCut", GUID: c.guid, Species: "s.orfe"}}
@@ -110,8 +109,8 @@ func TestCraftCutFishPiecesScaleWithWeight(t *testing.T) {
 			t.Fatalf("%dg 的鱼切鱼应成功", c.weightG)
 		}
 	}
-	if got := countOfItem(t, srv, ctx0, uid, "fish_pieces"); got != 4 {
-		t.Fatalf("3400g+700g 两条鱼应共产出 3+1=4 块，实得 %d", got)
+	if got := countOfItem(t, srv, ctx0, uid, "fish_pieces"); got != 175 {
+		t.Fatalf("3400g+700g 两条鱼应共产出 147+28=175 块，实得 %d", got)
 	}
 }
 

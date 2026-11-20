@@ -1645,11 +1645,15 @@ func (s *Server) sampleWeightDB(ctx context.Context, key string, modeMult, scale
 	if s.tunableF("grade_ratio_enabled", 1) == 1 {
 		settle := s.cachedSettleStatics(ctx, c, key)
 		ratioLines := cachedGradeLines{val: &settle[0], trophy: &settle[1], blue: &settle[2]}
-		// 未达标档下界：species_weight.min_g 优先（官服口径），未登记时退回
-		// 达标线 15% 钳到 [1,50] g 的兜底。
-		if minG, ok := s.cachedSpeciesMinG(ctx, c, key); ok {
-			ratioLines.minG = &minG
-		} else if floor := belowGradeFloorFromVal(settle[0]); floor > 0 {
+		// 未达标档下界：本服 spawn_min_ratio 生效时以达标线 15% 为底，
+		// species_weight.min_g（官服口径）只在 spawn_min_ratio 关闭（ratio=0）时兜底。
+		floor := belowGradeFloorFromVal(settle[0])
+		if !s.localSpawnFloorActive() {
+			if minG, ok := s.cachedSpeciesMinG(ctx, c, key); ok {
+				floor = minG
+			}
+		}
+		if floor > 0 {
 			ratioLines.minG = &floor
 		}
 		if w, ok := s.sampleWeightByGradeRatio(ratioLines, modeMult, scale, capG, c.mapLevel); ok {
@@ -1745,10 +1749,10 @@ func (s *Server) gradeRatioModel(l cachedGradeLines, modeMult, scale, capG float
 	if l.blue != nil {
 		supf = float64(*l.blue)
 	}
-	// 下界先按官服口径（min_g 优先，缺失时 15% 钳 [1,50] g），再用本服
-	// spawn_min_ratio 的硬下限压顶——本服更狠时才生效，ratio=0 完全回落到官服口径。
+	// 下界以本服口径为主：达标线 15% 兜底 + spawn_min_ratio 硬下限压顶。
+	// species_weight.min_g（官服口径）只在 ratio=0（本服下限关闭）时接管。
 	lo := float64(belowGradeFloorFromVal(int64(math.Round(vf))))
-	if l.minG != nil && *l.minG > 0 && float64(*l.minG) < vf {
+	if !s.localSpawnFloorActive() && l.minG != nil && *l.minG > 0 && float64(*l.minG) < vf {
 		lo = float64(*l.minG)
 	}
 	if f := s.spawnFloorG(vf); f > lo {

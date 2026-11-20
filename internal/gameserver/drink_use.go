@@ -116,18 +116,17 @@ func (s *Server) useAlcoholDrink(ctx *Ctx) ([]byte, bool) {
 		return failed(err)
 	}
 	rule, isDrink := drinkRuleForItem(def.ItemID)
-	restoreKind, isConsumable := "", false
-	if !isDrink {
-		restoreKind, isConsumable = consumableRestoreForItem(def.ItemID)
-		// 状态机总开关关闭时食品/热饮维持旧行为（落回通用 handler，不扣不恢复）。
-		if isConsumable && !cond.Enabled {
-			isConsumable = false
-		}
-		// 健康开关关闭时药品同样旁路：Sorbimax 不扣物也无恢复效果，
-		// 落回通用 handler，避免"吃了白扔"。
-		if isConsumable && restoreKind == "medicine" && !cond.HealthEnabled {
-			isConsumable = false
-		}
+	// 本服口径：热红酒这类"既是酒又是热饮"的物品两套规则并行——经验加成走
+	// drink 规则，暖身/饱食走消耗品恢复规则。普通酒不在恢复表里，行为不变。
+	restoreKind, isConsumable := consumableRestoreForItem(def.ItemID)
+	// 状态机总开关关闭时食品/热饮维持旧行为（落回通用 handler，不扣不恢复）。
+	if isConsumable && !cond.Enabled {
+		isConsumable = false
+	}
+	// 健康开关关闭时药品同样旁路：Sorbimax 不扣物也无恢复效果，
+	// 落回通用 handler，避免"吃了白扔"。
+	if isConsumable && restoreKind == "medicine" && !cond.HealthEnabled {
+		isConsumable = false
 	}
 	if !isDrink && !isConsumable {
 		return nil, false

@@ -17,6 +17,13 @@ const (
 )
 
 // spawnFloorG 返回该鱼种的重量下限（克）。达标线缺失或关闭时返回 1。
+// localSpawnFloorActive 本服硬下限（spawn_min_ratio>0）是否生效。
+// 生效时本服下限是唯一产量口径，species_weight.min_g（官服口径）只作为
+// ratio=0 时的兜底，不再参与压低下界。
+func (s *Server) localSpawnFloorActive() bool {
+	return s.tunableF(tunableSpawnMinRatio, defSpawnMinRatio) > 0
+}
+
 func (s *Server) spawnFloorG(qualifiedG float64) float64 {
 	if qualifiedG <= 0 {
 		return 1
