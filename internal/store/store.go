@@ -107,6 +107,11 @@ func (d *DB) Migrate() error {
 	if _, err := d.SQL.Exec(`UPDATE schema_migrations SET version=82, name='migrations/00082_spot_catch_player_zone.sql' WHERE name='migrations/00064_spot_catch_player_zone.sql'`); err != nil {
 		return fmt.Errorf("兼容本地分支迁移编号 00064: %w", err)
 	}
+	// 历史合并回退留下的「登记了但对象没建」的幽灵行：先删掉再重放，
+	// 否则这些迁移永远被当成已应用（表/列实际缺失，运行期静默降级）。
+	if err := repairPhantomMigrationRows(d.SQL); err != nil {
+		return fmt.Errorf("修复幽灵迁移登记: %w", err)
+	}
 	entries, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {
 		return err
@@ -285,6 +290,74 @@ var renumberedColumnMigrations = map[string]struct {
 	"migrations/00067_fish_zone_circle.sql":  {table: "fish_zone", columns: []string{"cx", "cz", "radius"}},
 	"migrations/00068_catch_log_hook.sql":    {table: "catch_log", columns: []string{"hook"}, remains: `CREATE INDEX IF NOT EXISTS idx_catch_log_fish_hook ON catch_log(fish_key, hook);`},
 	"migrations/00069_fish_zone_sea_set.sql": {table: "fish_zone", columns: []string{"sea_zones_json"}},
+	"migrations/00082_spot_catch_player_zone.sql": {table: "spot_catch_player", columns: []string{"spot"}},
+	"migrations/00083_spot_catch_player_hud.sql":  {table: "spot_catch_player", columns: []string{"hud"}},
+}
+
+// migrationArtifacts 描述每个迁移「跑完必然存在」的 schema 对象，用于识别
+// 幽灵登记行：登记在 schema_migrations 里、但对象不存在，说明 SQL 从没真正跑过
+// （多发生在合并反复回退、按文件名改号之后）。
+// columns 为空表示只校验表；非空时要求「全部列都在」，部分存在视为不一致，
+// 交给 renumberedColumnMigrations 的列守卫兜住重放。
+var migrationArtifacts = map[string]struct {
+	table   string
+	columns []string
+}{
+	"migrations/00060_skill_cast_effects.sql":          {table: "skill_cast_effect_def"},
+	"migrations/00061_rf4records_catch.sql":            {table: "rf4records_catch"},
+	"migrations/00065_fish_zone.sql":                   {table: "fish_zone"},
+	"migrations/00066_fish_zone_cells.sql":             {table: "fish_zone", columns: []string{"cells_json"}},
+	"migrations/00067_fish_zone_circle.sql":            {table: "fish_zone", columns: []string{"cx", "cz", "radius"}},
+	"migrations/00068_catch_log_hook.sql":              {table: "catch_log", columns: []string{"hook"}},
+	"migrations/00069_fish_zone_sea_set.sql":           {table: "fish_zone", columns: []string{"sea_zones_json"}},
+	"migrations/00078_pity_lane_aggregate.sql":         {table: "fish_hunt_pity"},
+	"migrations/00080_growth_set.sql":                  {table: "growth_set_state"},
+	"migrations/00081_spot_catch_player.sql":           {table: "spot_catch_player"},
+	"migrations/00082_spot_catch_player_zone.sql":      {table: "spot_catch_player", columns: []string{"spot"}},
+	"migrations/00083_spot_catch_player_hud.sql":       {table: "spot_catch_player", columns: []string{"hud"}},
+	"migrations/00084_map_proficiency.sql":             {table: "map_proficiency"},
+}
+
+// repairPhantomMigrationRows 删除对象缺失的迁移登记行（含已退役的 900000x 行），
+// 让 Migrate 正常重放。存在部分列缺失时整行也删，重放由列守卫跳过已建的列。
+func repairPhantomMigrationRows(sqlDB *sql.DB) error {
+	// 只有「确实建过库」的数据库才做修复：合成/精简夹具（例如只为验证 00007
+	// 手工登记一批行、只建了 rig_component）不能用对象缺失来推断幽灵行，否则
+	// 会把依赖前序迁移的表当成幽灵重放而失败。profile 是 00001 就建的核心表。
+	var established int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='profile'`).Scan(&established); err != nil {
+		return err
+	}
+	if established == 0 {
+		return nil
+	}
+	for name, spec := range migrationArtifacts {
+		var tableRows int
+		if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			spec.table).Scan(&tableRows); err != nil {
+			return err
+		}
+		missing := tableRows == 0
+		if !missing && len(spec.columns) > 0 {
+			present := 0
+			for _, col := range spec.columns {
+				var n int
+				if err := sqlDB.QueryRow(
+					fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name=?`, spec.table), col).Scan(&n); err != nil {
+					return err
+				}
+				present += n
+			}
+			missing = present < len(spec.columns)
+		}
+		if !missing {
+			continue
+		}
+		if _, err := sqlDB.Exec(`DELETE FROM schema_migrations WHERE name=?`, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // catchTackleCatBackfillSQL 是 00055 迁移里除 ALTER TABLE 之外的部分（回填 + 索引）。
