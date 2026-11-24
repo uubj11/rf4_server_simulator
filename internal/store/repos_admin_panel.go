@@ -325,12 +325,23 @@ func (d *DB) ListAdminStores(ctx context.Context) ([]*AdminStoreView, error) {
 	}
 	sort.Strings(storeIDs)
 
+	// 通用地图钓鱼站共享的价格表只汇总一次，避免 205 家店重复遍历实录。
+	fishingPrices, err := d.loadFishingPrices(ctx, catalog, recorded)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make([]*AdminStoreView, 0, len(storeIDs))
 	for _, storeID := range storeIDs {
 		base, source, def, known := resolveShopBase(storeID, catalog, recorded)
 		base, _, err = d.augmentShopShelf(ctx, def, base)
 		if err != nil {
 			return nil, err
+		}
+		// 与 effectiveShopShelf 保持一致：补齐商品之后再补缺失价格，
+		// 否则运行时补出来的商品（如只在 02 有银价的款式）补不到。
+		if known && def.Kind == 0 && len(def.Brands) == 0 {
+			fillMissingPrices(base, fishingPrices)
 		}
 		overrides := allOverrides[storeID]
 		effective := applyShopOverrides(base, overrides)

@@ -486,3 +486,104 @@ func TestCafeStoreShelfComesFromStoreDefinition(t *testing.T) {
 		t.Fatalf("咖啡馆货架来源=%q want=%q", shelf.Source, shopShelfSourceStore)
 	}
 }
+
+// hasShopPrice 判断货架里是否有指定商品，用于“不应补入”的断言。
+func hasShopPrice(rows []*ShopPrice, itemID string) bool {
+	for _, row := range rows {
+		if row.ItemID == itemID {
+			return true
+		}
+	}
+	return false
+}
+
+// 通用地图钓鱼站共享价格表：货架上已有、但缺银价或金币价的商品，
+// 用别的钓鱼站实录里的真实价格补上；不新增商品，也不覆盖已有价格。
+func TestShopCatalogFillsMissingPricesAcrossFishingStores(t *testing.T) {
+	db := openShopCatalogTestDB(t)
+	ctx := context.Background()
+	if _, err := db.SQL.Exec(`INSERT INTO shop_item(store_id,item_id,silver,gold,stock) VALUES
+		('craft_baits_012','need_silver',9999,100,1),
+		('craft_baits_012','need_gold',1234,150,1),
+		('fishing_store_01','need_silver',0,100,5),
+		('fishing_store_01','need_gold',1234,0,6),
+		('fishing_store_01','keep_both',100,10,7),
+		('fishing_store_02','need_silver',5678,100,9),
+		('fishing_store_02','keep_both',999,99,9),
+		('fishing_store_02','only_in_02',999,0,1);
+		INSERT INTO item_price(item_id,silver,gold,stock) VALUES('need_gold',0,200,0);`); err != nil {
+		t.Fatal(err)
+	}
+
+	// fishingstore_006 复用 fishing_store_01 实录：应在原条目上补价格。
+	other, err := db.ShopItems(ctx, "fishingstore_006")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 3 {
+		t.Fatalf("补价格不得新增或删除商品: %+v", other)
+	}
+	if p := findShopPrice(t, other, "need_silver"); p.Silver != 5678 || p.Gold != 100 || p.Stock != 5 {
+		t.Fatalf("缺银价应取多店中的最小正值: %+v", p)
+	}
+	if p := findShopPrice(t, other, "need_gold"); p.Silver != 1234 || p.Gold != 150 || p.Stock != 6 {
+		t.Fatalf("缺金币价应取实录与 item_price 中的最小正值: %+v", p)
+	}
+	if p := findShopPrice(t, other, "keep_both"); p.Silver != 100 || p.Gold != 10 {
+		t.Fatalf("已有价格不得被覆盖: %+v", p)
+	}
+	if hasShopPrice(other, "only_in_02") {
+		t.Fatal("不得新增别店独有的商品")
+	}
+
+	// 源店自己已完整的行保持原样。
+	second, err := db.ShopItems(ctx, "fishing_store_02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := findShopPrice(t, second, "keep_both"); p.Silver != 999 || p.Gold != 99 {
+		t.Fatalf("源店原价被改动: %+v", p)
+	}
+	if p := findShopPrice(t, second, "only_in_02"); p.Silver != 999 || p.Gold != 0 {
+		t.Fatalf("源店独有商品被改动: %+v", p)
+	}
+
+	// 品牌店不参与通用钓鱼站的价格补齐。
+	brand, err := db.ShopItems(ctx, "ny_bazaarStore_001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasShopPrice(brand, "need_silver") {
+		t.Fatal("品牌店不得补入通用钓鱼站的商品")
+	}
+}
+
+// 运行时按 item_price 补出来的商品（别的钓鱼站没有实录行），
+// 也要能从有实录的钓鱼站补到缺失的银价。
+func TestShopCatalogFillsSilverForSupplementedFishingItems(t *testing.T) {
+	db := openShopCatalogTestDB(t)
+	ctx := context.Background()
+	if _, err := db.SQL.Exec(`INSERT INTO item_def(numeric_id,item_id,category,kind,brand,attrs_json) VALUES
+		(991101,'base_rod',6,'rod','','{}'),
+		(991102,'spin_shared',6,'rod_spinning','','{}');
+		INSERT INTO item_catalog(item_id,name,name_zh,kind,numeric_id) VALUES
+		('base_rod','Base Rod','Base Rod','rod',991101),
+		('spin_shared','Shared Rod 10000','Shared Rod 10000','rod_spinning',991102);
+		INSERT INTO item_price(item_id,silver,gold,stock) VALUES('spin_shared',0,100,0);
+		INSERT INTO shop_item(store_id,item_id,silver,gold,stock) VALUES
+		('fishing_store_01','base_rod',100,0,1),
+		('fishing_store_02','spin_shared',5678,100,1);`); err != nil {
+		t.Fatal(err)
+	}
+
+	// fishingstore_006 复用 01 的 base_rod，augment 会按 item_price 补出
+	// spin_shared（只有金币价），随后应从 02 实录补上银价 5678。
+	rows, err := db.ShopItems(ctx, "fishingstore_006")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := findShopPrice(t, rows, "spin_shared")
+	if p.Silver != 5678 || p.Gold != 100 {
+		t.Fatalf("运行时补出的商品缺银价时未从别店实录补上: %+v", p)
+	}
+}

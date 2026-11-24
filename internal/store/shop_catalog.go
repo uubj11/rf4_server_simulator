@@ -299,6 +299,97 @@ func resolveShopBase(storeID string, catalog *shopKindCatalog, recorded map[stri
 	return nil, shopShelfSourceMissing, def, true
 }
 
+// shopItemPrice 是通用地图钓鱼站实录里同一商品的实际价格。
+type shopItemPrice struct {
+	Silver int64
+	Gold   int64
+}
+
+// unbrandedFishingPrices 汇总所有通用地图钓鱼站实录里每个商品的价格。
+// 只收 kind 0 且没有品牌限制的店（fishing_store_01/02、craft_baits_012 等），
+// 品牌店与杂货店不参与，避免把通用渔具的价格套到品牌货架。
+// 同一商品多个店都有价时取最小正值，即 max(min(price1, price2), 0)；
+// 0 表示缺失，不参与比较；全部缺失时保持 0。
+func unbrandedFishingPrices(catalog *shopKindCatalog, recorded map[string][]*ShopPrice) map[string]shopItemPrice {
+	storeIDs := make([]string, 0, len(recorded))
+	for storeID := range recorded {
+		def, ok := catalog.Stores[storeID]
+		if !ok || def.Kind != 0 || len(def.Brands) > 0 {
+			continue
+		}
+		storeIDs = append(storeIDs, storeID)
+	}
+	sort.Strings(storeIDs)
+
+	out := make(map[string]shopItemPrice)
+	for _, storeID := range storeIDs {
+		for _, row := range recorded[storeID] {
+			if row == nil {
+				continue
+			}
+			price := out[row.ItemID]
+			if row.Silver > 0 && (price.Silver <= 0 || row.Silver < price.Silver) {
+				price.Silver = row.Silver
+			}
+			if row.Gold > 0 && (price.Gold <= 0 || row.Gold < price.Gold) {
+				price.Gold = row.Gold
+			}
+			out[row.ItemID] = price
+		}
+	}
+	return out
+}
+
+// loadFishingPrices 汇总通用地图钓鱼站的价格：先取各店实录，
+// 再用全局 item_price 补上实录里缺失的银价或金币价。
+// 多来源都有价时取最小正值：max(min(price1, price2), 0)。
+// item_price 是全服静态价目，不作为商品上架依据，只用于补已有条目的价格。
+func (d *DB) loadFishingPrices(ctx context.Context, catalog *shopKindCatalog, recorded map[string][]*ShopPrice) (map[string]shopItemPrice, error) {
+	prices := unbrandedFishingPrices(catalog, recorded)
+
+	rows, err := d.SQL.QueryContext(ctx, `SELECT item_id, silver, gold FROM item_price`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var itemID string
+		var price shopItemPrice
+		if err := rows.Scan(&itemID, &price.Silver, &price.Gold); err != nil {
+			return nil, err
+		}
+		cur := prices[itemID]
+		if price.Silver > 0 && (cur.Silver <= 0 || price.Silver < cur.Silver) {
+			cur.Silver = price.Silver
+		}
+		if price.Gold > 0 && (cur.Gold <= 0 || price.Gold < cur.Gold) {
+			cur.Gold = price.Gold
+		}
+		prices[itemID] = cur
+	}
+	return prices, rows.Err()
+}
+
+// fillMissingPrices 只补货架上已有条目缺的价格，不新增商品、不改库存。
+// 银币价和金币价分别判断：缺哪个补哪个，已有价格保持原样。
+func fillMissingPrices(shelf []*ShopPrice, prices map[string]shopItemPrice) {
+	for _, row := range shelf {
+		if row == nil {
+			continue
+		}
+		price, ok := prices[row.ItemID]
+		if !ok {
+			continue
+		}
+		if row.Silver <= 0 && price.Silver > 0 {
+			row.Silver = price.Silver
+		}
+		if row.Gold <= 0 && price.Gold > 0 {
+			row.Gold = price.Gold
+		}
+	}
+}
+
 func applyShopOverrides(base []*ShopPrice, overrides map[string]shopOverrideValue) []*ShopPrice {
 	out := make([]*ShopPrice, 0, len(base))
 	for _, row := range base {
@@ -362,9 +453,25 @@ func (d *DB) effectiveShopShelf(ctx context.Context, storeID string) (*shopShelf
 		return nil, err
 	}
 	base, source, def, known := resolveShopBase(storeID, catalog, recorded)
+	// 通用地图钓鱼站共享价格表：货架上已有、但缺银价或金币价的商品，
+	// 用别的地图钓鱼站实录和全局 item_price 里的真实价格补上；
+	// 不新增商品、不改库存。品牌店、杂货店与未知店不参与。
+	// 补价必须放在 augmentShopShelf 之后：有些商品是运行时按 item_price
+	// 补出来的（例如只在 02 实录里带银价的款式），要在条目出现后再补价。
+	shareFishingPrices := known && def.Kind == 0 && len(def.Brands) == 0
+	var fishingPrices map[string]shopItemPrice
+	if shareFishingPrices {
+		fishingPrices, err = d.loadFishingPrices(ctx, catalog, recorded)
+		if err != nil {
+			return nil, err
+		}
+	}
 	base, _, err = d.augmentShopShelf(ctx, def, base)
 	if err != nil {
 		return nil, err
+	}
+	if shareFishingPrices {
+		fillMissingPrices(base, fishingPrices)
 	}
 	overrides := map[string]shopOverrideValue{}
 	if len(base) > 0 {
@@ -380,6 +487,9 @@ func (d *DB) effectiveShopShelf(ctx context.Context, storeID string) (*shopShelf
 	effective, _, err = d.augmentShopShelf(ctx, def, effective)
 	if err != nil {
 		return nil, err
+	}
+	if shareFishingPrices {
+		fillMissingPrices(effective, fishingPrices)
 	}
 	return &shopShelfResolution{
 		Base:         base,
