@@ -371,7 +371,7 @@ func TestRigSetTypeRejectsUnsupportedRodType(t *testing.T) {
 
 // TestRigTypeSwitchReturnsIncompatibleComponents 确保切换钓组时，不能把旧钓组
 // 专用的食笼和前导带进新钓组；两种钓组都支持的铃铛和鱼钩要继续保留。
-func TestRigTypeSwitchReturnsIncompatibleComponents(t *testing.T) {
+func TestRigTypeSwitchReturnsTerminalComponents(t *testing.T) {
 	srv, db := newRigTestServer(t)
 	ctx := context.Background()
 	const uid int64 = 1000001
@@ -402,28 +402,26 @@ func TestRigTypeSwitchReturnsIncompatibleComponents(t *testing.T) {
 		}
 	}
 
+	_, tip := baitTestMount(t, srv, rod.GUID, "ef_quiv_sens_0.25", 1, 0)
 	var released []*rigReleased
-	if !srv.rigSetType(ctx, uid, rod.GUID, 13, &released) { // BottomPaternoster: 只保留铃铛和钩
+	if !srv.rigSetType(ctx, uid, rod.GUID, 13, &released) { // BottomPaternoster: 共享槽位也不继承末端配件
 		t.Fatal("切换目标钓组失败")
 	}
-	if len(released) != 2 {
-		t.Fatalf("应退回 2 件不兼容配件，实得 %d", len(released))
+	if len(released) != 4 {
+		t.Fatalf("应退回 4 件末端配件，实得 %d", len(released))
 	}
-	for _, name := range []string{"feeder", "leader"} {
+	for _, name := range []string{"feeder", "leader", "bell", "hook"} {
 		row := mustItem(t, db, items[name].GUID)
 		if row.Container != "backpack" || row.RigGUID != "" {
 			t.Fatalf("%s 未退回背包: container=%q rig=%q", name, row.Container, row.RigGUID)
 		}
 	}
-	for _, name := range []string{"bell", "hook"} {
-		row := mustItem(t, db, items[name].GUID)
-		if row.Container != "rig" || row.RigGUID != rod.GUID {
-			t.Fatalf("%s 不应因切换被卸下: container=%q rig=%q", name, row.Container, row.RigGUID)
-		}
-	}
 	fresh := mustItem(t, db, rod.GUID)
 	comps := rigCompsOf(rigStoredF5(t, fresh))
-	for _, category := range []int64{31, 13} {
+	if _, _, ok := rigCompKeyForGUID(comps, tip); !ok {
+		t.Fatal("换型卸下了灵敏梢")
+	}
+	for _, category := range []int64{31, 13, 47, 12} {
 		if got := rigCompKeysOfCategory(comps, category); len(got) != 0 {
 			t.Fatalf("目标钓组不支持的品类 %d 仍残留: %v", category, got)
 		}

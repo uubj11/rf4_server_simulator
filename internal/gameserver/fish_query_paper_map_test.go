@@ -62,7 +62,7 @@ func TestFishQueryPaperMapClipsBeforeRanking(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			fullFactors, err := full.distributionFactors(t.Context(), "target")
+			fullFactors, err := full.distributionFactors(t.Context(), "target", 1.0/3)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -74,7 +74,7 @@ func TestFishQueryPaperMapClipsBeforeRanking(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i, area := range g.areas {
-				if factor, ok := byArea[area]; !ok || factor != g.factors["target"][i] {
+				if factor, ok := byArea[area]; !ok || factor != g.factors[distributionFactorCacheKey("target", 1.0/3)][i] {
 					t.Fatalf("clipping changed production fish distribution for %s", area)
 				}
 				r := g.bounds[i]

@@ -1,7 +1,8 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const {chromium}=require('playwright');
-const html=fs.readFileSync(path.join(__dirname,'web/index.html'),'utf8');
+const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'),'utf8');
 const README='# 测试项目\n\n这是 **README** 内容。\n\n| 项目 | 地址 |\n|---|---|\n| 部署 | [文档](docs/deploy.md) |\n\n\x60\x60\x60powershell\nbin\\launcher.exe\n\x60\x60\x60';
 test('about page renders embedded README markdown',async()=>{
  const browser=await chromium.launch({headless:true,executablePath:process.env.RF4_TEST_BROWSER});

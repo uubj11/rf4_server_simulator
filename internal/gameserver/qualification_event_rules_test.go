@@ -409,3 +409,37 @@ func TestEventNodesUseRealTargets(t *testing.T) {
 		}
 	}
 }
+
+// 9103 红虫香精鱼饵：红虫与红虫味煮饵计入；同为钩号上限 16 的蛆虫等小饵不计入。
+func TestEvent9103BloodwormBaits(t *testing.T) {
+	var rule qualificationRuleDef
+	for _, r := range eventQualificationRules {
+		if r.ID == 9103 {
+			rule = r
+			break
+		}
+	}
+	if rule.Counted == nil {
+		t.Fatal("未找到 9103 规则")
+	}
+	base := qualificationEvent{Species: "c.carp", LocLevel: evLocKomarino, BaitCat: 27}
+	for _, bait := range []string{"bloodworm", "boils_op_blw10", "boils_op_blw14", "boils_sb_ibw12", "boils_sb_ibw16", "boils_sb_ibw18"} {
+		ev := base
+		ev.Bait, ev.BaitFlavor = bait, 25
+		if key := rule.Counted(ev); key == "" {
+			t.Fatalf("%s 应计入 9103", bait)
+		}
+	}
+	for _, bait := range []string{"maggot", "maggot_caster", "scolytinae", "boils_op_cc16"} {
+		ev := base
+		ev.Bait, ev.BaitFlavor = bait, 16
+		if key := rule.Counted(ev); key != "" {
+			t.Fatalf("%s 不应计入 9103，实得键 %q", bait, key)
+		}
+	}
+	ev := base
+	ev.Bait, ev.LocLevel = "bloodworm", evLocLadoga
+	if key := rule.Counted(ev); key != "" {
+		t.Fatalf("克马羚诺也湖以外不应计入 9103，实得键 %q", key)
+	}
+}

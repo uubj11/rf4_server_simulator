@@ -26,30 +26,34 @@ var (
 // fishEcologyProfile 是鱼口系统使用的鱼种生态基线。水层使用 0=水面、1=水底
 // 的归一化坐标，后续可叠加具体钓点水深，不把某条河的实际米数写死在鱼种上。
 type fishEcologyProfile struct {
-	FishKey        string  `json:"fish_key"`
-	LayerMin       float64 `json:"layer_min"`
-	LayerPref      float64 `json:"layer_pref"`
-	LayerMax       float64 `json:"layer_max"`
-	TempMinC       float64 `json:"temp_min_c"`
-	TempPrefC      float64 `json:"temp_pref_c"`
-	TempMaxC       float64 `json:"temp_max_c"`
-	DielMask       int64   `json:"diel_mask"`
-	DielCurve      string  `json:"diel_curve"`
-	SeasonMask     int64   `json:"season_mask"`
-	DietJSON       string  `json:"diet_json"`
-	WeatherJSON    string  `json:"weather_json"`
-	ActionJSON     string  `json:"action_json"`
-	SubstrateJSON  string  `json:"substrate_json"`
-	ColorJSON      string  `json:"color_json"`
-	CurrentPref    float64 `json:"current_pref"`
-	Activity       float64 `json:"activity"`
-	LightPref      float64 `json:"light_pref"`
-	ClarityPref    float64 `json:"clarity_pref"`
-	Aggression     float64 `json:"aggression"`
-	RarityTier     int     `json:"rarity_tier"`
-	Enabled        bool    `json:"enabled"`
-	ProfileVersion int     `json:"profile_version"`
-	Source         string  `json:"-"`
+	FishKey       string  `json:"fish_key"`
+	LayerMin      float64 `json:"layer_min"`
+	LayerPref     float64 `json:"layer_pref"`
+	LayerMax      float64 `json:"layer_max"`
+	TempMinC      float64 `json:"temp_min_c"`
+	TempPrefC     float64 `json:"temp_pref_c"`
+	TempMaxC      float64 `json:"temp_max_c"`
+	DielMask      int64   `json:"diel_mask"`
+	DielCurve     string  `json:"diel_curve"`
+	SeasonMask    int64   `json:"season_mask"`
+	DietJSON      string  `json:"diet_json"`
+	WeatherJSON   string  `json:"weather_json"`
+	ActionJSON    string  `json:"action_json"`
+	SubstrateJSON string  `json:"substrate_json"`
+	ColorJSON     string  `json:"color_json"`
+	CurrentPref   float64 `json:"current_pref"`
+	Activity      float64 `json:"activity"`
+	LightPref     float64 `json:"light_pref"`
+	ClarityPref   float64 `json:"clarity_pref"`
+	Aggression    float64 `json:"aggression"`
+	RarityTier    int     `json:"rarity_tier"`
+	// Rarity 是客户端/官方口径的真实稀有度（0=普通 1=稀有 2=超稀有），
+	// 来自静态表 species_rarity；判鱼加成一律用它，不用合成出来的
+	// rarity_tier（后者与真实标签有 193/253 条对不上）。
+	Rarity         int    `json:"-"`
+	Enabled        bool   `json:"enabled"`
+	ProfileVersion int    `json:"profile_version"`
+	Source         string `json:"-"`
 }
 
 func (s *Server) ensureFishEcology(ctx context.Context) (int, error) {
@@ -119,12 +123,13 @@ func (s *Server) reloadFishEcologyCache(ctx context.Context) error {
 		return nil
 	}
 	rows, err := s.DB.SQL.QueryContext(ctx, `
-		SELECT fish_key, layer_min, layer_pref, layer_max,
-		       temp_min_c, temp_pref_c, temp_max_c, diel_mask, diel_curve,
-		       season_mask, diet_json, weather_json, action_json, substrate_json,
-		       color_json, current_pref, activity, light_pref, clarity_pref,
-		       aggression, rarity_tier, enabled, profile_version, source
-		FROM fish_ecology`)
+		SELECT e.fish_key, e.layer_min, e.layer_pref, e.layer_max,
+		       e.temp_min_c, e.temp_pref_c, e.temp_max_c, e.diel_mask, e.diel_curve,
+		       e.season_mask, e.diet_json, e.weather_json, e.action_json, e.substrate_json,
+		       e.color_json, e.current_pref, e.activity, e.light_pref, e.clarity_pref,
+		       e.aggression, e.rarity_tier, e.enabled, e.profile_version, e.source,
+		       COALESCE(r.rarity, 0)
+		FROM fish_ecology e LEFT JOIN species_rarity r ON r.fish_key = e.fish_key`)
 	if err != nil {
 		return err
 	}
@@ -139,6 +144,7 @@ func (s *Server) reloadFishEcologyCache(ctx context.Context) error {
 			&p.SeasonMask, &p.DietJSON, &p.WeatherJSON, &p.ActionJSON, &p.SubstrateJSON,
 			&p.ColorJSON, &p.CurrentPref, &p.Activity, &p.LightPref, &p.ClarityPref,
 			&p.Aggression, &p.RarityTier, &enabled, &p.ProfileVersion, &p.Source,
+			&p.Rarity,
 		); err != nil {
 			return err
 		}
@@ -222,17 +228,19 @@ func (s *Server) fishEcology(ctx context.Context, key string) fishEcologyProfile
 	var p fishEcologyProfile
 	var enabled, profileVersion int
 	err := s.DB.SQL.QueryRowContext(ctx, `
-		SELECT fish_key, layer_min, layer_pref, layer_max,
-		       temp_min_c, temp_pref_c, temp_max_c, diel_mask, diel_curve,
-		       season_mask, diet_json, weather_json, action_json, substrate_json,
-		       color_json, current_pref, activity, light_pref, clarity_pref,
-		       aggression, rarity_tier, enabled, profile_version, source
-		FROM fish_ecology WHERE fish_key=?`, key).Scan(
+		SELECT e.fish_key, e.layer_min, e.layer_pref, e.layer_max,
+		       e.temp_min_c, e.temp_pref_c, e.temp_max_c, e.diel_mask, e.diel_curve,
+		       e.season_mask, e.diet_json, e.weather_json, e.action_json, e.substrate_json,
+		       e.color_json, e.current_pref, e.activity, e.light_pref, e.clarity_pref,
+		       e.aggression, e.rarity_tier, e.enabled, e.profile_version, e.source,
+		       COALESCE(r.rarity, 0)
+		FROM fish_ecology e LEFT JOIN species_rarity r ON r.fish_key = e.fish_key
+		WHERE e.fish_key=?`, key).Scan(
 		&p.FishKey, &p.LayerMin, &p.LayerPref, &p.LayerMax,
 		&p.TempMinC, &p.TempPrefC, &p.TempMaxC, &p.DielMask, &p.DielCurve,
 		&p.SeasonMask, &p.DietJSON, &p.WeatherJSON, &p.ActionJSON, &p.SubstrateJSON,
 		&p.ColorJSON, &p.CurrentPref, &p.Activity, &p.LightPref, &p.ClarityPref,
-		&p.Aggression, &p.RarityTier, &enabled, &profileVersion, &p.Source)
+		&p.Aggression, &p.RarityTier, &enabled, &profileVersion, &p.Source, &p.Rarity)
 	if err != nil {
 		return defaultFishEcology(key)
 	}
@@ -361,7 +369,7 @@ func (s *Server) fishBiteEnvironmentWeight(ctx context.Context, key string, c fi
 		weightedFactor{fishMotionConditionWeight(p, c, water), c.skill.LureTolerance},
 	)
 	factors = append(factors,
-		weightedFactor{1 + c.skill.RareFish*float64(p.RarityTier)*.12, 0},
+		weightedFactor{1 + c.skill.RareFish*float64(p.Rarity)*.12, 0},
 		weightedFactor{s.fishLureWeight(p, c, water), c.skill.LureTolerance},
 		weightedFactor{fishSkillEnvironmentWeight(key, c), 0},
 	)
@@ -421,14 +429,47 @@ func dielCurveWeights(raw string) []float64 {
 // 不做禁止，保证「任何时间都能钓到本图任意鱼种」）。
 func fishDielWeight(profile fishEcologyProfile, hour int64) float64 {
 	bit := int(fishActivityForHour(hour))
+	weight := 1.0
 	if curve := dielCurveWeights(profile.DielCurve); curve != nil {
-		return clampFloat(curve[bit], fishDielCurveMin, 1)
+		weight = clampFloat(curve[bit], fishDielCurveMin, 1)
+	} else if profile.DielMask&(1<<uint(bit)) == 0 {
+		weight = .35
 	}
-	if profile.DielMask&(1<<uint(bit)) != 0 {
-		return 1
+	// 图鉴评为低活跃的那半天（白天或夜里）设硬上限：社区渔获时刻样本少时，
+	// 夜行鱼的曲线会被平均抬高，白天仍能出鱼，与「低活跃＝基本不咬」冲突。
+	if half := dielHalf(bit); half != "" && fishDielBlockedFor(profile.FishKey, half) {
+		weight = math.Min(weight, fishDielBlockedCap)
 	}
-	return .35
+	// 少数夜行鱼种在图鉴里没有条目，但白天基本不咬，单独兜住昼段。
+	if bit == 2 && strictNocturnalFish[profile.FishKey] {
+		weight = math.Min(weight, fishDielNocturnalDayCap)
+	}
+	return weight
 }
+
+// dielHalf 把时间段映射成半天：夜段（0）算 night，其余三段算 day。
+func dielHalf(bit int) string {
+	if bit == 0 {
+		return "night"
+	}
+	if bit >= 1 && bit <= 3 {
+		return "day"
+	}
+	return ""
+}
+
+// strictNocturnalFish 是白天基本不咬的夜行鱼种（与分布层的夜行名单不同：
+// 梅花鲈这类「白天也出、夜里更多」的鱼不在此列）。
+var strictNocturnalFish = map[string]bool{
+	"eel": true, "burbot": true, "w_catfish": true, "w_catfish_a": true,
+	"bullhead_syb": true, "ch_catfish": true, "fhcatfish": true,
+}
+
+// fishDielNocturnalDayCap 是夜行鱼昼段权重的硬上限。
+const fishDielNocturnalDayCap = 0.05
+
+// fishDielBlockedCap 是图鉴评为低活跃的那半天的权重上限（接近不咬）。
+const fishDielBlockedCap = 0.05
 
 func fishEcologyJSONMap(raw string) map[string]float64 {
 	var m map[string]float64

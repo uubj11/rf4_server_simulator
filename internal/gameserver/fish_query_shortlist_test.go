@@ -14,8 +14,8 @@ func TestFishQueryCoarseRegionScoreAndEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.factors["target"] = []float64{4, 1, 0, 0}
-	g.factors["other"] = []float64{40, .1, 0, 0}
+	g.factors[distributionFactorCacheKey("target", 0.5)] = []float64{4, 1, 0, 0}
+	g.factors[distributionFactorCacheKey("other", 0.5)] = []float64{40, .1, 0, 0}
 	want := []string{g.areas[1], g.areas[0]}
 	if err := g.shortlist(t.Context(), "target", map[string]float64{"target": 1, "other": 1}); err != nil {
 		t.Fatal(err)
@@ -47,14 +47,14 @@ func TestFishQueryCoarseLimitAndFineProbability(t *testing.T) {
 	}
 	original := append([]string(nil), g.areas...)
 	for _, key := range []string{"target", "other-a", "other-b"} {
-		g.factors[key] = make([]float64, len(g.areas))
+		g.factors[distributionFactorCacheKey(key, 1.0/3)] = make([]float64, len(g.areas))
 	}
 	for i := range g.areas {
-		g.factors["target"][i] = 1
+		g.factors[distributionFactorCacheKey("target", 1.0/3)][i] = 1
 		if i < fishQueryCoarseRegionLimit {
-			g.factors["other-a"][i] = 1 // bait-free target share = 1/2
+			g.factors[distributionFactorCacheKey("other-a", 1.0/3)][i] = 1 // bait-free target share = 1/2
 		} else {
-			g.factors["other-b"][i] = 3 // bait-free target share = 1/4
+			g.factors[distributionFactorCacheKey("other-b", 1.0/3)][i] = 3 // bait-free target share = 1/4
 		}
 	}
 	if err := g.shortlist(t.Context(), "target", map[string]float64{"target": 1, "other-a": 1, "other-b": 1}); err != nil {

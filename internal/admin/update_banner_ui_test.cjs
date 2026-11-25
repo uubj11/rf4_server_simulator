@@ -1,7 +1,8 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const {chromium}=require('playwright');
-const html=fs.readFileSync(path.join(__dirname,'web/index.html'),'utf8');
+const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'),'utf8');
 // 服务端对 /api/me 与 /api/dashboard 下发同一份检测结果（同一 UpdateInfo 指针）。
 // 服务端对 /api/me 与 /api/dashboard 下发同一份检测结果（同一 UpdateInfo 指针）。
 const MIRROR='https://gh-proxy.com/https://github.com/OpenFisherCommunity/rf4_server_simulator/releases/download/v1.2.0/rf4_server_simulator-v1.2.0-windows-amd64.zip';

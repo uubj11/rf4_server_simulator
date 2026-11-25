@@ -1,3 +1,4 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
@@ -6,7 +7,7 @@ const {chromium}=require('playwright');
 const PNG=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
 
 test('item and fish rows load encoded icons and hide missing images',async()=>{
- const html=fs.readFileSync(path.join(__dirname,'web/index.html'));
+ const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'));
  const iconRequests=[];
  const server=http.createServer((req,res)=>{
   const url=new URL(req.url,'http://fixture'),key=url.pathname.replace(/^\/admin/,'');

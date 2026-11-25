@@ -117,7 +117,7 @@ func TestFishZoneFactorsInRegionalQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	pick := func(g *fishQueryRegions, key string) []float64 {
-		f, err := g.distributionFactors(context.Background(), key)
+		f, err := g.distributionFactors(context.Background(), key, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

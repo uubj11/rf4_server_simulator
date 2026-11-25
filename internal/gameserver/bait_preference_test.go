@@ -23,7 +23,9 @@ func TestFishBaitPreferenceAlternateCombinationAndChange(t *testing.T) {
 	}
 	favorite := weight([]string{"rule_worm"}, now)
 	other := weight([]string{"rule_other"}, now)
-	if other <= 0 || other >= favorite || other > 0.12 || favorite < 1 {
+	// 同食性兜底从 maxBaitPreference*0.05（≈0.086）提到 *0.20（≈0.345）：
+	// 兜底仍然远低于规则放行的满档，但不再等同于「几乎钓不到」。
+	if other <= 0 || other >= favorite || other > maxBaitPreference*legalAlternativeShare+1e-9 || favorite < 1 {
 		t.Fatalf("favorite=%f other=%f", favorite, other)
 	}
 	if weight([]string{"rule_worm", "rule_fly"}, now) <= favorite {
@@ -43,7 +45,7 @@ func TestFishBaitPreferenceAlternateCombinationAndChange(t *testing.T) {
 	if weight([]string{"missing"}, now) != 0 || weight(nil, now) != 0 {
 		t.Fatal("invalid or absent bait must not be scored")
 	}
-	if favorite == weight([]string{"rule_worm"}, now.Add(600*time.Second)) {
+	if favorite == weight([]string{"rule_worm"}, now.Add(distributionPeriodRealHours*time.Hour)) {
 		t.Fatal("bait preference did not vary over game time")
 	}
 	setBaitRuleSwitch(t, s, "1")

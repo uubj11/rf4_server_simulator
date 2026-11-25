@@ -224,12 +224,15 @@ func TestWearPersistsColumnFieldsAndVersion(t *testing.T) {
 	lineFieldsBefore, _ := FieldsFromJSON(lineBefore.FieldsJSON)
 	lineVerIdx := fieldIdxByCS(lineBefore.WireClass, csCreated)
 	lineVerBefore := u64Of(lineFieldsBefore[lineVerIdx].Num)
+	hookFieldsBefore, _ := FieldsFromJSON(hookBefore.FieldsJSON)
+	hookVerIdx := fieldIdxByCS(hookBefore.WireClass, csCreated)
+	hookVerBefore := u64Of(hookFieldsBefore[hookVerIdx].Num)
 	srv.wearRigForCatchPersisted(ctx, "rod-wear")
 
 	lineAfter, _ := db.GetItemByGUID(ctx, line.GUID)
 	hookAfter, _ := db.GetItemByGUID(ctx, hook.GUID)
-	if math.Abs(lineAfter.Durability-(lineBefore.Durability-wearPerCatch["line"])) > 1e-9 {
-		t.Fatalf("鱼线列耐久磨损错误: %v -> %v", lineBefore.Durability, lineAfter.Durability)
+	if lineAfter.Durability != lineBefore.Durability {
+		t.Fatalf("主线不应按尾磨损: %v -> %v", lineBefore.Durability, lineAfter.Durability)
 	}
 	if math.Abs(hookAfter.Durability-(hookBefore.Durability-wearPerCatch["hook"])) > 1e-9 {
 		t.Fatalf("鱼钩列耐久磨损错误: %v -> %v", hookBefore.Durability, hookAfter.Durability)
@@ -239,7 +242,11 @@ func TestWearPersistsColumnFieldsAndVersion(t *testing.T) {
 	if math.Abs(gotD-lineAfter.Durability) > 1e-6 {
 		t.Fatalf("fields_json 耐久未同步: column=%v field=%v", lineAfter.Durability, gotD)
 	}
-	if gotVer := u64Of(lineFieldsAfter[lineVerIdx].Num); gotVer <= lineVerBefore {
-		t.Fatalf("磨损后版本戳应严格递增: %d -> %d", lineVerBefore, gotVer)
+	if gotVer := u64Of(lineFieldsAfter[lineVerIdx].Num); gotVer != lineVerBefore {
+		t.Fatalf("主线未磨损，版本戳不应变化: %d -> %d", lineVerBefore, gotVer)
+	}
+	hookFieldsAfter, _ := FieldsFromJSON(hookAfter.FieldsJSON)
+	if gotVer := u64Of(hookFieldsAfter[hookVerIdx].Num); gotVer <= hookVerBefore {
+		t.Fatalf("鱼钩磨损后版本戳应严格递增: %d -> %d", hookVerBefore, gotVer)
 	}
 }

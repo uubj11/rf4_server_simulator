@@ -302,11 +302,19 @@ func (s *Server) tryBaitDig(ctx *Ctx) ([]byte, bool) {
 	}
 
 	after := mastery
+	// 挖饵默认是固定收益；后台填了 1~100 的固定概率后，改为每次挖饵按该概率判定。
 	if mastery < baitMasteryCap {
-		after = math.Min(baitMasteryCap, math.Round((mastery+baitMasteryStep)*10)/10)
-		if err := s.DB.AddSkillPoints(cctx, ctx.Sess.Userid, captureBaitSkillID, baitMasteryStep); err != nil {
-			ctx.Log.Warn("捕获鱼饵熟练度写入失败", "err", err)
-			after = mastery
+		grant := true
+		if hit, fixed := s.skillProficiencyFixedHit(captureBaitSkillID); fixed {
+			grant = hit
+		}
+		if grant {
+			masteryStep := math.Min(baitMasteryStep, baitMasteryCap-mastery)
+			after = math.Min(baitMasteryCap, math.Round((mastery+masteryStep)*10)/10)
+			if err := s.DB.AddSkillPoints(cctx, ctx.Sess.Userid, captureBaitSkillID, masteryStep); err != nil {
+				ctx.Log.Warn("捕获鱼饵熟练度写入失败", "err", err)
+				after = mastery
+			}
 		}
 	}
 	gain := after - mastery

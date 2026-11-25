@@ -33,6 +33,10 @@ endif
 test: vet doccheck
 	$(GO) test ./...
 
+# Requires playwright plus RF4_TEST_BROWSER pointing at an installed Chromium/Edge binary.
+ui-test:
+	node --test internal/admin/*_ui_test.cjs
+
 vet:
 	$(GO) vet ./...
 

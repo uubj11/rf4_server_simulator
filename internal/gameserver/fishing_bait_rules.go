@@ -65,6 +65,18 @@ func lookupFishBaitRule(fishZh string) (fishBaitRule, bool) {
 
 const maxBaitPreference = 1.5 * 1.15
 
+// 长尾闸只在官方样本足够时启用。这个门槛刻意保持代码常量而非 tunable：
+// 它表示“是否具备统计意义”，不是玩法手感旋钮；本次只复用已有 bait_share_*
+// 开关，不新增管理端参数。需要整体回退时把任一 bait_share_* 设为 <=0。
+const baitTailMinFishSamples = 100
+
+// legalAlternativeShare 是「规则没列、但同属虫/煮饵/颗粒这类同食性饵」的
+// 相对权重（乘在 maxBaitPreference 上）。这个值同时决定了饵兴趣值
+// interest = share（见 happy_hour.go 的低兴趣上限 0.1）：0.05 时兴趣 0.05，
+// 技能最高只能把它顶到 0.1，正好保住「低兴趣饵靠技能翻倍」这条设计。
+// 提高它会让兴趣直接贴到 0.1 上限、技能失效，所以集中度问题不从这里改。
+const legalAlternativeShare = 0.05
+
 func ruleName(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
@@ -439,6 +451,10 @@ func (s *Server) loadFishNames(ctx context.Context) (map[string]string, bool) {
 				names[key] = name
 				continue
 			}
+			if _, known := lookupStrictFishBaitRule(name); known {
+				names[key] = name
+				continue
+			}
 			// 后台新增规则覆盖的鱼种同样参与严格模式判鱼。
 			if _, ok := overrides[ruleName(name)]; ok {
 				names[key] = name
@@ -532,6 +548,7 @@ func (s *Server) filterFishBaitSet(loc string, ids []string, keys []string, weig
 	if !namesOK {
 		return nil, nil
 	}
+	strictExact := s.tunableF("bait_exact_only", 0) > 0
 	evidence := make([]map[string]int64, len(baits))
 	localEvidence := make([]map[string]bool, len(baits))
 	for i, b := range baits {
@@ -540,7 +557,7 @@ func (s *Server) filterFishBaitSet(loc string, ids []string, keys []string, weig
 	}
 	outKeys := make([]string, 0, len(keys))
 	outWeights := make([]float64, 0, len(keys))
-	period := (now.Unix() - worldDayEpochUnix) / (4 * realSecPerGameHour)
+	period := (now.Unix() - worldDayEpochUnix) / (distributionPeriodRealHours * 3600)
 	// 阈值与总开关按一次判鱼读取，循环内不再重复取 tunable。
 	// bait_share_strong/medium/tail 任一 <=0 时回到旧行为（>0 即满分）。
 	strong := s.tunableF("bait_share_strong", 5)
@@ -549,6 +566,17 @@ func (s *Server) filterFishBaitSet(loc string, ids []string, keys []string, weig
 	grading := strong > 0 && medium > 0 && tail > 0
 	for i, key := range keys {
 		if weights[i] <= 0 {
+			continue
+		}
+		if strictExact {
+			r, ok := lookupStrictFishBaitRule(names[key])
+			if !ok || !ruleConditionAllows(r, c) {
+				continue
+			}
+			if best, ok := strictBaitScore(r, baits, c, loc, key, period); ok {
+				outKeys = append(outKeys, key)
+				outWeights = append(outWeights, weights[i]*best)
+			}
 			continue
 		}
 		r, rot := s.resolveBaitRule(ctx, names[key])
@@ -588,8 +616,21 @@ func (s *Server) filterFishBaitSet(loc string, ids []string, keys []string, weig
 			// 食性证据分级（specs/changes/bait-evidence-threshold）：rf4records 实测占比
 			// 优先，companion tier/evidence 兜底；四档放行。
 			share := -1.0
+			var total float64
+			shareKnown := false
 			if grading {
-				share = s.rf4BaitShare(ctx, key, b.id)
+				// 占比与分母必须来自同一个缓存快照。未知（首次加载/TTL 刷新中）
+				// 不能配合旧 total 触发长尾闸，否则刷新窗口会误清空非点名饵。
+				share, total, shareKnown = s.rf4BaitSample(ctx, key, b.id)
+			}
+			// 长尾闸：官方纪录里这条鱼有过这款饵、但占比低于 tail，或样本不足
+			// （share<0 表示不足 bait_share_min_count 条），说明只是偶发或误捕。
+			// 这类饵不能再靠 companion 证据或本图历史记录兜底进池，否则一款与
+			// 食性无关的饵会把整图不相关的鱼刷出来（土豆刷出葛氏鲈塘鳢等）。
+			// 规则里明确点名的饵和当前轮换组不受影响，避免误删真实主推饵。
+			if grading && shareKnown && share < tail &&
+				!baitExemptFromTailGate(r, b, activeGroup) && total >= baitTailMinFishSamples {
+				continue
 			}
 			score := 0.0
 			variation := fishVariation(fmt.Sprintf("%s/%s/%s/%d", loc, key, b.id, period))
@@ -605,14 +646,54 @@ func (s *Server) filterFishBaitSet(loc string, ids []string, keys []string, weig
 				full = allowed || share >= strong || (!hasRule || !anyAllowed) && comp >= 3 ||
 					(share < 0 && comp <= 0 && localEvidence[j][key])
 			}
+			// 拟饵门：非路亚鱼种偶尔也会咬一口拟饵，但那是极小概率。
+			// 规则里的「拟饵」是 category 17 全通配，会把草鱼、欧鳊这类
+			// 官方拟饵占比 1~4% 的鱼当成路亚目标整天刷。这里按官方占比
+			// 直接出池：<1% 不参与判鱼，1~5% 满档但压到四分之一，
+			// ≥5% 不干预——高占比的路亚鱼种手感不变。
+			// 注意必须 continue，只把 full 置 false 没用：后面还有
+			// share>=medium / companion 兜底几档会把它重新拉回池子里。
+			lureFactor := 1.0
+			// 拟饵门属于食性分级路径；三项阈值任一关闭时整体回到旧行为。
+			if grading && b.category == 17 {
+				// 双壳类与螯虾不吃移动的拟饵：官方纪录里它们确实有少量
+				// 拟饵渔获（多为微铅钩挂底误捕），直接放进判鱼池会让
+				// 亮片整天刷出河蚌、贻贝、螯虾。硬排除必须先于具体饵证据，
+				// 不能被某个饵的 ≥5% 占比绕过。只排这三类，帝王蟹、
+				// 鱿鱼这类确实靠铁板/鱿鱼钩上的不排。
+				switch key {
+				case "freshwater_mussel", "dreissena", "crawfish":
+					continue
+				}
+				// 该饵在官方纪录里对这条鱼已经有强证据（≥5%）时不看鱼种级占比：
+				// 具体到饵的证据优先于「这条鱼总体吃不吃拟饵」。
+				if share < strong {
+					if ls := s.rf4LureShareOf(key); ls >= 0 {
+						switch {
+						case ls < 1:
+							continue
+						case ls < 5:
+							lureFactor = 0.25
+						}
+					}
+				}
+			}
 			if full {
 				preferred++
-				score = 1.0 + 0.5*variation
-			} else if grading && (share >= medium || (share < 0 && comp >= 1) || localEvidence[j][key]) {
+				score = (1.0 + 0.5*variation) * lureFactor
+			} else if grading && share >= medium {
 				score = maxBaitPreference * 0.35
 			} else if grading && share >= tail {
 				score = maxBaitPreference * 0.18
+			} else if share < 0 && comp >= 1 {
+				// 占比表缺失（表空/该饵未映射）时才退回 companion；
+				// 有占比就用占比，避免 tier1 的低频饵也被当成中档证据。
+				score = maxBaitPreference * 0.35
 			} else if b.legalAlternative(r) {
+				score = maxBaitPreference * legalAlternativeShare
+			}
+			if score > 0 && b.category == 17 && score < maxBaitPreference*0.05*2 {
+				// 拟饵的兜底再压一档：避免没证据的拟饵靠 legalAlternative 上钩。
 				score = maxBaitPreference * 0.05
 			}
 			if activeGroup != nil {
@@ -820,17 +901,28 @@ func fishingBaitInterest(interest float64, bonus fishingSkillBonus) float64 {
 	return math.Min(limit, interest*multiplier)
 }
 
+// rf4ShareTTL 是 rf4records 占比快照的有效期；判鱼读取与后台聚合共用。
+const rf4ShareTTL = 30 * time.Minute
+
 // rf4BaitShare 返回饵在 rf4records_catch 里对某鱼的实测渔获占比（百分比 0~100）。
-// 无数据（表空/该鱼无纪录/未映射）返回 -1。缓存异步预热 TTL 30 分钟，
-// 判鱼路径零阻塞；表未迁移或查询失败时保持 -1，分级退回 companion 兜底。
+// 无数据（表空/该鱼无纪录/未映射/缓存过期/查询失败）返回 -1。缓存异步预热，
+// 判鱼路径零阻塞；查询失败时清空旧快照，分级退回 companion 兜底。
 func (s *Server) rf4BaitShare(ctx context.Context, fishKey, baitID string) float64 {
+	share, _, _ := s.rf4BaitSample(ctx, fishKey, baitID)
+	return share
+}
+
+// rf4BaitSample 返回同一份缓存快照里的饵占比、该鱼总纪录数和数据是否可用。
+// known=false 只表示缓存未就绪/已过期且正在加载，不得把它当成 0 或长尾样本。
+func (s *Server) rf4BaitSample(ctx context.Context, fishKey, baitID string) (share, total float64, known bool) {
 	if s.DB == nil || fishKey == "" || baitID == "" {
-		return -1
+		return -1, 0, false
 	}
 	now := time.Now()
 	s.rf4ShareMu.RLock()
-	ready := s.rf4ShareLoaded && now.Sub(s.rf4ShareAt) <= 30*time.Minute
+	ready := s.rf4ShareLoaded && now.Sub(s.rf4ShareAt) <= rf4ShareTTL
 	m := s.rf4ShareCache[fishKey]
+	total = s.rf4FishTotal[fishKey]
 	s.rf4ShareMu.RUnlock()
 	// 只在未就绪时触发加载；ready 但 m==nil 表示该鱼确实没有 rf4 纪录，
 	// 不能每次判鱼都重新聚合 47.9 万行（评审 P1）。
@@ -838,15 +930,50 @@ func (s *Server) rf4BaitShare(ctx context.Context, fishKey, baitID string) float
 		if s.rf4ShareLoading.CompareAndSwap(false, true) {
 			go s.loadRf4Share()
 		}
-		return -1
+		return -1, 0, false
 	}
 	if m == nil {
-		return -1
+		return -1, total, true
 	}
 	if v, ok := m[baitID]; ok {
-		return v
+		return v, total, true
 	}
-	return -1
+	return -1, total, true
+}
+
+// rf4LureShareOf 返回该鱼在官方纪录里拟饵（category 17）占全部渔获的百分比。
+// 表未就绪、缓存过期、查询失败或无纪录时返回 -1，调用方按「未知」处理。
+func (s *Server) rf4LureShareOf(fishKey string) float64 {
+	if s.DB == nil || fishKey == "" {
+		return -1
+	}
+	now := time.Now()
+	s.rf4ShareMu.RLock()
+	ready := s.rf4ShareLoaded && now.Sub(s.rf4ShareAt) <= rf4ShareTTL
+	v, ok := s.rf4LureShare[fishKey]
+	s.rf4ShareMu.RUnlock()
+	if !ready {
+		if s.rf4ShareLoading.CompareAndSwap(false, true) {
+			go s.loadRf4Share()
+		}
+		return -1
+	}
+	if !ok {
+		return -1
+	}
+	return v
+}
+
+// clearRf4ShareAfterError 清空两张快照并把 loaded 置位，避免查询失败后继续
+// 使用旧占比，也避免下一次判鱼立刻重复触发全表聚合。TTL 到期后会再试。
+func (s *Server) clearRf4ShareAfterError() {
+	s.rf4ShareMu.Lock()
+	s.rf4ShareCache = map[string]map[string]float64{}
+	s.rf4LureShare = map[string]float64{}
+	s.rf4FishTotal = map[string]float64{}
+	s.rf4ShareLoaded = true
+	s.rf4ShareAt = time.Now()
+	s.rf4ShareMu.Unlock()
 }
 
 func (s *Server) loadRf4Share() {
@@ -854,34 +981,54 @@ func (s *Server) loadRf4Share() {
 	ctx := s.dbCtx()
 	// 分母（每条鱼的有效纪录总数）单独算一次：HAVING 过滤后窗口函数只剩
 	// 幸存行，占比会被动重新归一化。
+	//
+	// 两个分母口径刻意不同：
+	//   - 饵级占比（rf4ShareCache）的分母只算 bait_id 已映射的纪录：饵必须能
+	//     归到具体 item_id 才能算占比，未映射饵无法归组。
+	//   - 鱼种级拟饵占比（rf4LureShare）的分母算该鱼全部有效渔获：它回答的是
+	//     「这条鱼被钓上来时有多少比例是拟饵」，未映射饵按非拟饵计。只用已映射
+	//     纪录会被饵映射覆盖率放大，天然饵占比高的鱼（鲢/鳙/草鱼）会被误判成
+	//     路亚鱼种。
 	minCnt := int(s.tunableF("bait_share_min_count", 5))
 	if minCnt < 1 {
 		minCnt = 1
 	}
 	totals := map[string]float64{}
+	lureTotals := map[string]float64{}
+	allTotals := map[string]float64{}
 	trows, err := s.DB.SQL.QueryContext(ctx, `
-		SELECT fish_key, count(*) FROM rf4records_catch
-		WHERE fish_key<>'' AND bait_id<>'' GROUP BY fish_key`)
+		SELECT r.fish_key, count(*),
+		       sum(CASE WHEN r.bait_id <> '' THEN 1 ELSE 0 END),
+		       sum(CASE WHEN d.category = 17 THEN 1 ELSE 0 END)
+		FROM rf4records_catch r
+		LEFT JOIN item_def d ON d.item_id = r.bait_id
+		WHERE r.fish_key<>''
+		GROUP BY r.fish_key`)
 	if err != nil {
-		s.rf4ShareMu.Lock()
-		// 首次查询失败也置 loaded，避免每次判鱼都重试全表聚合；
-		// TTL 到期后会再试（表未迁移/暂时读不到时退回 companion 兜底）。
-		if !s.rf4ShareLoaded {
-			s.rf4ShareCache = map[string]map[string]float64{}
-			s.rf4ShareLoaded = true
-		}
-		s.rf4ShareAt = time.Now()
-		s.rf4ShareMu.Unlock()
+		s.clearRf4ShareAfterError()
 		return
 	}
 	for trows.Next() {
 		var fk string
-		var n float64
-		if trows.Scan(&fk, &n) == nil {
-			totals[fk] = n
+		var all, mapped, lures float64
+		if err := trows.Scan(&fk, &all, &mapped, &lures); err != nil {
+			_ = trows.Close()
+			s.clearRf4ShareAfterError()
+			return
 		}
+		allTotals[fk] = all
+		totals[fk] = mapped
+		lureTotals[fk] = lures
 	}
-	_ = trows.Close()
+	if err := trows.Err(); err != nil {
+		_ = trows.Close()
+		s.clearRf4ShareAfterError()
+		return
+	}
+	if err := trows.Close(); err != nil {
+		s.clearRf4ShareAfterError()
+		return
+	}
 	// HAVING count(*)>=5：证据小于 5 条的样本不进占比表。否则「1 条纪录 /
 	// 2 条总数」= 50% 直接满足 bait_share_strong(5)，会把噪声当强证据。
 	rows, err := s.DB.SQL.QueryContext(ctx, `
@@ -889,39 +1036,90 @@ func (s *Server) loadRf4Share() {
 		WHERE fish_key<>'' AND bait_id<>''
 		GROUP BY fish_key, bait_id HAVING count(*)>=?`, minCnt)
 	if err != nil {
-		s.rf4ShareMu.Lock()
-		if !s.rf4ShareLoaded {
-			s.rf4ShareCache = map[string]map[string]float64{}
-			s.rf4ShareLoaded = true
-		}
-		s.rf4ShareAt = time.Now()
-		s.rf4ShareMu.Unlock()
+		s.clearRf4ShareAfterError()
 		return
 	}
 	cache := map[string]map[string]float64{}
 	for rows.Next() {
 		var fk, bid string
 		var cnt float64
-		if rows.Scan(&fk, &bid, &cnt) == nil {
-			tot := totals[fk]
-			if tot <= 0 {
-				continue
-			}
-			if cache[fk] == nil {
-				cache[fk] = map[string]float64{}
-			}
-			cache[fk][bid] = 100 * cnt / tot
+		if err := rows.Scan(&fk, &bid, &cnt); err != nil {
+			_ = rows.Close()
+			s.clearRf4ShareAfterError()
+			return
 		}
+		tot := totals[fk]
+		if tot <= 0 {
+			continue
+		}
+		if cache[fk] == nil {
+			cache[fk] = map[string]float64{}
+		}
+		cache[fk][bid] = 100 * cnt / tot
 	}
-	err = rows.Err()
-	_ = rows.Close()
-	s.rf4ShareMu.Lock()
-	defer s.rf4ShareMu.Unlock()
-	if err != nil {
-		s.rf4ShareAt = time.Now()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		s.clearRf4ShareAfterError()
 		return
 	}
+	if err := rows.Close(); err != nil {
+		s.clearRf4ShareAfterError()
+		return
+	}
+	lureShare := make(map[string]float64, len(allTotals))
+	for fk, all := range allTotals {
+		// 一条已映射纪录都没有的鱼：没有任何能被归类的饵，占比无从估计，
+		// 不进表、按未知处理，不把拟饵门误用到它身上。
+		if all > 0 && totals[fk] > 0 {
+			lureShare[fk] = 100 * lureTotals[fk] / all
+		}
+	}
+	s.rf4ShareMu.Lock()
 	s.rf4ShareCache = cache
+	s.rf4LureShare = lureShare
 	s.rf4ShareLoaded = true
 	s.rf4ShareAt = time.Now()
+	s.rf4FishTotal = totals
+	s.rf4ShareMu.Unlock()
+}
+
+// baitNamedByRule 判断规则是否明确点名了这款饵。类别词（含所有“类”表达）
+// 只说明食性范围，不能冒充具体饵名作为长尾闸豁免。
+func baitNamedByRule(r fishBaitRule, b ruleBait) bool {
+	for _, t := range r.allow {
+		if baitRuleTermIsCategory(t) {
+			continue
+		}
+		if b.matches(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// baitExemptFromTailGate 只豁免规则明确点名的饵，以及后台显式配置的当前
+// 轮换组。当前组即使不在静态 allow 中也是本轮主推饵（见 baitAllowedByRule）。
+func baitExemptFromTailGate(r fishBaitRule, b ruleBait, activeGroup []string) bool {
+	return baitNamedByRule(r, b) || b.matchesAny(activeGroup)
+}
+
+// baitRuleTermIsCategory 统一识别规则里的类别/通配词。凡是带“类”的表达都
+// 不是具体饵名；“拟饵/饵鱼/蠕虫/昆虫/亮片/软饵”等不带“类”的类别词也在此
+// 集中列出，避免每新增一种通配写法就漏掉长尾闸豁免。
+func baitRuleTermIsCategory(term string) bool {
+	t := ruleName(term)
+	if t == "" {
+		return false
+	}
+	if strings.Contains(t, "类") || strings.HasPrefix(t, "各类") {
+		return true
+	}
+	switch t {
+	case "拟饵", "饵鱼", "活饵", "蠕虫", "昆虫", "昆虫幼虫",
+		"鱼肉类", "亮片", "亮片系列", "亮片系列饵", "旋转饵", "旋转亮片路亚",
+		"软饵", "拟真软饵", "天然饵", "虫饵", "素饵", "荤饵", "肉饵", "谷物饵":
+		return true
+	default:
+		return false
+	}
 }

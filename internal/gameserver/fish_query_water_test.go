@@ -111,8 +111,9 @@ func TestFishQueryWaterAnyPointKeepsOriginalArea(t *testing.T) {
 		t.Fatalf("land cell returned: %+v", r)
 	}
 	// The mask removes choices, not probability mass inside a retained cell.
-	target := 3 * distributionMultiplier(g.areas[index], "target", g.now)
-	other := 8 * distributionMultiplier(g.areas[index], "other", g.now)
+	// 与 shortlist/best 传同一个份额，才对得上生产里的缺席判定线。
+	target := 3 * distributionMultiplier(g.areas[index], "target", g.now, 3.0/11)
+	other := 8 * distributionMultiplier(g.areas[index], "other", g.now, 8.0/11)
 	want := .6 * target / (target + other) * .5
 	if math.Abs(q.chance-want) > 1e-12 {
 		t.Fatalf("retained-cell probability changed: %v want %v", q.chance, want)
@@ -148,7 +149,7 @@ func TestFishQueryWaterMismatchEmptyAndDisabled(t *testing.T) {
 		t.Fatal("missing map changed query")
 	}
 	grid := waterGridForTest(g)
-	if _, err := g.distributionFactors(t.Context(), "target"); err != nil {
+	if _, err := g.distributionFactors(t.Context(), "target", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.filterWater(grid); !errors.Is(err, errFishQueryWaterInvalid) {
@@ -215,8 +216,8 @@ func TestFishQueryWaterIntegration(t *testing.T) {
 	index := -1
 	now := time.Now()
 	for i, area := range g.areas {
-		if distributionMultiplier(area, "c.roach", now) > 0 &&
-			distributionMultiplier(area, "c.roach", now.Add(10*time.Minute)) > 0 {
+		if distributionMultiplier(area, "c.roach", now, 0) > 0 &&
+			distributionMultiplier(area, "c.roach", now.Add(10*time.Minute), 0) > 0 {
 			index = i
 			break
 		}

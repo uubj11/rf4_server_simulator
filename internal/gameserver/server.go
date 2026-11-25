@@ -73,11 +73,18 @@ type Server struct {
 
 	// rf4records 饵占比缓存（食性分级提案 bait-evidence-threshold 的占比判据）。
 	// 键 fish_key -> bait_id -> 占比百分比（0~100）；异步预热，TTL 30 分钟。
-	rf4ShareMu      sync.RWMutex
-	rf4ShareCache   map[string]map[string]float64
+	rf4ShareMu    sync.RWMutex
+	rf4ShareCache map[string]map[string]float64
+	// 每条鱼对拟饵（item_def.category = 17）的官方占比，0~100。
+	// 拟饵门只用它来分档：低于阈值直接不给这条鱼派拟饵，
+	// 避免「拟饵」通配把草鱼、欧鳊这类偶然吃软饵的鱼当成路亚目标。
+	rf4LureShare    map[string]float64
 	rf4ShareAt      time.Time
 	rf4ShareLoaded  bool
 	rf4ShareLoading atomic.Bool
+	// rf4FishTotal 保存每条鱼在 rf4records_catch 里的有效纪录总数，
+	// 与 rf4ShareCache 同锁同 TTL，用于判断证据量是否足够做判鱼筛选。
+	rf4FishTotal map[string]float64
 
 	// 区域固定鱼种名册缓存（后台可写，TTL 30 秒对齐 tunables 热更节奏）
 	fishZoneMu    sync.RWMutex

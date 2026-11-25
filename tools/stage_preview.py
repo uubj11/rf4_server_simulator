@@ -39,6 +39,9 @@ def optional_local_files(root):
             out.append(name)
     return out
 
+def release_resources(root, tracked):
+    return list(dict.fromkeys([*filter(None, tracked), *optional_local_files(root)]))
+
 def stage(root, target, tracked):
     root, target = Path(root).resolve(), Path(target).resolve()
     copied = []
@@ -57,6 +60,6 @@ def stage(root, target, tracked):
 if __name__ == '__main__':
     root = Path(__file__).resolve().parents[1]
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
-    resources = list(dict.fromkeys(filter(None, tracked) + optional_local_files(root)))
+    resources = release_resources(root, tracked)
     copied = stage(root, sys.argv[1], resources)
     print('Staged', len(copied), 'resource files')

@@ -1,8 +1,9 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
 const {chromium}=require('playwright');
 test('store summary and controls fit supported widths, DPI and long identifiers',async()=>{
- const html=fs.readFileSync(path.resolve(__dirname,'web/index.html'),'utf8');
+ const html=fs.readFileSync(path.resolve(__dirname,'web/legacy.html'),'utf8');
  let store='fishingstore_009';
  const server=http.createServer((req,res)=>{
   const pathname=new URL(req.url,'http://fixture').pathname.replace(/^\/admin\/api\//,'/api/');

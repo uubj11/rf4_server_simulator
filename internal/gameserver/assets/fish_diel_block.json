@@ -1,0 +1,235 @@
+{
+ "a.sleeper": [
+  "night"
+ ],
+ "a_catfish": [
+  "day"
+ ],
+ "a_grayling": [
+  "night"
+ ],
+ "a_omul": [
+  "night"
+ ],
+ "a_salmon": [
+  "night"
+ ],
+ "a_smelt": [
+  "night"
+ ],
+ "ambl_h": [
+  "day",
+  "night"
+ ],
+ "burbot": [
+  "day"
+ ],
+ "c_anguineus": [
+  "day",
+  "night"
+ ],
+ "c_bleak": [
+  "night"
+ ],
+ "c_herring": [
+  "night"
+ ],
+ "ch_catfish": [
+  "day"
+ ],
+ "cha_herring": [
+  "night"
+ ],
+ "chimaera": [
+  "day",
+  "night"
+ ],
+ "chir": [
+  "night"
+ ],
+ "coalfish": [
+  "night"
+ ],
+ "dace": [
+  "night"
+ ],
+ "e.chub": [
+  "night"
+ ],
+ "e.pikeperch": [
+  "day"
+ ],
+ "e_bream": [
+  "day"
+ ],
+ "e_smelt": [
+  "night"
+ ],
+ "fe_lamprey": [
+  "day",
+  "night"
+ ],
+ "fhcatfish": [
+  "day"
+ ],
+ "freshwater_mussel": [
+  "day"
+ ],
+ "gc_smelt": [
+  "night"
+ ],
+ "gorbusha": [
+  "night"
+ ],
+ "k_herring": [
+  "night"
+ ],
+ "keta": [
+  "night"
+ ],
+ "kijuch": [
+  "night"
+ ],
+ "kunja": [
+  "night"
+ ],
+ "l_salmon": [
+  "night"
+ ],
+ "lenok_o": [
+  "night"
+ ],
+ "lycodes_s": [
+  "day",
+  "night"
+ ],
+ "malma": [
+  "night"
+ ],
+ "mikija": [
+  "night"
+ ],
+ "mytilus_ed": [
+  "day",
+  "night"
+ ],
+ "n.pike": [
+  "night"
+ ],
+ "nerka": [
+  "night"
+ ],
+ "os_grayling": [
+  "night"
+ ],
+ "osetr_ship": [
+  "day",
+  "night"
+ ],
+ "peled": [
+  "night"
+ ],
+ "pinagor": [
+  "day",
+  "night"
+ ],
+ "poutassou": [
+  "night"
+ ],
+ "ripus": [
+  "night"
+ ],
+ "riv_brown_trout": [
+  "night"
+ ],
+ "rk_crab": [
+  "day",
+  "night"
+ ],
+ "rudd": [
+  "night"
+ ],
+ "s_bass": [
+  "day"
+ ],
+ "s_lamprey": [
+  "day",
+  "night"
+ ],
+ "s_saurus": [
+  "night"
+ ],
+ "sardina_p": [
+  "night"
+ ],
+ "sevan_trout": [
+  "night"
+ ],
+ "shemaya_cha": [
+  "night"
+ ],
+ "sig": [
+  "day",
+  "night"
+ ],
+ "sig_black": [
+  "night"
+ ],
+ "sig_kuor": [
+  "night"
+ ],
+ "sig_o_l": [
+  "night"
+ ],
+ "sig_ostr": [
+  "night"
+ ],
+ "sig_p": [
+  "night"
+ ],
+ "sig_valaam": [
+  "night"
+ ],
+ "sv_sig": [
+  "day",
+  "night"
+ ],
+ "syb_elets": [
+  "night"
+ ],
+ "syb_vendace": [
+  "night"
+ ],
+ "tiulka": [
+  "night"
+ ],
+ "tugun": [
+  "night"
+ ],
+ "u_lamprey": [
+  "day",
+  "night"
+ ],
+ "valyok": [
+  "night"
+ ],
+ "vjun": [
+  "day"
+ ],
+ "vobla": [
+  "night"
+ ],
+ "w_catfish": [
+  "day"
+ ],
+ "w_catfish_a": [
+  "day",
+  "night"
+ ],
+ "walleye": [
+  "day"
+ ],
+ "zs_grayling": [
+  "night"
+ ]
+}

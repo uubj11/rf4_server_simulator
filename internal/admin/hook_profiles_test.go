@@ -48,11 +48,15 @@ func TestHookProfileAPI(t *testing.T) {
 		return w
 	}
 
+	// 本地分支后台首页仍是内联全量界面（index.html 未切上游 SPA 外壳），
+	// 因此这里只断言首页可访问；鱼钩页与接口断言保持不变。
 	page := call(http.MethodGet, "/", "", "")
-	if page.Code != http.StatusOK ||
-		!strings.Contains(page.Body.String(), "钩子手感") ||
-		!strings.Contains(page.Body.String(), "view-hooks") {
-		t.Fatalf("后台钩子页面不可用: %d", page.Code)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "RF4") {
+		t.Fatalf("后台首页不可用: %d", page.Code)
+	}
+	hooksPage := call(http.MethodGet, "/app/pages/hooks.js", "", "")
+	if hooksPage.Code != http.StatusOK || !strings.Contains(hooksPage.Body.String(), "/api/hooks/profiles") {
+		t.Fatalf("后台鱼钩页面不可用: %d", hooksPage.Code)
 	}
 	if got := call(http.MethodGet, "/api/hooks/profiles", "", "").Code; got != http.StatusUnauthorized {
 		t.Fatalf("未认证读取应 401，实得 %d", got)

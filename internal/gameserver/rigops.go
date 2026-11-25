@@ -164,10 +164,10 @@ var rigSlotTemplates = map[int64][]rigSlotTemplate{
 	55: {{[]int64{13}, 175}, {[]int64{29}, 200}, {[]int64{13}, 150}, {[]int64{17}, 325}, {[]int64{12}, 250}, {[]int64{13}, 151}, {[]int64{17}, 326}, {[]int64{12}, 251}}, // 海竿双路亚
 	56: {{[]int64{13}, 175}, {[]int64{29}, 200}, {[]int64{13}, 150}, {[]int64{17}, 325}, {[]int64{12}, 250}, {[]int64{13}, 151}, {[]int64{17}, 326}, {[]int64{12}, 251}},
 	// 57 = rig_MarineBottomPaternoster（海钓链斗式/串钩）。主前导 175 +
-	// 震子线 200 + 三组支线，每组各自占一组独立的引线/拟饵/钩索引。
+	// 海沉子 200 + 三组支线，每组各自占一组独立的引线/拟饵/钩索引。
 	// 2026-11-14 实机日志客户端上报：13/175（减震引线）、13/150~152（海洋引线）、
 	// 12/250~252（海钩）、17/300~302（拟饵）、17/325~327（吸引成分：
-	// Fire stick / Fire tube / Color beads）、29/200（震子线）。
+	// Fire stick / Fire tube / Color beads）、29/200（海沉子）。
 	// 拟饵族(17)同时承载拟饵与吸引成分，两组索引必须都声明：
 	// 只声明 325~327 时，客户端的拟饵 300 会被 canonicalIndexForOrdinal
 	// 改写到 325~327，既把吸引成分挤回背包（装拟饵掉吸引成分），
@@ -206,9 +206,19 @@ var canonicalRigIndex = func() map[int64]int64 {
 	return m
 }()
 
+// 普通海洋底部与带响珠型都使用两条固定支线：钩 250/251 对应天然饵 350/351。
+func hasFixedMarineBaitSlots(rigType int64) bool {
+	return rigType == 55 || rigType == 56
+}
+
+// 单钩双饵和海洋底部双支线都显式区分 350/351。其他多钩钓组仍按钩饵映射。
+func hasIndexedBaitPair(rigType int64) bool {
+	return hasFixedMarineBaitSlots(rigType) || len(slotIndicesFor(rigType, catHook)) <= 1
+}
+
 // slotIndicesFor 返回指定钓组类型和品类对应的规范索引列表。
 func slotIndicesFor(rigType, category int64) []int64 {
-	if category == 27 && rigType != 0 && len(slotIndicesFor(rigType, catHook)) <= 1 {
+	if category == 27 && rigType != 0 && hasIndexedBaitPair(rigType) {
 		return []int64{350, 351}
 	}
 	tpl := rigSlotTemplates[rigType]
@@ -399,7 +409,9 @@ func (s *Server) queueReleasedStackRefresh(ctx *Ctx, released []*rigReleased) {
 	var guids []string
 	var trees []*proto.Value
 	seen := map[string]bool{}
-	for _, rel := range released {
+	// 同一来源堆可能回收多份饵，最后一棵树才含完整退回数量。
+	for i := len(released) - 1; i >= 0; i-- {
+		rel := released[i]
 		if rel == nil || rel.SourceGUID == "" || rel.SourceTree == nil || seen[rel.SourceGUID] {
 			continue
 		}
@@ -422,8 +434,12 @@ func (s *Server) releaseRigComponentItem(ctx context.Context, row *store.Item) *
 		if srcGUID != "" {
 			rel.SourceGUID = srcGUID
 			if src, err := s.DB.GetItemByGUID(ctx, srcGUID); err == nil && src != nil {
-				s.setStackCount(ctx, src, s.stackCountOf(ctx, src)+1)
-				if t, terr := s.itemTree(ctx, src); terr == nil {
+				s.setStackCount(ctx, src, s.stackCountOf(ctx, src)+s.stackCountOf(ctx, row))
+				fresh, err := s.DB.GetItemByGUID(ctx, srcGUID)
+				if err != nil || fresh == nil {
+					return rel
+				}
+				if t, terr := s.itemTree(ctx, fresh); terr == nil {
 					rel.SourceTree = t
 				}
 			}
@@ -464,7 +480,7 @@ func canonicalIndex(category, clientIndex int64, rigType int64) int64 {
 // 合法客户端索引优先，否则使用模板中对应序号的槽。
 func canonicalIndexForOrdinal(category, clientIndex, rigType, ordinal int64) int64 {
 	if category == 27 {
-		if ordinal == 1 && len(slotIndicesFor(rigType, catHook)) <= 1 {
+		if ordinal == 1 && hasIndexedBaitPair(rigType) {
 			return 351
 		}
 		return 350
@@ -526,7 +542,7 @@ func rigCompsOf(f5 *proto.Value) map[int64]rigComp {
 		return out
 	}
 	_, rigType, _ := rigIdentity(f5)
-	singleHook := len(slotIndicesFor(rigType, catHook)) <= 1
+	indexedBaits := hasIndexedBaitPair(rigType)
 	counts := map[int64]int64{}
 	for _, it := range comps.Items {
 		if it == nil || it.Kind != proto.KindObj {
@@ -539,7 +555,7 @@ func rigCompsOf(f5 *proto.Value) map[int64]rigComp {
 		}
 		cat := int64(f0.U32())
 		ordinal := counts[cat]
-		if cat == 27 && singleHook {
+		if cat == catBait && indexedBaits {
 			switch f2.U32() {
 			case 351:
 				ordinal = 1
@@ -1653,6 +1669,10 @@ func (s *Server) rigComponentWriteAt(ctx context.Context, parentGUID string, slo
 // collect 语义与 dedupeRigComponents 相同：换类型等触发去重退回时，
 // 交互路径传入以收集被退回的组件，供 handler 并入快照/安排刷新。
 func (s *Server) rigItemMutate(ctx context.Context, rodGUID string, slot *int64, comp *rigComp, rigType *int64, collect ...*[]*rigReleased) bool {
+	return s.mutateRodRig(ctx, rodGUID, slot, comp, rigType, false, collect...)
+}
+
+func (s *Server) mutateRodRig(ctx context.Context, rodGUID string, slot *int64, comp *rigComp, rigType *int64, playerSwitch bool, collect ...*[]*rigReleased) bool {
 	row, err := s.DB.GetItemByGUID(ctx, rodGUID)
 	if err != nil || row == nil {
 		return false
@@ -1762,10 +1782,7 @@ func (s *Server) rigItemMutate(ctx context.Context, rodGUID string, slot *int64,
 	}
 	if rigType != nil {
 		curType = *rigType
-		// 切换钓组不是保存多个预设：一根竿只有一份当前装配。
-		// 因此只让前后模板共同支持的部件继续留在竿上；目标模板
-		// 不支持的浮漂、前导、食笼等要退回背包，不能作为旧钓组残留。
-		s.retainSharedRigComponents(ctx, row.UID, rodGUID, originalType, curType, comps, collect...)
+		s.transitionRigComponents(ctx, row.UID, rodGUID, originalType, curType, comps, playerSwitch, collect...)
 		// 保留下来的组件在新模板中的规范索引可能收敛到同一个槽位
 		// （例如两种海钓钓组都用 13/175），必须把重复项退回背包，
 		// 否则客户端渲染钓组时两个前导叠在一位，抛竿后整组被判无效。
@@ -2043,7 +2060,7 @@ func (s *Server) rigRemoveAll(ctx context.Context, uid int64, parentGUID string)
 
 // rigSetType 处理 17/1，为竿选择钓组类型。
 // 请求为 [容器, 竿 GUID, 钓组类型]，没有钓组 GUID。
-// 必须先把类型写入实例 f5 并保留现有组件，再同步 rig 派生表。
+// 先更新实例 f5 并退回旧钓组配件，再同步 rig 派生表。
 // rigSetType 切换竿钓组类型。collect 可选：交互路径传入以收集去重退回的组件
 // （17/1 快照与来源堆刷新素材）；测试与登录矫正路径可省略。
 func (s *Server) rigSetType(ctx context.Context, uid int64, rodGUID string, rigType int64, collect ...*[]*rigReleased) bool {
@@ -2069,7 +2086,9 @@ func (s *Server) rigSetType(ctx context.Context, uid int64, rodGUID string, rigT
 	// 后续矫正不能用组件推断覆盖该选择。
 	// 钓组与挂饵方式联动：mutate 里 buildRig153Like 已按新类型重算 f9，
 	// 并把失效的 f8 清零；旧选择由 savedBaitMount 按同一可选集判为未设置。
-	s.rigItemMutate(ctx, rodGUID, nil, nil, &rigType, collect...)
+	if !s.mutateRodRig(ctx, rodGUID, nil, nil, &rigType, true, collect...) {
+		return false
+	}
 	_ = s.DB.UpsertRodSetting(ctx, rodGUID, "rig_type_explicit", "1")
 	_ = s.DB.UpsertRig(ctx, rodGUID, uid, rigType, "", "{}")
 	_ = s.DB.UpdateRigType(ctx, rodGUID, rigType)
@@ -2077,16 +2096,14 @@ func (s *Server) rigSetType(ctx context.Context, uid int64, rodGUID string, rigT
 	return true
 }
 
-// retainSharedRigComponents 在切换钓组时保留两个模板共同支持的部件。
-// 一根竿目前没有按钓组类型保存多份装配预设；若不在这里卸下目标模板
-// 不支持的组件，切换后它们会继续写进新钓组的 f5，形成“外观已切换、
-// 实际仍带着旧钓组配件”的混合状态。
-//
-// 渔轮、主线、尖梢等 templateExemptCats 是竿的通用部件，不随钓组切换。
-// 饵依附钩位：目标钓组没有钩位时一并退回，防止留下孤立的饵实例。
-func (s *Server) retainSharedRigComponents(ctx context.Context, uid int64, parentGUID string, fromType, toType int64, comps map[int64]rigComp, collect ...*[]*rigReleased) {
-	if fromType == toType || len(comps) == 0 {
+// 玩家换型只保留竿侧部件；旧档类型校正仍按原规则保留兼容配件。
+func (s *Server) transitionRigComponents(ctx context.Context, uid int64, parentGUID string, fromType, toType int64, comps map[int64]rigComp, playerSwitch bool, collect ...*[]*rigReleased) {
+	if fromType == toType {
 		return
+	}
+	if playerSwitch {
+		_, _ = s.DB.SQL.ExecContext(ctx, `DELETE FROM rod_setting WHERE guid=? AND
+			(key LIKE 'rebait:%' OR key LIKE 'refill:%' OR key LIKE 'bait_hook:%')`, parentGUID)
 	}
 	keys := make([]int64, 0, len(comps))
 	for key := range comps {
@@ -2105,29 +2122,27 @@ func (s *Server) retainSharedRigComponents(ctx context.Context, uid int64, paren
 			continue
 		}
 		category, ordinal := rigCompCategory(key), rigCompOrdinal(key)
-		// 倒钓臂展开产生的 1000+ 子槽是旧钓组的运行时状态，不属于任何
-		// 模板声明的槽位。hookSlotIndexNamespace 会让 canonicalIndexForOrdinal
-		// 原样放行它们，rigComponentSharedByTypes 又按品类判为共享，
-		// dedupeRigComponents 也不会清理（每个索引都是独立槽）——于是从
-		// 倒钓臂切换到链斗式后，旧档的 1001/1005/1009 钩和 1002/1006/1010
-		// 拟饵整组残留进新钓组，客户端表现为「第三组海钩未装配却出现」。
-		// 切换钓组类型即重建装配，这些子槽一律退回背包；同一钓组内继续
-		// 装配不经过这里，rig50 的倒钓臂多钩不受影响。
-		if hookSlotIndexNamespace(category, comp.Extra) {
-			delete(comps, key)
-			s.releaseDedupedComponent(ctx, uid, parentGUID, comp.GUID, collect...)
+		if playerSwitch {
+			// f3/f4 的主线和轮保持原样。部分竿还在 f5 中列出竿体组件。
+			switch category {
+			case catLead:
+				// 主前导（震子线）占 175；同品类的 150~152 是随钓组卸下的支线。
+				if comp.Extra == 175 && extraIsTargetIndex(catLead, 175, toType) {
+					continue
+				}
+			case catLine, catReel, reelPartCatRodBlank, reelPartCatRodHandle, reelPartCatGuides, 56, 55: // 灵敏梢、包装盒
+				continue
+			}
+		} else if !hookSlotIndexNamespace(category, comp.Extra) && rigComponentSharedByTypes(fromType, toType, category) {
+			// 共同槽位也必须使用新模板的索引。
+			if len(slotIndicesFor(toType, category)) > 0 {
+				comp.Extra = canonicalIndexForOrdinal(category, comp.Extra, toType, ordinal)
+				comps[key] = comp
+			}
 			continue
 		}
-		if !rigComponentSharedByTypes(fromType, toType, category) {
-			delete(comps, key)
-			s.releaseDedupedComponent(ctx, uid, parentGUID, comp.GUID, collect...)
-			continue
-		}
-		// 共同槽位也必须使用新模板的索引。
-		if len(slotIndicesFor(toType, category)) > 0 {
-			comp.Extra = canonicalIndexForOrdinal(category, comp.Extra, toType, ordinal)
-			comps[key] = comp
-		}
+		delete(comps, key)
+		s.releaseDedupedComponent(ctx, uid, parentGUID, comp.GUID, collect...)
 	}
 }
 
@@ -2299,6 +2314,11 @@ func (s *Server) buildRigSnapshotForParent(ctx context.Context, parentGUID, item
 	}
 	for _, group := range released {
 		updated = append(updated, releasedReturnTrees(group)...)
+		for _, rel := range group {
+			if rel != nil && !rel.Returned {
+				removed = append(removed, rel.GUID)
+			}
+		}
 	}
 	return buildRigSnapshot800(added, updated, removed)
 }

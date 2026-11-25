@@ -659,7 +659,7 @@ func (s *Server) groundbaitGates(ctx context.Context, c fishRollContext, fishKey
 	layer := groundbaitClamp(s.fishLayerWeightProfile(p, c), 0.05, 1)
 	diel := groundbaitClamp(fishDielWeight(p, hour), 0.05, 1)
 	season := groundbaitClamp(fishSeasonWeight(p, water.Season), 0.05, 1)
-	rarity := groundbaitClamp(1-0.12*float64(p.RarityTier), 0.4, 1)
+	rarity := groundbaitClamp(1-0.12*float64(p.Rarity), 0.4, 1)
 	substrate := 1.0
 	if c.spotEnv.Known {
 		if prefs := fishEcologyJSONMap(p.SubstrateJSON); len(prefs) > 0 {

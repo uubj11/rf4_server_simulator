@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
 	"strings"
 	"time"
 
@@ -275,10 +274,12 @@ func (s *Server) settleCatchOnceWithQualification(ctx context.Context, uid int64
 	// 存量库里的浮点累加尾差（如 99.99999999999996）量化到 0.1 显示格，
 	// 否则钳位后产生正残渣增量，客户端渲染「+0 = 100%」技能行。
 	oldSkill = store.QuantizeSkillPoints(oldSkill)
-	// 基础增量只看熟练度（原版口径），再按鱼重 × 稀有度加权；tunable 置 0 可退回原版。
-	baseGain := fishingProficiencyGainForRoll(oldSkill, happyHourProficiencyRoll(oldSkill, rand.Float64(), happy), rand.Float64())
+	// 基础增量走 proficiencyGainForCatch：该大类配了后台固定百分比就按百分比判定，
+	// 否则走原版公式 + 欢乐时光；随后再按鱼重 × 稀有度加权（tunable 置 0 退回原版）。
+	baseGain := s.proficiencyGainForCatch(r.SkillID, oldSkill, happy)
 	gain := profWeightedGain(baseGain, s.profCatchWeightFactor(f.WeightG, f.Grade),
 		s.profCatchGainCap(), math.Max(0, profCap-oldSkill))
+	gain = store.QuantizeSkillPoints(gain) // 钳位残渣（如 3.6e-14）归零，增量保持 0.1/0.2 格
 	r.SkillGain = &gain
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(weight_g),0) FROM catch_log WHERE uid=? AND fish_key=?`, uid, f.Species).Scan(&r.PreviousBest); err != nil {
 		return nil, err

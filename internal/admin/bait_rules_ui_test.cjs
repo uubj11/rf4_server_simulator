@@ -1,8 +1,9 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path');
 const {chromium}=require('playwright');
-const html=fs.readFileSync(path.join(__dirname,'web/index.html'),'utf8');
+const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'),'utf8');
 
 test('bait rule editor supports cascade, rotation groups and unsaved close guard',async()=>{
  const browser=await chromium.launch({headless:true,executablePath:process.env.RF4_TEST_BROWSER||path.join(process.env['ProgramFiles(x86)'],'Microsoft/Edge/Application/msedge.exe')});

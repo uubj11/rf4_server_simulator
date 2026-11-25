@@ -131,7 +131,7 @@ func TestFishDielCurveAssetMatchesDerivedMaskAndSources(t *testing.T) {
 	}
 
 	wantSources := map[string]int{
-		"rf4info":              120,
+		"rf4info":              119,
 		"gamekee-avg:high/low": 1,
 		"gamekee-avg:low/high": 4,
 		"gamekee-avg:low/low":  13,
@@ -139,6 +139,8 @@ func TestFishDielCurveAssetMatchesDerivedMaskAndSources(t *testing.T) {
 		"gamekee-avg:mid/low":  15,
 		"gamekee-avg:mid/mid":  69,
 		"global-avg":           22,
+		// 手工按图鉴日/夜评级修正过的曲线（如繁殖季昼夜都咬、白天为峰的鱼）。
+		"rf4info+gamekee": 1,
 	}
 	if !reflect.DeepEqual(sources, wantSources) {
 		t.Fatalf("diel_source 覆盖不符: 得到 %v，期望 %v", sources, wantSources)

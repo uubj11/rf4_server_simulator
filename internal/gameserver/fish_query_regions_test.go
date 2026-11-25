@@ -18,8 +18,8 @@ func TestFishQueryRegionRankingUsesCompetition(t *testing.T) {
 	}
 	// The target is four times as abundant in the first cell, but competing
 	// species make its actual selection probability much worse there.
-	g.factors["target"] = []float64{4, 1, 0, 0}
-	g.factors["other"] = []float64{40, .1, 0, 0}
+	g.factors[distributionFactorCacheKey("target", 0.5)] = []float64{4, 1, 0, 0}
+	g.factors[distributionFactorCacheKey("other", 0.5)] = []float64{40, .1, 0, 0}
 	q := &fishQueryCapture{fish: "target", biteProbability: .6, acceptance: .5, gradeShare: .2,
 		regionalWeights: []fishQueryRegionalWeight{{"target", 1, .5}, {"other", 1, .8}}}
 	region, err := g.best(t.Context(), q)

@@ -8,7 +8,7 @@ package gameserver
 // 的 16603/20604 按物种稀有度 >=1 判。
 //
 // 水域 key 取自 loc_alias（官服记录卡/鱼获库实测）；鱼种 key 取自 loc_wiki_fish；
-// 饵类 fopbhlmkcpe（2/7 昆虫、6 蠕虫、13 粥/面团）、味型 acclagajcdn、线强度
+// 饵类 fopbhlmkcpe（2/7 昆虫、6 蠕虫、13 粥/面团）、饵 item_id（9103 红虫香精饵名单）、线强度
 // kngaaefkpka（公斤）取自 item_def。竿型/硬度/钓组大类同时写入下方三张表，
 // 供 5007.Idx4/5/6 下发与服务端竿型门控共用，保证「鱼竿」文案与判定一致。
 //
@@ -111,8 +111,9 @@ var eventQualificationRules = []qualificationRuleDef{
 	{ID: 9003, Event: qevFishLanded, Counted: qCountSpecies(qLocLevelIn(evLocKomarino), qFloatRig())},
 	{ID: 9101, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocKomarino, evLocVyunok), qSpeciesIn("a.sleeper"), qWeightAtLeast(220))},
 	{ID: 9102, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocKomarino, evLocVyunok), qFloatRig(), qSpeciesIn("e.chub"), qWeightAtLeast(1500))},
-	// 9103 红虫香精=味型 16（bloodworm 的 acclagajcdn，待实机核对）。
-	{ID: 9103, Event: qevFishLanded, Counted: qCountSpecies(qLocLevelIn(evLocKomarino), qBaitFlavorIn(16))},
+	// 9103 红虫香精鱼饵=红虫本身 + 红虫味煮饵。不能按 acclagajcdn==16 判：那是可用钩号上限，
+	// 会把蛆虫/蛆虫蛹/树皮甲虫幼虫算进来、漏掉红虫味煮饵（上限 25）。
+	{ID: 9103, Event: qevFishLanded, Counted: qCountSpecies(qLocLevelIn(evLocKomarino), qBaitIn(bloodwormFlavorBaits...))},
 	{ID: 9201, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocVyunok), qSpeciesIn("dace"), qWeightAtLeast(180))},
 	{ID: 9202, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocVyunok), qSpeciesIn("c_bleak"), qWeightAtLeast(85))},
 	{ID: 9203, Event: qevFishLanded, Counted: qCountSingle(qLocLevelIn(evLocKomarino), qWeightAtLeast(2000))},
@@ -457,4 +458,11 @@ func init() {
 	for _, id := range []int64{10102, 10301, 10501, 14102} {
 		driftRuleIDs[id] = true
 	}
+}
+
+// bloodwormFlavorBaits 9103「红虫香精鱼饵」：红虫、红虫 10/14、鲜艳的红虫 12/16/18。
+var bloodwormFlavorBaits = []string{
+	"bloodworm",
+	"boils_op_blw10", "boils_op_blw14",
+	"boils_sb_ibw12", "boils_sb_ibw16", "boils_sb_ibw18",
 }

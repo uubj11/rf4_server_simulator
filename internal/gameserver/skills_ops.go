@@ -103,6 +103,77 @@ func fishingProficiencyGainForRoll(current, gainRoll, amountRoll float64) float6
 	return 0.1
 }
 
+// skillProficiencyFixedChance 返回某个技能大类的固定升级概率。
+// 后台参数 skill_gain_pct_<cat>：0=原版公式；1~100=每次判定直接按该百分比。
+// 未设置、非法值或 0 都回退原版，避免手改数据库把技能成长意外关掉。
+func (s *Server) skillProficiencyFixedChance(cat int64) (float64, bool) {
+	if s == nil || cat <= 0 {
+		return 0, false
+	}
+	pct := s.tunableF(fmt.Sprintf("skill_gain_pct_%d", cat), 0)
+	if math.IsNaN(pct) || math.IsInf(pct, 0) || pct < 0 || pct > 100 {
+		return 0, false
+	}
+	if pct == 0 {
+		return 0, false
+	}
+	return pct / 100, true
+}
+
+// skillProficiencyFixedHit 对固定概率模式做一次随机判定；fixed=false 表示该大类走原版公式。
+func (s *Server) skillProficiencyFixedHit(cat int64) (hit bool, fixed bool) {
+	chance, fixed := s.skillProficiencyFixedChance(cat)
+	if !fixed {
+		return false, false
+	}
+	return s.rollSkillFloat() < chance, true
+}
+
+// skillProficiencyGainChance 返回本次判定使用的概率：
+// 配置了固定百分比就直接覆盖原版公式，否则使用原版随熟练度衰减的概率。
+func (s *Server) skillProficiencyGainChance(cat int64, current float64) (float64, bool) {
+	if fixed, ok := s.skillProficiencyFixedChance(cat); ok {
+		return fixed, true
+	}
+	return fishingProficiencyGainChance(current), false
+}
+
+// skillProficiencyGainForRoll 与纯函数版本相同，但会按技能大类应用后台固定概率。
+// 固定百分比只替换「本次是否涨」的概率，命中后 0.1/0.2 的增量规则保持不变。
+func (s *Server) skillProficiencyGainForRoll(cat int64, current, gainRoll, amountRoll float64) float64 {
+	if current >= profCap {
+		return 0
+	}
+	chance, _ := s.skillProficiencyGainChance(cat, current)
+	if gainRoll >= chance {
+		return 0
+	}
+	if amountRoll < fishingProficiencyLargeGainChance(current) {
+		return 0.2
+	}
+	return 0.1
+}
+
+// proficiencyGainForCatch 是钓获结算的熟练度判定入口。
+// 固定百分比直接覆盖原版概率，且不叠加欢乐时光对原版概率的修正。
+func (s *Server) proficiencyGainForCatch(cat int64, current float64, happy bool) float64 {
+	gainRoll := s.rollSkillFloat()
+	if _, fixed := s.skillProficiencyFixedChance(cat); !fixed {
+		gainRoll = happyHourProficiencyRoll(current, gainRoll, happy)
+	}
+	return s.skillProficiencyGainForRoll(cat, current, gainRoll, s.rollSkillFloat())
+}
+
+// skillProficiencyGainForRollHappy 在本地加权/欢乐时光链路上叠加后台固定百分比：
+// 该大类配了 skill_gain_pct_<cat> 时按固定概率判定（不叠欢乐时光对概率的修正），
+// 否则回退原版随熟练度衰减的公式 + 欢乐时光翻倍，行为与本地既有口径一致。
+func (s *Server) skillProficiencyGainForRollHappy(cat int64, current, gainRoll, amountRoll float64, happy bool) float64 {
+	if _, fixed := s.skillProficiencyFixedChance(cat); fixed {
+		return s.skillProficiencyGainForRoll(cat, current, gainRoll, amountRoll)
+	}
+	return fishingProficiencyGainForRoll(current, happyHourProficiencyRoll(current, gainRoll, happy), amountRoll)
+}
+
 // awardFishingProficiency 按实际钓组大类增加熟练度；happy 表示欢乐时光是否生效。
 func (s *Server) awardFishingProficiency(ctx context.Context, uid, rigType int64, happy bool) (int64, float64) {
 	cat := fishingSkillCatForRig(rigType)
@@ -136,9 +207,7 @@ func (s *Server) awardCraftProficiency(ctx context.Context, uid, cat, items int6
 	}
 	gain := 0.0
 	for i := int64(0); i < items && current+gain < profCap; i++ {
-		if g := fishingProficiencyGainForRoll(current+gain,
-			happyHourProficiencyRoll(current+gain, s.rollSkillFloat(), happy),
-			s.rollSkillFloat()); g > 0 {
+		if g := s.skillProficiencyGainForRollHappy(cat, current+gain, s.rollSkillFloat(), s.rollSkillFloat(), happy); g > 0 {
 			gain += g
 		}
 	}
@@ -164,7 +233,7 @@ func (s *Server) awardSkillProficiencyWithRolls(ctx context.Context, uid, cat in
 	if err != nil {
 		return 0
 	}
-	gain := fishingProficiencyGainForRoll(current, happyHourProficiencyRoll(current, gainRoll, happy), amountRoll)
+	gain := s.skillProficiencyGainForRollHappy(cat, current, gainRoll, amountRoll, happy)
 	if gain <= 0 {
 		return 0
 	}

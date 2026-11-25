@@ -2,7 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
-from stage_preview import allowed, optional_local_files, stage
+from stage_preview import allowed, optional_local_files, release_resources, stage
 
 class StagingTests(unittest.TestCase):
     def test_only_allowed_resources_are_copied(self):
@@ -47,6 +47,17 @@ class StagingTests(unittest.TestCase):
                 fh.truncate((128 << 20) + 1)
             with self.assertRaises(ValueError):
                 optional_local_files(root)
+
+    def test_release_resources_merge_tracked_and_optional_files(self):
+        with tempfile.TemporaryDirectory(prefix='rf4-stage-') as tmp:
+            root = Path(tmp)
+            archive = root/'ref/icons.zip'
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b'zip')
+            self.assertEqual(
+                release_resources(root, ['README.md', '', 'README.md']),
+                ['README.md', 'ref/icons.zip'],
+            )
 
 if __name__ == '__main__':
     unittest.main()

@@ -322,8 +322,8 @@ func TestWearAddsHistoryAndWearsRodBody(t *testing.T) {
 	if freshRod.Durability >= 1 {
 		t.Fatalf("竿本体应产生磨损，耐久=%v", freshRod.Durability)
 	}
-	if freshLine.Durability >= 1 {
-		t.Fatalf("鱼线应产生磨损，耐久=%v", freshLine.Durability)
+	if freshLine.Durability != 1 {
+		t.Fatalf("主线不应按尾磨损，耐久=%v", freshLine.Durability)
 	}
 	logs, err := db.ListItemDamageLogs(ctx, uid, 20)
 	if err != nil {
@@ -335,8 +335,8 @@ func TestWearAddsHistoryAndWearsRodBody(t *testing.T) {
 			got[entry.ItemGUID] = true
 		}
 	}
-	if !got[rod.GUID] || !got[line.GUID] {
-		t.Fatalf("磨损历史缺少竿或线: %+v", got)
+	if !got[rod.GUID] || got[line.GUID] {
+		t.Fatalf("磨损历史应只有竿、不应有主线: %+v", got)
 	}
 }
 

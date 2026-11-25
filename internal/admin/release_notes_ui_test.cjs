@@ -1,7 +1,8 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const {chromium}=require('playwright');
-const html=fs.readFileSync(path.join(__dirname,'web/index.html'),'utf8');
+const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'),'utf8');
 const NOTE='# 发布说明\n\n- 修复 **登录**\n- 来自发布包内的 发布说明.md';
 test('release notes page renders local package markdown',async()=>{
  const browser=await chromium.launch({headless:true,executablePath:process.env.RF4_TEST_BROWSER});

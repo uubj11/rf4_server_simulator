@@ -22,10 +22,6 @@ func mustOverride(fishZh string) store.FishBaitOverride {
 	}
 }
 
-func readWebIndex() ([]byte, error) {
-	return fs.ReadFile(WebFS(), "index.html")
-}
-
 // 鱼饵偏好页配置的轮换，必须在钓场鱼口页（/api/fish/config）同步可见：
 // FishConfigRow 需要携带 fish_bait_override 的轮换组与开关，
 // 否则钓场页只有权重和启用状态，无法显示轮换。
@@ -106,22 +102,31 @@ func TestFishConfigWithoutOverrideHasDefaultSource(t *testing.T) {
 	t.Fatal("鱼口配置里没有 c.roach")
 }
 
-// 前端约束：钓场页必须把轮换渲染出来，且鱼饵偏好保存后要失效饵料缓存。
-func TestFishPageRendersBaitRotation(t *testing.T) {
-	b, err := readWebIndex()
+// 前端约束：当前生效的钓场模块必须渲染后端权威轮换数据，鱼饵偏好保存后必须重新加载。
+func TestActiveFishPageRendersBaitRotation(t *testing.T) {
+	waters, err := fs.ReadFile(WebFS(), "app/pages/waters.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	html := string(b)
+	bait, err := fs.ReadFile(WebFS(), "app/pages/bait.js")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, sub := range []string{
-		"baitSummaryHTML(f.fish_key,f)", // 传入整行，才能拿到 bait_* 字段
-		"row.bait_groups",               // 用后端权威轮换组
-		"row.bait_rotate_sec",
-		"🔁 轮换",              // 钓场页可见的轮换标记
-		"invalidateBaitMap", // 保存后失效缓存
+		"row.bait_groups",                    // 用后端权威轮换组
+		"row.bait_rotate_sec",                // 轮换时间来自同一行
+		"baitCell(f, baitByKey[f.fish_key])", // 钓场列表按鱼行渲染饵料摘要
 	} {
-		if !strings.Contains(html, sub) {
-			t.Errorf("钓场页缺少轮换同步标记：%q", sub)
+		if !strings.Contains(string(waters), sub) {
+			t.Errorf("当前钓场模块缺少轮换同步标记：%q", sub)
+		}
+	}
+	for _, sub := range []string{
+		"await put('/api/bait/rules'", // 保存覆盖规则
+		"reload();",                   // 保存后刷新偏好列表
+	} {
+		if !strings.Contains(string(bait), sub) {
+			t.Errorf("当前鱼饵模块缺少保存后刷新标记：%q", sub)
 		}
 	}
 }

@@ -5029,7 +5029,7 @@
     "temp_min_c": 8.5224,
     "temp_pref_c": 17.3309,
     "temp_max_c": 27.4703,
-    "diel_mask": 7,
+    "diel_mask": 14,
     "season_mask": 15,
     "diet_json": "{\"crustacean\":0.85,\"fish\":1.5054517744447955,\"lure\":2.056493479166277,\"plant\":0.2,\"worm\":1.7402155329827151}",
     "weather_json": "{\"clear\":0.9894,\"cloudy\":1.126,\"few_clouds\":1.1129,\"fog\":0.9186,\"heavy_rain\":0.9355,\"rain\":1.0793,\"thunderstorm\":0.8319,\"wind\":1.0045}",
@@ -5049,8 +5049,8 @@
       "profile": "deterministic species ecology baseline",
       "taxonomy": "species_weight+fish_key"
     },
-    "diel_curve": "[1.0,0.61,0.64,0.43]",
-    "diel_source": "rf4info"
+    "diel_curve": "[0.35,0.8,1.0,0.85]",
+    "diel_source": "rf4info+gamekee"
   },
   {
     "fish_key": "piksha",

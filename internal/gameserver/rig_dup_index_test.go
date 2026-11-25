@@ -98,8 +98,8 @@ func TestDuplicateRigIndexIsReturnedByProjection(t *testing.T) {
 	}
 }
 
-// TestRigTypeSwitchDedupesSameIndex 验证换钓组类型时同索引组件被收敛。
-func TestRigTypeSwitchDedupesSameIndex(t *testing.T) {
+// TestRigTypeSwitchKeepsOneShockLeader 验证同索引旧档换型只保留一份震子线。
+func TestRigTypeSwitchKeepsOneShockLeader(t *testing.T) {
 	t.Parallel()
 	srv, db := newDetachTestServer(t)
 	ctx := context.Background()
@@ -144,11 +144,8 @@ func TestRigTypeSwitchDedupesSameIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := rigTestCategoryComps(t, rigStoredF5(t, fresh), 13)
-	if len(got) != 1 {
-		t.Fatalf("换类型后同索引前导仍有 %d 条: %+v", len(got), got)
-	}
-	if got[0].GUID != first.GUID {
-		t.Fatalf("两条都 target-valid 时应保留先装配的 first，实得 %+v", got)
+	if len(got) != 1 || got[0].GUID != first.GUID || got[0].Extra != 175 {
+		t.Fatalf("应只保留原震子线: %+v", got)
 	}
 }
 

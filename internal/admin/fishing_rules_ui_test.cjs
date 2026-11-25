@@ -1,3 +1,4 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
@@ -7,7 +8,7 @@ test('fishing rule switches save independently, reload and fit supported sizes a
  const rules=[{key:'fish_bait_rules_enabled',prefix:'fishRules',default:'0'},{key:'fish_distribution_enabled',prefix:'fishDistribution',default:'0'},{key:'fish_weather_enabled',prefix:'fishWeather',default:'0'}];
  const values={debug_mode:'1',bite_delay_fixed:'17'};
  let failRead=false,failWrite=false,writes=0;
- const html=fs.readFileSync(path.join(__dirname,'web/index.html'));
+ const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'));
  const server=http.createServer((req,res)=>{
   const url=new URL(req.url,'http://fixture'),key=url.pathname.replace(/^\/admin/,'');
   const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};

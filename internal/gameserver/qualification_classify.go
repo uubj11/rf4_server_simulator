@@ -339,11 +339,11 @@ func qLineStrengthAtMost(kg float64) qFilter {
 	}
 }
 
-// qBaitFlavorIn 天然饵味型命中（item_def acclagajcdn）。
-func qBaitFlavorIn(flavors ...int64) qFilter {
+// qBaitIn 钩上饵/拟饵 item_id 命中名单。
+func qBaitIn(ids ...string) qFilter {
 	return func(ev qualificationEvent) bool {
-		for _, f := range flavors {
-			if ev.BaitFlavor == f {
+		for _, id := range ids {
+			if ev.Bait == id {
 				return true
 			}
 		}
@@ -418,8 +418,8 @@ func qCountBaitItem(filters ...qFilter) func(qualificationEvent) string {
 }
 
 // qCountBaitFlavor 过滤通过则按饵的味道去重计数（「N 种不同味道的颗粒」）。
-// 味道不能取 item_def.acclagajcdn：颗粒/煮饵整族都是同一档位（实测 25），
-// 按它数永远到不了文案要求的种数。可区分味道的是饵本身——
+// 味道不能取 item_def.acclagajcdn：它是可用钩号上限（颗粒/煮饵整族都是 25），
+// 不是味型，按它数永远到不了文案要求的种数。可区分味道的是饵本身——
 // plt_cb_pch14/18/24 是同一味道的不同尺寸，去掉尾部尺寸数字后同键。
 func qCountBaitFlavor(filters ...qFilter) func(qualificationEvent) string {
 	return func(ev qualificationEvent) string {

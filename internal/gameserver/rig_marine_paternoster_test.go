@@ -5,7 +5,7 @@ package gameserver
 // 实机证据（logs/gameserver.log 2026-11-14 17:13–18:08，杆 914e9495）：
 //
 //	17:13:15 竿钓组类型更新 rig_type=57
-//	17:13:17 装配 slot=29 extra=200   ← 震子线
+//	17:13:17 装配 slot=29 extra=200   ← 沉子
 //	17:13:20 装配 slot=13 extra=150   ← 第一组海引线
 //	17:13:25 装配 slot=12 extra=250   ← 第一组海钩
 //	18:02:48 装配 slot=17 extra=300   ← 第一组拟饵（客户端索引 300）
@@ -92,7 +92,7 @@ func TestPaternosterMountKeepsClientReportedIndices(t *testing.T) {
 	s, _ := newRigTestServer(t)
 	rod := paternosterTestRod(t, s)
 
-	// 与实机日志同序：震子线、三组引线/钩、三个吸引成分，最后三个拟饵。
+	// 与实机日志同序：沉子、三组引线/钩、三个吸引成分，最后三个拟饵。
 	paternosterMount(t, s, rod, 29, "pyrsinker_30026", 200)
 	paternosterMount(t, s, rod, 13, "sh_leader_40815", 150)
 	paternosterMount(t, s, rod, 12, "clas_20163", 250)
@@ -129,9 +129,9 @@ func TestPaternosterMountKeepsClientReportedIndices(t *testing.T) {
 			}
 		}
 	}
-	// 装三组海引线后震子线必须仍在（旧模板下会被自动切类型退回背包）。
+	// 装三组海引线后沉子必须仍在（旧模板下会被自动切类型退回背包）。
 	if n := byIndex[29][200]; n != 1 {
-		t.Fatalf("装完海引线后震子线丢了：29 槽位 = %v", byIndex[29])
+		t.Fatalf("装完海引线后沉子丢了：29 槽位 = %v", byIndex[29])
 	}
 }
 
@@ -207,7 +207,7 @@ func TestSwitchToPaternosterDropsStaleArmSlots(t *testing.T) {
 		t.Fatalf("切类型前钩组件 = %d，期望 4（主钩 + 三个倒钓臂钩位）", n)
 	}
 
-	// 切到链斗式，残留必须清干净，正常的 250 主钩保留。
+	// 切到链斗式，残留必须清干净，250 主钩也随钓组卸下。
 	if !s.rigSetType(ctx, 1000001, rod.GUID, 57) {
 		t.Fatal("rigSetType(57) 失败")
 	}
@@ -219,8 +219,8 @@ func TestSwitchToPaternosterDropsStaleArmSlots(t *testing.T) {
 		}
 	}
 	hooks := rigCompKeysOfCategory(after, catHook)
-	if len(hooks) != 1 || after[hooks[0]].Extra != 250 {
-		t.Fatalf("切到 rig57 后应只剩 250 主钩，实得 %d 条: %v", len(hooks), after)
+	if len(hooks) != 0 {
+		t.Fatalf("切到 rig57 后钩位应清空，实得 %d 条: %v", len(hooks), after)
 	}
 	// rig_component 派生表也不能留残留：它与 f5 一起下发给客户端。
 	rows, err := db.SQL.Query(`SELECT slot, extra FROM rig_component WHERE rig_guid=? AND extra>=1000`, rod.GUID)

@@ -1,3 +1,4 @@
+// Legacy fallback fixture; active SPA smoke lives in spa_active_ui_test.cjs.
 // 地图区域编辑器 UI：纸地图渲染 + 拖拽吸附 40m 网格 + 本图名册选鱼 + 保存回传。
 // 运行前提：npm i --no-save playwright；浏览器可用 RF4_TEST_BROWSER 指定（默认系统 Edge）。
 // 期望值按 docs/fish-query-coordinates.md 公式手算（图像像素=世界×scale+offset；网格=floor(世界/40)），
@@ -12,7 +13,7 @@ const {chromium}=require('playwright');
 const CAL={origin_x:0,origin_z:0,size:400,paper:{offset_x:56,offset_z:37,scale:4.824,width:2048,height:2048}};
 
 test('zone map editor draws on paper map with 40m grid snap',async()=>{
- const html=fs.readFileSync(path.join(__dirname,'web/index.html'));
+ const html=fs.readFileSync(path.join(__dirname,'web/legacy.html'));
  const webDir=path.join(__dirname,'web');
  const posts=[];
  const server=http.createServer((req,res)=>{

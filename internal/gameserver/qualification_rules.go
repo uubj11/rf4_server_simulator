@@ -44,7 +44,7 @@ type qualificationEvent struct {
 	Bait           string  // 钩上饵/拟饵 item_id
 	BaitCat        int64   // 饵品类（17 拟饵 / 27 天然饵）
 	BaitClass      int64   // 天然饵饵类（item_def fopbhlmkcpe：2/7=昆虫，9=颗粒，13=面团）
-	BaitFlavor     int64   // 天然饵味型（item_def acclagajcdn）
+	BaitFlavor     int64   // item_def acclagajcdn：实为可用钩号上限（下限 kpopjffooed），不是味型；字段名沿用以兼容已存快照
 	LureType       int64   // 拟饵类型（item_def mbemakijdeh），拟饵族判定用
 	LureLenCM      float64 // 拟饵长度（厘米，item_def bbhhojphpfa）
 	BaitSizeMM     float64 // 饵尺寸/直径（毫米，item_def hkgndoipdlc）
@@ -408,7 +408,7 @@ var qualificationRules = []qualificationRuleDef{
 
 	// ---- 分支 7 鲤鱼捕钓（阶段 1-7）----
 	// 发丝钓组取底部发丝族 {24,25,26,27,28,29,32,34} 与浮钓发丝 {30,31}。
-	// 颗粒成饵=饵类 9，颗粒拟饵=饵类 17；尺寸取 hkgndoipdlc（毫米），味型 acclagajcdn。
+	// 颗粒成饵=饵类 9，颗粒拟饵=饵类 17；尺寸取 hkgndoipdlc（毫米）；味道按饵 item_id 区分（qCountBaitFlavor）。
 	// 阶段 1
 	{ID: 7001, Event: qevFishLanded, Counted: qCountSpecies(qRigIn(24, 25, 26, 27, 28, 29, 30, 31, 32, 34))},
 	{ID: 7002, Event: qevFishLanded, Counted: qCountBaitFlavor(qBaitClassIn(9, 17))},
@@ -644,7 +644,7 @@ type qualificationBait struct {
 }
 
 // lureAttrLengthCM / baitAttrSizeMM / baitAttrFlavor / lureAttrType 是饵定义属性键。
-// 拟饵长度与天然饵尺寸都是 F32 位型，味型与拟饵类型是整型。
+// 拟饵长度与天然饵尺寸都是 F32 位型，钩号上限（baitAttrFlavor，历史命名）与拟饵类型是整型。
 const (
 	lureAttrLengthCM = "bbhhojphpfa"
 	baitAttrSizeMM   = "hkgndoipdlc"

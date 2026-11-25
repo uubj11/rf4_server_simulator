@@ -37,6 +37,11 @@ func (s *Server) attachDB(db *store.DB, log *slog.Logger) {
 	if err := s.reloadFishEcologyCache(context.Background()); err != nil {
 		s.log.Warn("鱼种生态缓存加载失败", "err", err)
 	}
+	if rarities, err := db.SpeciesRarityMap(context.Background()); err != nil {
+		s.log.Warn("鱼种稀有度加载失败，缺席判定按普通鱼处理", "err", err)
+	} else {
+		setFishRaritySnapshot(rarities)
+	}
 	if n, err := s.reloadMarineFishKeys(context.Background()); err != nil {
 		s.log.Warn("海图鱼种集合加载失败，海水组回退词表判定", "err", err)
 	} else if n > 0 {

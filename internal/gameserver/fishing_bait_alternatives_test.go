@@ -67,8 +67,8 @@ func TestBaitRuleConditionsAndLegalAlternateDiet(t *testing.T) {
 	}
 	now := time.Now()
 	keys, weights := s.filterFishBaitSet("rules-test", []string{"rule_other"}, []string{"c.roach"}, []float64{1}, now)
-	if len(keys) != 1 || math.Abs(weights[0]/maxBaitPreference-.05) > 1e-12 {
-		t.Fatalf("legal alternate must be 5%%: %v %v", keys, weights)
+	if len(keys) != 1 || math.Abs(weights[0]/maxBaitPreference-legalAlternativeShare) > 1e-12 {
+		t.Fatalf("legal alternate must use legalAlternativeShare: %v %v", keys, weights)
 	}
 	if keys, _ := s.filterFishBaitSet("rules-test", []string{"rule_unknown"}, []string{"c.roach"}, []float64{1}, now); len(keys) != 0 {
 		t.Fatal("unknown natural bait became universal food")

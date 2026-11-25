@@ -28,7 +28,7 @@ func TestFishDistributionRegionsTimeAndActivity(t *testing.T) {
 	weights := func(area string, at time.Time) []float64 {
 		var out []float64
 		for _, key := range keys {
-			out = append(out, distributionMultiplier(area, key, at))
+			out = append(out, distributionMultiplier(area, key, at, 0))
 		}
 		return out
 	}
@@ -36,7 +36,7 @@ func TestFishDistributionRegionsTimeAndActivity(t *testing.T) {
 	if !reflect.DeepEqual(w, weights(a, now.Add(time.Second))) {
 		t.Fatal("school must stay stable within its refresh period")
 	}
-	if reflect.DeepEqual(w, weights(fishArea("map-a", c), now)) || reflect.DeepEqual(w, weights(a, now.Add(600*time.Second))) {
+	if reflect.DeepEqual(w, weights(fishArea("map-a", c), now)) || reflect.DeepEqual(w, weights(a, now.Add(distributionPeriodRealHours*time.Hour))) {
 		t.Fatal("regions and refresh periods must change schools")
 	}
 	if activityMultiplier("ruffe", 23) <= activityMultiplier("ruffe", 12) || activityMultiplier("perch", 23) >= activityMultiplier("perch", 12) {
@@ -46,15 +46,23 @@ func TestFishDistributionRegionsTimeAndActivity(t *testing.T) {
 	if activityMultiplier("unknown", 23) != 1 {
 		t.Fatal("unknown activity must be neutral")
 	}
-	zero, positive := false, false
-	for i := 0; i < 40; i++ {
-		v := distributionMultiplier(a, "perch", now.Add(time.Duration(i)*600*time.Second))
-		zero = zero || v == 0
-		positive = positive || v > 0
+	// 普通鱼（perch）常驻，只有稀有鱼（eel，rarity 1）会整天缺席。
+	setFishRaritySnapshot(map[string]int64{"eel": 1})
+	perchZero, eelZero, eelPositive := false, false, false
+	for i := 0; i < 200; i++ {
+		at := now.Add(time.Duration(i) * distributionPeriodRealHours * time.Hour)
+		perchZero = perchZero || distributionMultiplier(a, "perch", at, 0) == 0
+		v := distributionMultiplier(a, "eel", at, 0)
+		eelZero = eelZero || v == 0
+		eelPositive = eelPositive || v > 0
 	}
-	if !zero || !positive {
-		t.Fatal("fish must move in and out of regions")
+	if perchZero {
+		t.Fatal("common fish must never disappear for a whole day")
 	}
+	if !eelZero || !eelPositive {
+		t.Fatal("rare fish must move in and out of regions")
+	}
+	setFishRaritySnapshot(map[string]int64{})
 }
 
 func TestFishSwitchCombinationsAndNoDisabledFallback(t *testing.T) {

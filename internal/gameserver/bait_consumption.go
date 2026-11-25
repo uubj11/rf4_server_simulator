@@ -890,7 +890,8 @@ func (s *Server) reloadBaitForCast(ctx context.Context, uid int64, rod string) (
 			}
 			request.HookGUID = comps[hooks[0]].GUID
 		}
-		if _, _, present := rigCompKeyForGUID(comps, request.HookGUID); !present {
+		_, targetHook, present := rigCompKeyForGUID(comps, request.HookGUID)
+		if !present {
 			if _, err := s.DB.SQL.ExecContext(ctx, `DELETE FROM rod_setting WHERE guid=? AND key=?`, rod, key); err != nil {
 				return out, err
 			}
@@ -907,7 +908,16 @@ func (s *Server) reloadBaitForCast(ctx context.Context, uid int64, rod string) (
 					break
 				}
 			}
-			mountOrdinal = int64(len(rigCompKeysOfCategory(comps, catBait)))
+			if hasFixedMarineBaitSlots(rigType) {
+				// 固定饵位不能按剩余件数追加：仅剩 351 时补第一钩会覆盖它。
+				if targetHook.Extra == 250 || targetHook.Extra == 251 {
+					mountOrdinal = targetHook.Extra - 250
+				}
+				_, slotTaken := comps[rigCompKey(catBait, mountOrdinal)]
+				occupied = occupied || slotTaken
+			} else {
+				mountOrdinal = int64(len(rigCompKeysOfCategory(comps, catBait)))
+			}
 		} else {
 			_, occupied = comps[rigCompKey(catBait, ordinal)]
 		}
@@ -951,7 +961,7 @@ func (s *Server) reloadBaitForCast(ctx context.Context, uid int64, rod string) (
 				if err := s.DB.UpsertRodSetting(ctx, rod, "bait_hook:"+result.MountedGUID, request.HookGUID); err != nil {
 					return out, err
 				}
-				if multi {
+				if multi && !hasFixedMarineBaitSlots(rigType) {
 					if err := s.orderBaitsByHook(ctx, uid, rod); err != nil {
 						return out, err
 					}
