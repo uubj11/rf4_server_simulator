@@ -92,9 +92,12 @@ const (
 	// 挖掘/搏鱼的消耗靠“吃饱→快速回精力→再消耗”的循环，不再等几十分钟。
 	defEnergyRegenPerHour = 100.0
 	// 垂钓中自然恢复乘数：上游 0.0 表示竿在水中时恢复完全停摆。
-	// 本地不启用该机制（本地已有钓鱼时的精力损耗计算，再停摆就会没力气钓鱼），
-	// advancePlayerCondition 不再乘这个系数；字段与 tunable 保留只为兼容旧配置。
+	// 本地口径：默认不停摆（本地已有抛投/搏鱼消耗，再停恢复会「越钓越没力气」），
+	// 停摆开关 defFishingPauseEnabled 默认关；乘数 tunable 只在开关打开时生效。
 	defEnergyRegenFishingMult = 0.0
+	// 垂钓停摆开关默认值：本地关（0）。上游 PR449 默认开，v0.1.11 合并时把默认带成 1，
+	// 导致竿在水里精力完全不涨（2026-11-25 玩家反馈「钓鱼时体力回不上来」）。
+	defFishingPauseEnabled = 0.0
 	// 精力硬上限 1.0：客户端状态条按 1.0 归一化画满（0.85 只画到 85%）。
 	// 官服抓包 f0 静止恒 0.85 是"自然恢复封顶"，不是上限——动作掉下去后
 	// 15 秒内只回升到 0.85 就停住。最后那 15% 要靠咖啡/可可这类消耗品补满，
@@ -224,7 +227,7 @@ func (s *Server) conditionParams() conditionParams {
 	return conditionParams{
 		Enabled:                s.tunableF(tunableConditionEnabled, 1) >= 0.5,
 		HealthEnabled:          s.tunableF(tunableHealthEnabled, 1) >= 0.5,
-		FishingPauseEnabled:    s.tunableF(tunableFishingPauseEnabled, 1) >= 0.5,
+		FishingPauseEnabled:    s.tunableF(tunableFishingPauseEnabled, defFishingPauseEnabled) >= 0.5,
 		HungerDecayPerHour:     s.tunableF(tunableHungerDecayPerHour, defHungerDecayPerHour),
 		EnergyRegenPerHour:     s.tunableF(tunableEnergyRegenPerHour, defEnergyRegenPerHour),
 		EnergyMax:              s.tunableF(tunableEnergyMax, defEnergyMax),

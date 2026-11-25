@@ -120,6 +120,25 @@ func TestPlayerFishingActiveStates(t *testing.T) {
 	}
 }
 
+// 本地口径回归：停摆开关默认关闭，竿在水中时精力照常恢复。
+// v0.1.11 合并曾把上游默认（开）带进来，导致本轮「钓鱼时体力回不上来」。
+func TestFishingRegenContinuesByLocalDefault(t *testing.T) {
+	t.Parallel()
+	if defFishingPauseEnabled >= 0.5 {
+		t.Fatalf("本地默认应为「不停摆」，defFishingPauseEnabled=%v", defFishingPauseEnabled)
+	}
+	p := testConditionParams()
+	p.FishingPauseEnabled = defFishingPauseEnabled >= 0.5
+	p.EnergyRegenPerHour = defEnergyRegenPerHour
+	p.EnergyRegenFoodCost = 0
+
+	cur := store.PlayerCondition{Primary: 0.50, Secondary: 1.0, Comfort: 1.0, UpdatedTS: 1000}
+	fishing := advancePlayerCondition(cur, 1000+60, p, conditionEnv{Fishing: true})
+	if fishing.Primary <= 0.50 {
+		t.Fatalf("垂钓中应照常恢复精力，期望 >0.50，实得 %.6f", fishing.Primary)
+	}
+}
+
 // 多竿时任一竿在水中就算垂钓中；未知玩家不报垂钓，也不因判据去建鱼状态。
 func TestPlayerFishingActiveAnyRod(t *testing.T) {
 	t.Parallel()
