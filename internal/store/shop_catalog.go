@@ -491,6 +491,11 @@ func (d *DB) effectiveShopShelf(ctx context.Context, storeID string) (*shopShelf
 	if shareFishingPrices {
 		fillMissingPrices(effective, fishingPrices)
 	}
+	// 补价只填缺失字段；显式覆盖可能合法地把某一种货币设为 0，
+	// 必须在补价后重新应用，否则 0 会被当成缺价再次填回。
+	if shareFishingPrices && len(overrides) > 0 {
+		effective = applyShopOverrides(effective, overrides)
+	}
 	return &shopShelfResolution{
 		Base:         base,
 		Effective:    effective,

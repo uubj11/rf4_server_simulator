@@ -508,10 +508,13 @@ func TestShopCatalogFillsMissingPricesAcrossFishingStores(t *testing.T) {
 		('fishing_store_01','need_silver',0,100,5),
 		('fishing_store_01','need_gold',1234,0,6),
 		('fishing_store_01','keep_both',100,10,7),
+		('fishing_store_01','override_zero',50,10,1),
 		('fishing_store_02','need_silver',5678,100,9),
 		('fishing_store_02','keep_both',999,99,9),
+		('fishing_store_02','override_zero',50,10,1),
 		('fishing_store_02','only_in_02',999,0,1);
-		INSERT INTO item_price(item_id,silver,gold,stock) VALUES('need_gold',0,200,0);`); err != nil {
+		INSERT INTO item_price(item_id,silver,gold,stock) VALUES('need_gold',0,200,0);
+		INSERT INTO shop_item_override(store_id,item_id,silver,gold,stock) VALUES('fishingstore_006','override_zero',0,10,1);`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -520,7 +523,7 @@ func TestShopCatalogFillsMissingPricesAcrossFishingStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(other) != 3 {
+	if len(other) != 4 {
 		t.Fatalf("补价格不得新增或删除商品: %+v", other)
 	}
 	if p := findShopPrice(t, other, "need_silver"); p.Silver != 5678 || p.Gold != 100 || p.Stock != 5 {
@@ -531,6 +534,9 @@ func TestShopCatalogFillsMissingPricesAcrossFishingStores(t *testing.T) {
 	}
 	if p := findShopPrice(t, other, "keep_both"); p.Silver != 100 || p.Gold != 10 {
 		t.Fatalf("已有价格不得被覆盖: %+v", p)
+	}
+	if p := findShopPrice(t, other, "override_zero"); p.Silver != 0 || p.Gold != 10 {
+		t.Fatalf("显式 0 覆盖不能被跨店补价重新填回: %+v", p)
 	}
 	if hasShopPrice(other, "only_in_02") {
 		t.Fatal("不得新增别店独有的商品")
