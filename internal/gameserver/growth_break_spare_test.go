@@ -35,8 +35,8 @@ func durabilityFieldOf(t *testing.T, row *store.Item) float64 {
 	return float64(proto.F32FromBits(uint32(u64Of(fields[idx].Num))))
 }
 
-// 成长套装的竿被 17/9 判超载时，只扣耐久到下限，不得彻底损坏：
-// 竿仍在、钓组与组件原样保留、11028 的移除列表为空。
+// 成长套装的竿被 17/9 判超载时，竿本体毫发无损（耐久回满），钓组与组件原样保留：
+// 玩家只丢这一竿鱼，竿不会显示成「损耗 90% 且没有修复入口」的废件。
 func TestGrowthRodBreakSparesRodAndRig(t *testing.T) {
 	t.Parallel()
 	srv, db := newRigTestServer(t)
@@ -87,11 +87,11 @@ func TestGrowthRodBreakSparesRodAndRig(t *testing.T) {
 	if freshRod == nil {
 		t.Fatal("成长件断竿后竿本体不得被删")
 	}
-	if math.Abs(freshRod.Durability-growthDurabilityFloor) > 1e-9 {
-		t.Fatalf("成长竿耐久应停在下限 %.2f，实得 %.4f", growthDurabilityFloor, freshRod.Durability)
+	if math.Abs(freshRod.Durability-1.0) > 1e-9 {
+		t.Fatalf("成长竿超载后耐久应回满 1.0，实得 %.4f", freshRod.Durability)
 	}
-	if got := durabilityFieldOf(t, freshRod); math.Abs(got-growthDurabilityFloor) > 1e-6 {
-		t.Fatalf("耐久字段应写 %.2f，实得 %.4f", growthDurabilityFloor, got)
+	if got := durabilityFieldOf(t, freshRod); math.Abs(got-1.0) > 1e-6 {
+		t.Fatalf("耐久字段应写 1.0，实得 %.4f", got)
 	}
 	for _, guid := range []string{hook.GUID, bobber.GUID} {
 		if row, _ := db.GetItemByGUID(ctx, guid); row == nil {

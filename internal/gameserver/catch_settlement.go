@@ -44,7 +44,9 @@ type catchWear struct {
 
 // catchWearForItem 计算一件钓组件的本次磨损快照（只算，不落库）。
 // growth 表示该实例已登记为成长套装件：成长件按鱼重回复耐久（见 growthDurabilityAfterCatch）。
-func catchWearForItem(row *store.Item, key string, fishWeightKg float64, growth bool, slot, ordinal int64) (*catchWear, error) {
+// noWear 表示该件走「永不磨损」口径（目前只有成长套装竿）：耐久直接回满 1.0，
+// 满耐久时不再产生磨损写入与损伤日志，避免每竿鱼都刷一条无变化的 wear 记录。
+func catchWearForItem(row *store.Item, key string, fishWeightKg float64, growth, noWear bool, slot, ordinal int64) (*catchWear, error) {
 	if row == nil {
 		return nil, nil
 	}
@@ -52,7 +54,13 @@ func catchWearForItem(row *store.Item, key string, fishWeightKg float64, growth 
 	if amount <= 0 || row.Durability <= 0 {
 		return nil, nil
 	}
-	durability := growthDurabilityAfterCatch(row.Durability, amount, fishWeightKg, growth)
+	if noWear && row.Durability >= 1 {
+		return nil, nil
+	}
+	durability := 1.0
+	if !noWear {
+		durability = growthDurabilityAfterCatch(row.Durability, amount, fishWeightKg, growth)
+	}
 	fields, err := FieldsFromJSON(row.FieldsJSON)
 	if err != nil {
 		return nil, err
@@ -88,7 +96,8 @@ func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string
 	}
 	var out []catchWear
 	seen := map[string]bool{}
-	add := func(guid, key string, slot, ordinal int64) error {
+	rodNoWear := s.growthRodNoWear() && s.isGrowthRod(ctx, rigGUID)
+	add := func(guid, key string, slot, ordinal int64, noWear bool) error {
 		if guid == "" || seen[guid] {
 			return nil
 		}
@@ -107,7 +116,7 @@ func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string
 			return nil
 		}
 		growth := s.isGrowthItem(ctx, row.GUID)
-		w, err := catchWearForItem(row, key, fishWeightKg, growth, slot, ordinal)
+		w, err := catchWearForItem(row, key, fishWeightKg, growth, noWear, slot, ordinal)
 		if err != nil {
 			return err
 		}
@@ -126,11 +135,11 @@ func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string
 		if !ok {
 			key = "default"
 		}
-		if err := add(component.GUID, key, component.Slot, component.Ordinal); err != nil {
+		if err := add(component.GUID, key, component.Slot, component.Ordinal, false); err != nil {
 			return nil, err
 		}
 	}
-	if err := add(rigGUID, "rod", gearCatRod, 0); err != nil {
+	if err := add(rigGUID, "rod", gearCatRod, 0, rodNoWear); err != nil {
 		return nil, err
 	}
 	return out, nil

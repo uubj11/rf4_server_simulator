@@ -55,7 +55,7 @@ func TestDriftedDurabilityColumnKeepsCatchSettlement(t *testing.T) {
 		t.Fatalf("列确实变了，用例前提不成立")
 	}
 
-	cw, err := catchWearForItem(row, "default", 3.319, true, 6, 0)
+	cw, err := catchWearForItem(row, "default", 3.319, true, false, 6, 0)
 	if err != nil {
 		t.Fatalf("列与字段漂移不该让整条结算失败: %v", err)
 	}

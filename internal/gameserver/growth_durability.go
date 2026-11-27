@@ -57,6 +57,40 @@ func (s *Server) isGrowthItem(ctx context.Context, guid string) bool {
 	return err == nil && it != nil
 }
 
+// tunableGrowthRodNoWear 是「成长套装竿永不磨损」开关：
+// 1=开（默认）：竿体耐久每次渔获回满，17/9 超载断竿也不落耐久，玩家只丢这一竿鱼；
+// 0=回到旧口径（渔获按鱼重回血、断竿压到下限 0.10）。
+// 单列一个开关是为了实机发现客户端不接受「竿毫发无损」时能只回退这一点，
+// 不影响 growth_item_indestructible 的豁免（钓组仍不销毁）。
+const tunableGrowthRodNoWear = "growth_rod_no_wear"
+
+// growthRodNoWear 判断成长套装竿是否走「永不磨损」口径。
+func (s *Server) growthRodNoWear() bool {
+	return s != nil && s.tunableF(tunableGrowthRodNoWear, 1) > 0
+}
+
+// isGrowthRod 判断某个实例是否为成长套装的竿（growth_item.role='rod'）。
+func (s *Server) isGrowthRod(ctx context.Context, guid string) bool {
+	if s == nil || s.DB == nil || guid == "" {
+		return false
+	}
+	it, err := s.DB.GrowthItemByGUID(ctx, guid)
+	return err == nil && it != nil && it.Role == growthRoleRod
+}
+
+// growthRodNoWearTx 是事务版判定：17/9 断竿已持有 sqlite 写锁，
+// 另开连接查 s.DB 会阻塞到 context 超时（实测 5 s 断件失败）。
+func (s *Server) growthRodNoWearTx(ctx context.Context, tx *sql.Tx, guid string) bool {
+	if s == nil || tx == nil || guid == "" || s.tunableF(tunableGrowthRodNoWear, 1) <= 0 {
+		return false
+	}
+	var role string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM growth_item WHERE guid=? LIMIT 1`, guid).Scan(&role); err != nil {
+		return false
+	}
+	return role == growthRoleRod
+}
+
 // tunableGrowthItemIndestructible 是「成长套装件抗硬报废」开关：
 // 1=开（默认，成长件断竿只压耐久到下限）；0=完全回到官服口径（耐久归零、组件销毁）。
 // 放在 tunable 里是为了实机发现客户端不接受「10% 的断竿」时能一键回退，不用重编。

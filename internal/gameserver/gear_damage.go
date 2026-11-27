@@ -1607,12 +1607,21 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 	spared := s.growthBreakSparedTx(ctx, tx, rodGUID)
 	after := 0.0
 	if spared {
+		// 成长竿默认走「永不磨损」：超载只判这一竿鱼跑掉，耐久按回满写回。
+		// 旧口径压到 0.10，界面显示「损耗 90%」而竿体又没有修复入口，
+		// 玩家会误以为这根竿报废了；回满后客户端 4/22 刷新拿到的是完好的竿。
 		after = growthDurabilityFloor
+		if s.growthRodNoWearTx(ctx, tx, rodGUID) {
+			after = 1.0
+		}
 	}
 	idx := fieldIdxByCS(rod.WireClass, csDurability)
-	if idx < 0 || !setWireFloat(fields, rod.WireClass, idx, after) {
+	if idx < 0 {
 		return nil, errDurabilityField
 	}
+	// setWireFloat 的返回值只表示「改没改动」，不是成败判据：永不磨损口径下
+	// 竿本来就满耐久，写回同值必然返回 false，不能据此判断件失败。
+	_ = setWireFloat(fields, rod.WireClass, idx, after)
 	rod.Durability = after
 	if err := updateItemFieldsTx(ctx, s.DB, tx, rod, fields); err != nil {
 		return nil, err

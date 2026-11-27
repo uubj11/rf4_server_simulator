@@ -46,7 +46,7 @@ func TestSparseReelSnapshotKeepsCatchSettlement(t *testing.T) {
 		t.Fatalf("这条用例必须触发一次写入（before=%v want=%v）", row.Durability, want)
 	}
 
-	cw, err := catchWearForItem(row, "default", 20.893, true, 6, 0)
+	cw, err := catchWearForItem(row, "default", 20.893, true, false, 6, 0)
 	if err != nil {
 		t.Fatalf("快照不含耐久槽不该让整条结算失败: %v", err)
 	}
