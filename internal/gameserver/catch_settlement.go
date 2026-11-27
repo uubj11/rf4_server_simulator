@@ -96,7 +96,7 @@ func (s *Server) prepareCatchWear(ctx context.Context, uid int64, rigGUID string
 	}
 	var out []catchWear
 	seen := map[string]bool{}
-	rodNoWear := s.growthRodNoWear() && s.isGrowthRod(ctx, rigGUID)
+	rodNoWear := s.growthRodNoWear() && s.isGrowthPoleRod(ctx, rigGUID)
 	add := func(guid, key string, slot, ordinal int64, noWear bool) error {
 		if guid == "" || seen[guid] {
 			return nil

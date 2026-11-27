@@ -100,3 +100,60 @@ func TestGrowthRodBreakSwitchOffKeepsFloor(t *testing.T) {
 		t.Fatalf("关掉永不磨损后耐久应停在下限 %.2f，实得 %.4f", growthDurabilityFloor, got)
 	}
 }
+
+// 只有「手杆成长套装」那根竿命中永不磨损；其它套装的竿（海钓/底钓/路亚/浮漂 tele）
+// 必须落在旧口径：识别函数直接返回 false，17/9 超载后耐久压到下限 0.10。
+func TestOnlyGrowthPoleRodIsNoWearScope(t *testing.T) {
+	t.Parallel()
+	srv, db := newRigTestServer(t)
+	ctx := context.Background()
+	const uid = int64(1000001)
+
+	poleRod, err := srv.CreateItem(ctx, uid, "tele_10166_BK8", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spinRod, err := srv.CreateItem(ctx, uid, "spin_10105_SPXF98H", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range []store.GrowthItem{
+		{GUID: poleRod.GUID, UID: uid, SetKey: growthPoleRodNoWearSetKey, Role: growthRoleRod},
+		{GUID: spinRod.GUID, UID: uid, SetKey: "growth_spin", Role: growthRoleRod},
+	} {
+		if err := db.GrowthItemInsert(ctx, it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !srv.isGrowthPoleRod(ctx, poleRod.GUID) {
+		t.Fatal("手杆套的竿应命中永不磨损口径")
+	}
+	if srv.isGrowthPoleRod(ctx, spinRod.GUID) {
+		t.Fatal("路亚套的竿不得命中永不磨损口径")
+	}
+
+	// 路亚竿走 17/9：仍是旧口径（耐久 0.10），竿与组件按成长件豁免保留。
+	line, err := srv.CreateItem(ctx, uid, "braid_15048", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := srv.CreateItem(ctx, uid, "clas_20472", "backpack", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newProbeSess(srv)
+	mountGearForTest(t, srv, sess, spinRod.GUID, line.GUID)
+	mountGearForTest(t, srv, sess, spinRod.GUID, hook.GUID)
+	setTestLineLengthM(t, db, line.GUID, 50)
+
+	tree := rigRequestTree(t, proto.Guid(spinRod.GUID), proto.Guid(spinRod.GUID), proto.U32(1), proto.Null())
+	hctx := &Ctx{Sess: sess, Main: 17, Sub: 9, Tree: tree,
+		Body:     lineBreakBodyWithLineOut(0),
+		DecodeOK: true, ExpectResponse: true, Log: logging.Discard()}
+	if _, ok := hDynamicRodBreak(hctx); !ok {
+		t.Fatal("17/9 断竿未处理")
+	}
+	if got := mustItem(t, db, spinRod.GUID).Durability; math.Abs(got-growthDurabilityFloor) > 1e-9 {
+		t.Fatalf("非手杆套装仍应压到下限 %.2f，实得 %.4f", growthDurabilityFloor, got)
+	}
+}

@@ -57,38 +57,49 @@ func (s *Server) isGrowthItem(ctx context.Context, guid string) bool {
 	return err == nil && it != nil
 }
 
-// tunableGrowthRodNoWear 是「成长套装竿永不磨损」开关：
-// 1=开（默认）：竿体耐久每次渔获回满，17/9 超载断竿也不落耐久，玩家只丢这一竿鱼；
+// growthPoleRodNoWearSetKey 是「永不磨损」唯一生效的套装：手杆成长套装（无轮手竿）。
+// 用户口径（2026-11-27）：只有成长手杆永不磨损，其余成长装备（海钓/底钓/路亚/浮漂竿，
+// 以及所有轮/线/钩/前导/浮漂/转环）保持原机制——渔获按鱼重回血、断竿压到下限。
+const growthPoleRodNoWearSetKey = "growth_pole"
+
+// tunableGrowthRodNoWear 是「成长手杆永不磨损」开关：
+// 1=开（默认）：手杆套的竿体耐久每次渔获回满，17/9 超载断竿也不落耐久，玩家只丢这一竿鱼；
 // 0=回到旧口径（渔获按鱼重回血、断竿压到下限 0.10）。
 // 单列一个开关是为了实机发现客户端不接受「竿毫发无损」时能只回退这一点，
 // 不影响 growth_item_indestructible 的豁免（钓组仍不销毁）。
 const tunableGrowthRodNoWear = "growth_rod_no_wear"
 
-// growthRodNoWear 判断成长套装竿是否走「永不磨损」口径。
+// growthRodNoWear 判断「永不磨损」总开关是否打开。
 func (s *Server) growthRodNoWear() bool {
 	return s != nil && s.tunableF(tunableGrowthRodNoWear, 1) > 0
 }
 
-// isGrowthRod 判断某个实例是否为成长套装的竿（growth_item.role='rod'）。
-func (s *Server) isGrowthRod(ctx context.Context, guid string) bool {
+// isGrowthPoleRod 判断某个实例是否正是「手杆成长套装」那根竿（set_key=growth_pole 且 role=rod）。
+// 其它套装也有 role=rod 的竿（海钓船竿、底钓竿、路亚竿、带轮浮漂 tele 竿），
+// 一律不命中这条口径，保持原有磨损与断竿回血机制。
+func (s *Server) isGrowthPoleRod(ctx context.Context, guid string) bool {
 	if s == nil || s.DB == nil || guid == "" {
 		return false
 	}
 	it, err := s.DB.GrowthItemByGUID(ctx, guid)
-	return err == nil && it != nil && it.Role == growthRoleRod
+	if err != nil || it == nil {
+		return false
+	}
+	return it.Role == growthRoleRod && it.SetKey == growthPoleRodNoWearSetKey
 }
 
-// growthRodNoWearTx 是事务版判定：17/9 断竿已持有 sqlite 写锁，
+// growthPoleRodNoWearTx 是事务版判定：17/9 断竿已持有 sqlite 写锁，
 // 另开连接查 s.DB 会阻塞到 context 超时（实测 5 s 断件失败）。
-func (s *Server) growthRodNoWearTx(ctx context.Context, tx *sql.Tx, guid string) bool {
-	if s == nil || tx == nil || guid == "" || s.tunableF(tunableGrowthRodNoWear, 1) <= 0 {
+func (s *Server) growthPoleRodNoWearTx(ctx context.Context, tx *sql.Tx, guid string) bool {
+	if s == nil || tx == nil || guid == "" || !s.growthRodNoWear() {
 		return false
 	}
-	var role string
-	if err := tx.QueryRowContext(ctx, `SELECT role FROM growth_item WHERE guid=? LIMIT 1`, guid).Scan(&role); err != nil {
+	var setKey, role string
+	if err := tx.QueryRowContext(ctx, `SELECT set_key, role FROM growth_item WHERE guid=? LIMIT 1`, guid).
+		Scan(&setKey, &role); err != nil {
 		return false
 	}
-	return role == growthRoleRod
+	return role == growthRoleRod && setKey == growthPoleRodNoWearSetKey
 }
 
 // tunableGrowthItemIndestructible 是「成长套装件抗硬报废」开关：

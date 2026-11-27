@@ -1607,11 +1607,12 @@ func (s *Server) breakRodTx(ctx context.Context, uid int64, rodGUID, brokenGUID 
 	spared := s.growthBreakSparedTx(ctx, tx, rodGUID)
 	after := 0.0
 	if spared {
-		// 成长竿默认走「永不磨损」：超载只判这一竿鱼跑掉，耐久按回满写回。
+		// 手杆套的竿默认走「永不磨损」：超载只判这一竿鱼跑掉，耐久按回满写回。
 		// 旧口径压到 0.10，界面显示「损耗 90%」而竿体又没有修复入口，
 		// 玩家会误以为这根竿报废了；回满后客户端 4/22 刷新拿到的是完好的竿。
+		// 其它成长套装的竿（海钓/底钓/路亚/浮漂）仍按 0.10 的旧口径处理。
 		after = growthDurabilityFloor
-		if s.growthRodNoWearTx(ctx, tx, rodGUID) {
+		if s.growthPoleRodNoWearTx(ctx, tx, rodGUID) {
 			after = 1.0
 		}
 	}
